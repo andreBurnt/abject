@@ -96,6 +96,76 @@ async function checkSchema(source: string, ev: FitnessEvidence, invoke: Invoker)
   return { check: 'schema', pass: true, detail: 'all outputs validate' };
 }
 
+function fieldValue(el: unknown, field: string): unknown {
+  return el !== null && typeof el === 'object'
+    ? (el as Record<string, unknown>)[field] : undefined;
+}
+
+async function checkRelations(source: string, ev: FitnessEvidence, invoke: Invoker): Promise<CheckResult> {
+  for (const m of ev.methods) {
+    if (!m.relations?.length) continue;
+    const probes = ev.cassettes.byMethod(m.name).map(c => c.args);
+    if (probes.length === 0) probes.push({});
+    for (const args of probes) {
+      let out: unknown;
+      try { out = await invoke(source, m.name, args, stubFor(ev.cassettes)); }
+      catch { continue; } // throwing is replay's failure, not relations'
+      for (const rel of m.relations) {
+        const fail = (why: string): CheckResult =>
+          ({ check: 'relations', pass: false, detail: `${m.name} ${rel.kind}: ${why}` });
+        switch (rel.kind) {
+          case 'idempotent': {
+            const again = await invoke(source, m.name, args, stubFor(ev.cassettes));
+            if (!deepEqual(out, again)) return fail('two identical calls disagreed');
+            break;
+          }
+          case 'no-duplicates': {
+            if (!Array.isArray(out)) return fail('output is not an array');
+            for (let i = 0; i < out.length; i++)
+              for (let j = i + 1; j < out.length; j++)
+                if (deepEqual(out[i], out[j])) return fail(`elements ${i} and ${j} are equal`);
+            break;
+          }
+          case 'sorted-by': {
+            if (!Array.isArray(out)) return fail('output is not an array');
+            if (!rel.field) return fail('sorted-by declared without a field');
+            for (let i = 1; i < out.length; i++) {
+              const a = fieldValue(out[i - 1], rel.field), b = fieldValue(out[i], rel.field);
+              if (a === undefined || b === undefined) return fail(`element missing field '${rel.field}'`);
+              const ok = typeof a === 'string' && typeof b === 'string'
+                ? a.localeCompare(b) <= 0 : (a as number) <= (b as number);
+              if (!ok) return fail(`not sorted at index ${i}`);
+            }
+            break;
+          }
+          case 'subset-on-tighter-filter': {
+            if (!rel.field) return fail('declared without a field');
+            const cs = ev.cassettes.byMethod(m.name)
+              .filter(c => c.args[rel.field!] !== undefined);
+            if (cs.length < 2) break; // insufficient cassettes: vacuous
+            const sorted = [...cs].sort((a, b) =>
+              String(a.args[rel.field!]).localeCompare(String(b.args[rel.field!])));
+            const loose = await invoke(source, m.name, sorted[0].args, stubFor(ev.cassettes));
+            const tight = await invoke(source, m.name, sorted[sorted.length - 1].args, stubFor(ev.cassettes));
+            if (!Array.isArray(loose) || !Array.isArray(tight)) return fail('outputs are not arrays');
+            for (const t of tight)
+              if (!loose.some(l => deepEqual(l, t)))
+                return fail('tighter filter returned an element the looser one lacks');
+            break;
+          }
+          case 'non-empty-for-known-entity': {
+            if (!m.knownEntity) break; // vacuous without a declared entity
+            if (!JSON.stringify(out ?? '').includes(m.knownEntity))
+              return fail(`'${m.knownEntity}' absent from output`);
+            break;
+          }
+        }
+      }
+    }
+  }
+  return { check: 'relations', pass: true, detail: 'all declared relations hold' };
+}
+
 export async function evaluate(candidate: { source: string },
                                evidence: FitnessEvidence,
                                invoker: Invoker,
@@ -110,8 +180,10 @@ export async function evaluate(candidate: { source: string },
   checks.push(schema);
   if (!schema.pass) return { pass: false, checks };
 
-  // Tasks 4 & 5 replace these:
-  checks.push({ check: 'relations', pass: true, detail: 'not yet checked' });
+  const relations = await checkRelations(candidate.source, evidence, invoker);
+  checks.push(relations);
+  if (!relations.pass) return { pass: false, checks };
+
   checks.push({ check: 'mutation', pass: true, detail: 'not yet checked' });
   return { pass: true, checks };
 }

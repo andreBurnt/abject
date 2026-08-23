@@ -71,3 +71,51 @@ test('schema fails when every probe throws and a schema is declared', async () =
   assert.equal(v.checks.find(c => c.check === 'schema')?.pass, false);
   assert.match(v.checks.find(c => c.check === 'schema')!.detail, /no output could be validated/);
 });
+
+const relMethods: MethodDeclaration[] = [{
+  name: 'listEvents', description: '', parameters: [],
+  relations: [{ kind: 'no-duplicates' }, { kind: 'sorted-by', field: 'startsAt' }],
+  knownEntity: 'Weekly Standup',
+}];
+
+const relCassette: Cassette = {
+  method: 'listEvents', args: {},
+  request: { method: 'GET', url: 'https://example.test/events' },
+  response: { status: 200, body: null }, // body unused: sources below ignore http
+  parsedOutput: null as unknown,          // parsedOutput unused: set per-test below
+  recordedAt: 1,
+};
+
+test('relations: duplicates and disorder are caught', async () => {
+  const dupSource = `return [{ startsAt: 'b' }, { startsAt: 'a' }, { startsAt: 'a' }];`;
+  // make replay vacuous: cassette parsedOutput matches the source's constant output
+  const c = { ...relCassette, parsedOutput: [{ startsAt: 'b' }, { startsAt: 'a' }, { startsAt: 'a' }] };
+  const v = await evaluate({ source: dupSource },
+    { cassettes: new CassetteStore([c]), methods: relMethods }, testInvoker);
+  const rel = v.checks.find(x => x.check === 'relations');
+  assert.equal(rel?.pass, false);
+  assert.match(rel!.detail, /no-duplicates|sorted-by/);
+});
+
+test('relations: known entity must appear', async () => {
+  const noEntity = `return [{ startsAt: 'a', name: 'Other Thing' }];`;
+  const c = { ...relCassette, parsedOutput: [{ startsAt: 'a', name: 'Other Thing' }] };
+  const v = await evaluate({ source: noEntity },
+    { cassettes: new CassetteStore([c]),
+      methods: [{ ...relMethods[0], relations: [{ kind: 'non-empty-for-known-entity' }] }] },
+    testInvoker);
+  assert.equal(v.checks.find(x => x.check === 'relations')?.pass, false);
+});
+
+test('relations: a clean output passes all declared relations', async () => {
+  const clean = `return [{ startsAt: 'a', name: 'Weekly Standup' }, { startsAt: 'b', name: 'Other' }];`;
+  const c = { ...relCassette, parsedOutput: [{ startsAt: 'a', name: 'Weekly Standup' }, { startsAt: 'b', name: 'Other' }] };
+  const v = await evaluate({ source: clean },
+    { cassettes: new CassetteStore([c]),
+      methods: [{ ...relMethods[0], relations: [
+        { kind: 'no-duplicates' }, { kind: 'sorted-by', field: 'startsAt' },
+        { kind: 'non-empty-for-known-entity' }, { kind: 'idempotent' },
+      ] }] },
+    testInvoker);
+  assert.equal(v.checks.find(x => x.check === 'relations')?.pass, true);
+});
