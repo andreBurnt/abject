@@ -8,6 +8,7 @@
  * failure short-circuits.
  */
 import Ajv from 'ajv';
+import { createHash } from 'node:crypto';
 import { CassetteStore } from './cassette.js';
 import { generateMutants } from './mutants.js';
 import type { MethodDeclaration } from '../core/types.js';
@@ -230,4 +231,22 @@ export async function evaluate(candidate: { source: string },
   checks.push({ check: 'mutation', pass,
     detail: `${killed}/${mutants.length} mutants killed (threshold ${killThreshold})` });
   return { pass, checks, killRatio };
+}
+
+export function sourceDigest(source: string): string {
+  return createHash('sha256').update(source).digest('hex');
+}
+
+/** The hard gate deploy ops consult. A deploy may proceed only when the
+ *  CURRENT draft has a passing verdict -- verdicts do not survive edits. */
+export function deployGate(state: { fitnessVerdict?: Verdict; fitnessSourceDigest?: string },
+                           draftSource: string): { ok: true } | { ok: false; error: string } {
+  if (!state.fitnessVerdict || state.fitnessSourceDigest !== sourceDigest(draftSource)) {
+    return { ok: false, error: 'deploy refused: no passing fitness verdict for this draft — run fitness' };
+  }
+  if (!state.fitnessVerdict.pass) {
+    const failed = state.fitnessVerdict.checks.find(c => !c.pass);
+    return { ok: false, error: `deploy refused: fitness failed (${failed?.check}: ${failed?.detail})` };
+  }
+  return { ok: true };
 }
