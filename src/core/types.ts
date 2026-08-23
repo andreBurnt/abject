@@ -63,11 +63,32 @@ export type ErrorMessage = AbjectMessage<AbjectError>;
 // Interface Declaration
 // =============================================================================
 
+/** C2 contract: what calling a method does to the world. Reads are safe to
+ *  generate and heal autonomously; acts must cross a hand-written gate. */
+export type MethodEffect = 'read' | 'act';
+
+/** C2 contract: a metamorphic relation the method's outputs must satisfy.
+ *  Checked by the fitness gate (src/protocol/fitness.ts) — never by an LLM. */
+export interface RelationDeclaration {
+  kind: 'subset-on-tighter-filter' | 'idempotent' | 'no-duplicates'
+      | 'sorted-by' | 'non-empty-for-known-entity';
+  /** 'sorted-by': output field to be non-decreasing on.
+   *  'subset-on-tighter-filter': the argument that narrows the result. */
+  field?: string;
+}
+
 export interface MethodDeclaration {
   name: string;
   description: string;
   parameters: ParameterDeclaration[];
   returns?: TypeDeclaration;
+  /** C2 contract fields — all optional; legacy manifests are untouched. */
+  effects?: MethodEffect;
+  /** JSON Schema the method's return value must validate against. */
+  outputSchema?: Record<string, unknown>;
+  relations?: RelationDeclaration[];
+  /** A value that must appear somewhere in a healthy output (known-entity probe). */
+  knownEntity?: string;
 }
 
 export interface ParameterDeclaration {
