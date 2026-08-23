@@ -8,6 +8,7 @@ function mk(n: number, method = 'listEvents'): Cassette {
     method, args: { q: n },
     request: { method: 'GET', url: `https://example.test/events?q=${n}` },
     response: { status: 200, body: [{ id: n }] },
+    rawBody: `[{"id":${n}}]`,
     parsedOutput: [{ id: n }],
     recordedAt: n,
   };
@@ -29,17 +30,34 @@ test('store caps per method with LRU eviction', () => {
   assert.equal(kept[0].recordedAt, 5); // 0..4 evicted
 });
 
-test('matchRequest finds exact url, then host+path fallback', () => {
+test('matchRequest is exact: a different query string is a different request', () => {
   const s = new CassetteStore([mk(1)]);
   assert.ok(s.matchRequest({ method: 'GET', url: 'https://example.test/events?q=1' }));
-  assert.ok(s.matchRequest({ method: 'GET', url: 'https://example.test/events?q=other' }));
+  // ?q=other is NOT ?q=1 — serving it would defeat argument-dependent replay.
+  assert.equal(s.matchRequest({ method: 'GET', url: 'https://example.test/events?q=other' }), undefined);
   assert.equal(s.matchRequest({ method: 'GET', url: 'https://elsewhere.test/events' }), undefined);
+});
+
+test('matchRequestLoose falls back to host+path when no exact match exists', () => {
+  const s = new CassetteStore([mk(1)]);
+  assert.ok(s.matchRequestLoose({ method: 'GET', url: 'https://example.test/events?q=1' }));
+  assert.ok(s.matchRequestLoose({ method: 'GET', url: 'https://example.test/events?q=other' }));
+  assert.equal(s.matchRequestLoose({ method: 'GET', url: 'https://elsewhere.test/events' }), undefined);
 });
 
 test('toJSON/fromJSON round-trips and skips malformed entries', () => {
   const s = new CassetteStore([mk(1), mk(2)]);
   const back = CassetteStore.fromJSON(JSON.parse(JSON.stringify(s.toJSON())));
   assert.equal(back.all().length, 2);
+  assert.equal(back.all()[0].rawBody, '[{"id":1}]');
   const dirty = CassetteStore.fromJSON([mk(3), { junk: true }, 42]);
   assert.equal(dirty.all().length, 1);
+});
+
+test('fromJSON derives rawBody for entries recorded before it existed', () => {
+  const legacy = { ...mk(7) } as Partial<Cassette>;
+  delete legacy.rawBody;
+  const store = CassetteStore.fromJSON([legacy]);
+  assert.equal(store.all().length, 1);
+  assert.equal(store.all()[0].rawBody, JSON.stringify([{ id: 7 }]));
 });

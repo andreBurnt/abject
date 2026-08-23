@@ -23,6 +23,7 @@ const cassette: Cassette = {
   method: 'listEvents', args: { q: 1 },
   request: { method: 'GET', url: 'https://example.test/events?q=1' },
   response: { status: 200, body: [{ id: 1, startsAt: '2026-08-23' }] },
+  rawBody: '[{"id":1,"startsAt":"2026-08-23"}]',
   parsedOutput: [{ id: 1, startsAt: '2026-08-23' }],
   recordedAt: 1,
 };
@@ -82,6 +83,7 @@ const relCassette: Cassette = {
   method: 'listEvents', args: {},
   request: { method: 'GET', url: 'https://example.test/events' },
   response: { status: 200, body: null }, // body unused: sources below ignore http
+  rawBody: 'null',
   parsedOutput: null as unknown,          // parsedOutput unused: set per-test below
   recordedAt: 1,
 };
@@ -141,7 +143,8 @@ test('relations: subset-on-tighter-filter orders numeric filter args numerically
   const mk = (q: number, out: unknown[]) => ({
     method: 'listEvents', args: { q },
     request: { method: 'GET', url: `https://example.test/events?q=${q}` },
-    response: { status: 200, body: out }, parsedOutput: out, recordedAt: q,
+    response: { status: 200, body: out }, rawBody: JSON.stringify(out),
+    parsedOutput: out, recordedAt: q,
   });
   // q=2 (looser, returns 2 items), q=10 (tighter, returns subset of 1)
   const outputs: Record<number, unknown[]> = { 2: [{ id: 1 }, { id: 2 }], 10: [{ id: 1 }] };
@@ -183,6 +186,7 @@ test('mutation gate counts kills on a source with real mutation points', async (
     method: 'listEvents', args: {},
     request: { method: 'GET', url: 'https://example.test/events' },
     response: { status: 200, body: [{ kind: 'event', id: 1 }, { kind: 'other', id: 2 }] },
+    rawBody: '[{"kind":"event","id":1},{"kind":"other","id":2}]',
     parsedOutput: [{ kind: 'event', id: 1 }],
     recordedAt: 1,
   };

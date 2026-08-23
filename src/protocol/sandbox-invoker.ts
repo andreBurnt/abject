@@ -7,7 +7,11 @@
 import { runSandboxed } from '../core/sandbox.js';
 import type { Invoker, HttpStub } from './fitness.js';
 
-const HTTP_TARGETS = new Set(['HttpClient', 'WebFetch']);
+// HttpClient only. WebFetch's live return shape (FetchResult) is nothing
+// like an HttpResponse, so shimming it here would teach a candidate a
+// contract the runtime does not honour; a WebFetch-using candidate fails
+// with a plain unstubbed-I/O message until a real stub exists.
+const HTTP_TARGETS = new Set(['HttpClient']);
 
 /** A sandboxed candidate gets a bounded synchronous timeout -- generous for
  *  real handler logic, cheap insurance against a mutant that spins. It does
@@ -25,7 +29,16 @@ function makeCall(http: HttpStub) {
       : String(payload?.method ?? 'GET').toUpperCase();
     const hit = http({ method: httpMethod, url });
     if (!hit) throw new Error(`fitness: unstubbed I/O -- no cassette for ${httpMethod} ${url}`);
-    return { status: hit.status, body: hit.body };
+    // The exact shape HttpClient's ask guide teaches objects: body is ALWAYS
+    // a raw string (`JSON.parse(result.body)`), ok is 2xx. A candidate judged
+    // against any other shape is judged against a runtime that does not exist.
+    return {
+      status: hit.status,
+      statusText: '',
+      headers: {} as Record<string, string>,
+      body: hit.rawBody,
+      ok: hit.status >= 200 && hit.status < 300,
+    };
   };
 }
 

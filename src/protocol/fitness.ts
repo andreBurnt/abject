@@ -13,7 +13,11 @@ import { CassetteStore } from './cassette.js';
 import { generateMutants } from './mutants.js';
 import type { MethodDeclaration } from '../core/types.js';
 
-export interface HttpExchange { status: number; body: unknown; }
+/** One recorded response, as the fitness gate hands it to an invoker's HTTP
+ *  shim. `rawBody` is the response text verbatim -- the shim must return it
+ *  unchanged, because HttpClient promises objects a raw string body. `body`
+ *  is the same response already parsed, for invokers that want it. */
+export interface HttpExchange { status: number; body: unknown; rawBody: string; }
 export type HttpStub = (req: { method: string; url: string }) => HttpExchange | undefined;
 export type Invoker = (source: string, method: string,
                        args: Record<string, unknown>, http: HttpStub) => Promise<unknown>;
@@ -40,7 +44,9 @@ function deepEqual(a: unknown, b: unknown): boolean {
 function stubFor(cassettes: CassetteStore): HttpStub {
   return req => {
     const hit = cassettes.matchRequest({ method: req.method, url: req.url });
-    return hit ? { status: hit.response.status, body: hit.response.body } : undefined;
+    return hit
+      ? { status: hit.response.status, body: hit.response.body, rawBody: hit.rawBody }
+      : undefined;
   };
 }
 

@@ -20,11 +20,20 @@ export interface Cassette {
   args: Record<string, unknown>;
   request: CassetteRequest;
   response: { status: number; body: unknown };
+  /** The response body EXACTLY as the world sent it, before any parsing.
+   *  HttpClient's contract says `body` is always a raw string, so replay must
+   *  hand back the same characters — `JSON.stringify(parsed)` is not the same
+   *  text for a JSON string primitive, and the round-trip loses meaning. */
+  rawBody: string;
   parsedOutput: unknown;
   recordedAt: number;
 }
 
 export const CASSETTE_CAP_PER_METHOD = 20;
+
+/** The method name recorded for raw HTTP traffic. These cassettes are stubs
+ *  for the object's own calls, never a method the fitness gate can replay. */
+export const HTTP_CASSETTE_METHOD = '_http';
 
 const REDACTED_HEADERS = new Set(['authorization', 'cookie', 'set-cookie']);
 
@@ -39,6 +48,12 @@ export function redactRequest(req: CassetteRequest): CassetteRequest {
 
 function hostPath(url: string): string | undefined {
   try { const u = new URL(url); return `${u.host}${u.pathname}`; } catch { return undefined; }
+}
+
+/** Cassettes recorded before `rawBody` existed derive it from the parsed
+ *  body. Lossy for a JSON string primitive, but honest and never undefined. */
+function rawBodyOf(c: Cassette): string {
+  return typeof c.rawBody === 'string' ? c.rawBody : (JSON.stringify(c.response.body) ?? '');
 }
 
 function isCassette(c: unknown): c is Cassette {
@@ -60,7 +75,7 @@ export class CassetteStore {
   }
 
   add(c: Cassette): void {
-    this.cassettes.push({ ...c, request: redactRequest(c.request) });
+    this.cassettes.push({ ...c, request: redactRequest(c.request), rawBody: rawBodyOf(c) });
     const forMethod = this.cassettes.filter(x => x.method === c.method);
     if (forMethod.length > CASSETTE_CAP_PER_METHOD) {
       const evict = forMethod
@@ -78,9 +93,19 @@ export class CassetteStore {
 
   all(): Cassette[] { return [...this.cassettes]; }
 
+  /** Exact method+url only. Replay is argument-dependent: `?q=1` and
+   *  `?q=other` are different questions, and answering one with the other's
+   *  recording would let a candidate "reproduce" traffic it never made. */
   matchRequest(req: CassetteRequest): Cassette | undefined {
-    const exact = this.cassettes.find(
+    return this.cassettes.find(
       c => c.request.method === req.method && c.request.url === req.url);
+  }
+
+  /** Exact match, else any recording of the same host+path. Deliberately NOT
+   *  used by the replay seam — kept for callers that want a representative
+   *  sample of an endpoint rather than an answer to a specific question. */
+  matchRequestLoose(req: CassetteRequest): Cassette | undefined {
+    const exact = this.matchRequest(req);
     if (exact) return exact;
     const hp = hostPath(req.url);
     if (!hp) return undefined;

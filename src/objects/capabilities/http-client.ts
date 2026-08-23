@@ -312,12 +312,13 @@ export class HttpClient extends Abject {
     // cassette store and never touches the network. A miss throws.
     const replayed = beforeRequest(callerId, { method: req.method, url: req.url, headers: req.headers });
     if (replayed) {
-      const body = typeof replayed.body === 'string' ? replayed.body : JSON.stringify(replayed.body);
+      // A full HttpResponse, with the recorded body text verbatim — the
+      // caller must not be able to tell replay from the live network.
       return {
         status: replayed.status,
         statusText: '',
         headers: replayed.headers,
-        body,
+        body: replayed.rawBody,
         ok: replayed.status >= 200 && replayed.status < 300,
       };
     }
@@ -369,7 +370,7 @@ export class HttpClient extends Abject {
           // not JSON — keep parsedBody as the raw text
         }
         afterResponse(callerId, { method: req.method, url: req.url, headers: req.headers },
-          { status: response.status, body: parsedBody });
+          { status: response.status, body: parsedBody, rawBody: body });
 
         return {
           status: response.status,
