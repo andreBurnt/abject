@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { buildSandboxInvoker } from '../protocol/sandbox-invoker.js';
+import { buildSandboxInvoker, FITNESS_INVOCATION_TIMEOUT_MS } from '../protocol/sandbox-invoker.js';
 import { deployGate, evaluate } from '../protocol/fitness.js';
 import { CassetteStore, type Cassette } from '../protocol/cassette.js';
 import type { MethodDeclaration } from '../core/types.js';
@@ -71,6 +71,60 @@ test('sandbox invoker refuses unstubbed I/O', async () => {
     { cassettes: new CassetteStore([cassette]), methods }, invoker, { maxMutants: 0 });
   assert.equal(v.pass, false);
   assert.match(v.checks[0].detail, /unstubbed I\/O/);
+});
+
+test('a handler reaches its siblings through `this`, as it does at runtime', async () => {
+  const withHelper = `{
+    async listEvents(msg) {
+      const res = await call('HttpClient', 'get', { url: 'https://example.test/events' });
+      if (!res.ok) throw new Error('http ' + res.status);
+      return this.shape(JSON.parse(res.body));
+    },
+    shape(items) { return items.map(e => ({ id: e.id })); }
+  }`;
+  const v = await evaluate({ source: withHelper },
+    { cassettes: new CassetteStore([cassette]), methods }, buildSandboxInvoker(), { maxMutants: 0 });
+  assert.equal(v.pass, true, JSON.stringify(v.checks));
+});
+
+test('the handler proxy carries the members the runtime proxy carries', async () => {
+  const usesProxy = `{
+    async listEvents(msg) {
+      this.ensure(typeof this.id === 'string', 'id must be a string');
+      this.invariant(this.data && typeof this.data === 'object', 'data must be an object');
+      this.data.seen = true;
+      await this.saveData();
+      this.emit('Somewhere', 'looked', {});
+      this.changed('items');
+      this.observe('Somewhere');
+      return [{ id: this.data.seen ? 1 : 0 }];
+    }
+  }`;
+  const v = await evaluate({ source: usesProxy },
+    { cassettes: new CassetteStore([cassette]), methods }, buildSandboxInvoker(), { maxMutants: 0 });
+  assert.equal(v.pass, true, JSON.stringify(v.checks));
+});
+
+test('ensure/invariant throw on a falsy condition', async () => {
+  const breach = `{ async listEvents(msg) { this.ensure(false, 'nope'); return []; } }`;
+  const v = await evaluate({ source: breach },
+    { cassettes: new CassetteStore([cassette]), methods }, buildSandboxInvoker(), { maxMutants: 0 });
+  assert.equal(v.pass, false);
+  assert.match(v.checks[0].detail, /ContractViolation \(ensure\): nope/);
+});
+
+test('an invocation that never returns is killed by the deadline', async () => {
+  // runSandboxed's own timeout is synchronous-only, so an await inside a
+  // flipped loop used to hang evaluate forever.
+  assert.equal(FITNESS_INVOCATION_TIMEOUT_MS, 5000);
+  const hangs = `{ async listEvents(msg) { await new Promise(() => {}); return []; } }`;
+  const started = Date.now();
+  const v = await evaluate({ source: hangs },
+    { cassettes: new CassetteStore([cassette]), methods },
+    buildSandboxInvoker({ timeoutMs: 100 }), { maxMutants: 0 });
+  assert.equal(v.pass, false);
+  assert.match(v.checks[0].detail, /fitness: invocation timeout/);
+  assert.ok(Date.now() - started < 4000, 'the gate must not wait on a hung candidate');
 });
 
 test('deployGate refuses without a verdict, with a failed verdict, and on a stale digest', () => {

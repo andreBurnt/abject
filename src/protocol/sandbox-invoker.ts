@@ -19,6 +19,19 @@ const HTTP_TARGETS = new Set(['HttpClient']);
  *  synchronous portions of the compile + call. */
 const SANDBOX_TIMEOUT_MS = 5000;
 
+/** Wall-clock ceiling on ONE judged invocation, compile included. The vm's
+ *  own timeout is synchronous-only, so a mutant that flips a loop guard and
+ *  awaits inside it hangs evaluate forever with nothing to interrupt it.
+ *  A timing-out mutant is thereby killed; a timing-out candidate fails. */
+export const FITNESS_INVOCATION_TIMEOUT_MS = 5000;
+
+/** Members the handler proxy owns; user members never shadow them.
+ *  Mirrors ScriptableAbject.PROXY_BUILTINS. */
+const PROXY_BUILTINS = new Set([
+  'call', 'dep', 'find', 'changed', 'emit', 'observe', 'id',
+  'data', 'saveData', 'ensure', 'invariant',
+]);
+
 function makeCall(http: HttpStub) {
   return async (target: string, method: string, payload: Record<string, unknown>) => {
     if (!HTTP_TARGETS.has(target)) {
@@ -42,8 +55,47 @@ function makeCall(http: HttpStub) {
   };
 }
 
-export function buildSandboxInvoker(): Invoker {
-  return async (source, method, args, http) => {
+/** Reject if `p` has not settled within `ms`. The hung promise is abandoned,
+ *  not cancelled -- nothing in a vm can be cancelled -- but it holds no timer
+ *  of its own, so it never keeps the process alive. */
+function withDeadline<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error('fitness: invocation timeout')), ms);
+  });
+  return Promise.race([p, deadline]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * A minimal stand-in for ScriptableAbject's handler proxy. Handlers are bound
+ * to it, so `this.sibling(...)` resolves the way it does in the live runtime
+ * -- without one, a two-method object (the house style: a thin handler over a
+ * private helper) failed judgment on a `this` the gate itself withheld.
+ * State-mutating members are inert: judgment must not persist anything.
+ */
+function buildHandlerProxy(call: ReturnType<typeof makeCall>): Record<string, unknown> {
+  return {
+    call,
+    dep: (name: string) => name,
+    find: () => { throw new Error('fitness: unstubbed I/O -- find()'); },
+    data: {},
+    saveData: async () => {},
+    emit: () => {},
+    changed: () => {},
+    observe: () => {},
+    ensure: (cond: unknown, message?: string) => {
+      if (!cond) throw new Error(`ContractViolation (ensure): ${message ?? 'condition failed'}`);
+    },
+    invariant: (cond: unknown, message?: string) => {
+      if (!cond) throw new Error(`ContractViolation (invariant): ${message ?? 'invariant failed'}`);
+    },
+    id: 'fitness-candidate',
+  };
+}
+
+export function buildSandboxInvoker(opts?: { timeoutMs?: number }): Invoker {
+  const timeoutMs = opts?.timeoutMs ?? FITNESS_INVOCATION_TIMEOUT_MS;
+  return (source, method, args, http) => withDeadline((async () => {
     const call = makeCall(http);
     // runSandboxed wraps its code in `(async () => { CODE })()`; a bare
     // parenthesized object expression as a statement evaluates and discards
@@ -53,11 +105,23 @@ export function buildSandboxInvoker(): Invoker {
       call,
       dep: (name: string) => name,
       find: () => { throw new Error('fitness: unstubbed I/O -- find()'); },
-    }, { timeout: SANDBOX_TIMEOUT_MS }) as Record<string, (msg: { payload: Record<string, unknown> }) => Promise<unknown>>;
-    const handler = handlers?.[method] ?? handlers?.['*'];
-    if (typeof handler !== 'function') {
-      throw new Error(`fitness: source has no handler for '${method}'`);
+    }, { timeout: SANDBOX_TIMEOUT_MS }) as Record<string, unknown> | null;
+
+    const proxy = buildHandlerProxy(call);
+    const bound = new Map<string, (msg: { payload: Record<string, unknown> }) => Promise<unknown>>();
+    for (const [key, value] of Object.entries(handlers ?? {})) {
+      if (typeof value === 'function') {
+        const fn = (value as (...a: unknown[]) => unknown).bind(proxy) as
+          (msg: { payload: Record<string, unknown> }) => Promise<unknown>;
+        bound.set(key, fn);
+        if (!PROXY_BUILTINS.has(key)) proxy[key] = fn;
+      } else if (!PROXY_BUILTINS.has(key)) {
+        proxy[key] = value; // state property, same as the runtime does
+      }
     }
+
+    const handler = bound.get(method) ?? bound.get('*');
+    if (!handler) throw new Error(`fitness: source has no handler for '${method}'`);
     return handler({ payload: args });
-  };
+  })(), timeoutMs);
 }
