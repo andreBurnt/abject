@@ -119,3 +119,37 @@ test('relations: a clean output passes all declared relations', async () => {
     testInvoker);
   assert.equal(v.checks.find(x => x.check === 'relations')?.pass, true);
 });
+
+test('relations: a throwing second invocation fails idempotent instead of rejecting evaluate', async () => {
+  // stateful source: first call returns [], second call throws
+  let calls = 0;
+  const flakyInvoker: Invoker = async (source, method, args, http) => {
+    calls++;
+    if (calls > 2) throw new Error('flaky');
+    return [];
+  };
+  const c = { ...relCassette, parsedOutput: [] as unknown };
+  const v = await evaluate({ source: 'return [];' },
+    { cassettes: new CassetteStore([c]),
+      methods: [{ ...relMethods[0], relations: [{ kind: 'idempotent' as const }] }] },
+    flakyInvoker);
+  assert.equal(v.pass, false);
+  assert.match(v.checks.find(x => x.check === 'relations')!.detail, /second call threw/);
+});
+
+test('relations: subset-on-tighter-filter orders numeric filter args numerically', async () => {
+  const mk = (q: number, out: unknown[]) => ({
+    method: 'listEvents', args: { q },
+    request: { method: 'GET', url: `https://example.test/events?q=${q}` },
+    response: { status: 200, body: out }, parsedOutput: out, recordedAt: q,
+  });
+  // q=2 (looser, returns 2 items), q=10 (tighter, returns subset of 1)
+  const outputs: Record<number, unknown[]> = { 2: [{ id: 1 }, { id: 2 }], 10: [{ id: 1 }] };
+  const numInvoker: Invoker = async (_s, _m, args) => outputs[args.q as number];
+  const v = await evaluate({ source: 'irrelevant' },
+    { cassettes: new CassetteStore([mk(2, outputs[2]), mk(10, outputs[10])]),
+      methods: [{ name: 'listEvents', description: '', parameters: [],
+        relations: [{ kind: 'subset-on-tighter-filter' as const, field: 'q' }] }] },
+    numInvoker);
+  assert.equal(v.checks.find(x => x.check === 'relations')?.pass, true);
+});

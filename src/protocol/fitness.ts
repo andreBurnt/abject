@@ -115,7 +115,13 @@ async function checkRelations(source: string, ev: FitnessEvidence, invoke: Invok
           ({ check: 'relations', pass: false, detail: `${m.name} ${rel.kind}: ${why}` });
         switch (rel.kind) {
           case 'idempotent': {
-            const again = await invoke(source, m.name, args, stubFor(ev.cassettes));
+            let again: unknown;
+            try {
+              again = await invoke(source, m.name, args, stubFor(ev.cassettes));
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err);
+              return fail(`two identical calls disagreed (second call threw: ${msg})`);
+            }
             if (!deepEqual(out, again)) return fail('two identical calls disagreed');
             break;
           }
@@ -143,10 +149,24 @@ async function checkRelations(source: string, ev: FitnessEvidence, invoke: Invok
             const cs = ev.cassettes.byMethod(m.name)
               .filter(c => c.args[rel.field!] !== undefined);
             if (cs.length < 2) break; // insufficient cassettes: vacuous
-            const sorted = [...cs].sort((a, b) =>
-              String(a.args[rel.field!]).localeCompare(String(b.args[rel.field!])));
-            const loose = await invoke(source, m.name, sorted[0].args, stubFor(ev.cassettes));
-            const tight = await invoke(source, m.name, sorted[sorted.length - 1].args, stubFor(ev.cassettes));
+            const sorted = [...cs].sort((a, b) => {
+              const aVal = a.args[rel.field!], bVal = b.args[rel.field!];
+              if (typeof aVal === 'number' && typeof bVal === 'number') return aVal - bVal;
+              return String(aVal).localeCompare(String(bVal));
+            });
+            let loose: unknown, tight: unknown;
+            try {
+              loose = await invoke(source, m.name, sorted[0].args, stubFor(ev.cassettes));
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err);
+              return fail(`invocation threw during relation check: ${msg}`);
+            }
+            try {
+              tight = await invoke(source, m.name, sorted[sorted.length - 1].args, stubFor(ev.cassettes));
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err);
+              return fail(`invocation threw during relation check: ${msg}`);
+            }
             if (!Array.isArray(loose) || !Array.isArray(tight)) return fail('outputs are not arrays');
             for (const t of tight)
               if (!loose.some(l => deepEqual(l, t)))
