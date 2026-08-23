@@ -3655,9 +3655,19 @@ It is a singleton (not per-workspace) and persists settings in global Storage.
         }));
       } catch { /* mirroring is best-effort */ }
 
-      const decision = await new Promise<string>((resolve) => {
-        this._pendingPermissionPrompt = { resolve };
-      });
+      // A permission question is the one thing in the system that is allowed
+      // to take as long as it likes. The heartbeat holds open every request
+      // stacked up behind it, all the way back to the chat that started the
+      // work, so an answer given after a coffee break still lands somewhere.
+      const stopBeating = this.awaitingHuman(`permission: ${opts.title}`);
+      let decision: string;
+      try {
+        decision = await new Promise<string>((resolve) => {
+          this._pendingPermissionPrompt = { resolve };
+        });
+      } finally {
+        stopBeating();
+      }
 
       return { decision };
     } finally {
@@ -3989,9 +3999,15 @@ It is a singleton (not per-workspace) and persists settings in global Storage.
         }));
       }
 
-      const decision = await new Promise<string>((resolve) => {
-        this._pendingPermissionPrompt = { resolve };
-      });
+      const stopBeating = this.awaitingHuman(`permission: ${skillName}`);
+      let decision: string;
+      try {
+        decision = await new Promise<string>((resolve) => {
+          this._pendingPermissionPrompt = { resolve };
+        });
+      } finally {
+        stopBeating();
+      }
 
       // Persist if allowed
       if (decision === 'accept_always' || decision === 'accept') {

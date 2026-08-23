@@ -36,9 +36,14 @@ const platformInfo: PlatformInfo = {
 const log = new Log('ShellExecutor');
 
 /**
- * How long to wait for a permission answer. The authority queues prompts and a
- * user may be away from the keyboard; the old two-minute limit turned a coffee
- * break into a tool failure the agent then spent steps recovering from.
+ * How long to wait for a permission answer with no sign of life from the
+ * dialog. The authority queues prompts and a user may be away from the
+ * keyboard; the old two-minute limit turned a coffee break into a tool failure
+ * the agent then spent steps recovering from.
+ *
+ * An open dialog heartbeats, and every beat resets this timer, so a question
+ * still on screen waits as long as it takes. Reaching this limit means nothing
+ * is asking anyone anything any more.
  */
 const PERMISSION_WAIT_MS = 31 * 60 * 1000;
 

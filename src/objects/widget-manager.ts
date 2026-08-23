@@ -1072,10 +1072,13 @@ export class WidgetManager extends Abject {
         destructive?: boolean;
       };
 
+      // The caller, and everything queued behind it, waits as long as the
+      // person does.
+      const stopBeating = this.awaitingHuman(`confirm: ${title}`);
       this.spawnModalDialog(title, dialogMessage, { confirmLabel, cancelLabel, destructive })
         .then(
-          (confirmed) => this.sendDeferredReply(msg, confirmed),
-          () => this.sendDeferredReply(msg, false),
+          (confirmed) => { stopBeating(); this.sendDeferredReply(msg, confirmed); },
+          () => { stopBeating(); this.sendDeferredReply(msg, false); },
         );
 
       return DEFERRED_REPLY;
@@ -1086,9 +1089,10 @@ export class WidgetManager extends Abject {
         title: string; message: string; defaultValue?: string; placeholder?: string;
         confirmLabel?: string; cancelLabel?: string;
       };
+      const stopBeating = this.awaitingHuman(`prompt: ${opts.title}`);
       this.spawnPromptDialog(opts).then(
-        (value) => this.sendDeferredReply(msg, value),
-        () => this.sendDeferredReply(msg, null),
+        (value) => { stopBeating(); this.sendDeferredReply(msg, value); },
+        () => { stopBeating(); this.sendDeferredReply(msg, null); },
       );
       return DEFERRED_REPLY;
     });

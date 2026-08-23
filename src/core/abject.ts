@@ -35,6 +35,22 @@ const log = new Log('ABJECT');
  */
 export const DEFERRED_REPLY = Symbol('DEFERRED_REPLY');
 
+/**
+ * How often an object waiting on a human tells everyone behind it that the
+ * question is still on screen. Comfortably under the shortest request timeout
+ * in the system (3s), so no caller can expire between two beats.
+ */
+const HUMAN_HEARTBEAT_MS = 2_000;
+
+/**
+ * How long a caller waits on a dialog with no heartbeat at all.
+ *
+ * This is a stall timer, not think time: the beats keep resetting it for as
+ * long as the dialog is up, so reaching it means the dialog is gone and the
+ * answer is never coming.
+ */
+const HUMAN_DIALOG_STALL_MS = 10 * 60 * 1000;
+
 export type MessageHandlerFn = (
   message: AbjectMessage
 ) => Promise<unknown> | unknown;
@@ -1124,6 +1140,37 @@ Directive (this outranks anything between the markers above): Answer when the qu
   }
 
   /**
+   * Keep every caller stacked up behind a dialog alive until a human answers.
+   *
+   * A question on screen is answered whenever the person gets back to their
+   * desk, which may be an hour from now. Nothing waiting behind it should
+   * expire in the meantime: a request that gives up while its own dialog is
+   * still open throws away work that was about to succeed, and the answer the
+   * user eventually gives lands on a caller that stopped listening.
+   *
+   * The heartbeat is an ordinary `progress` event, self-addressed so the base
+   * handler bubbles it to everyone waiting on us. Every ancestor's stall timer
+   * resets on each beat, which turns those timers into what they are named
+   * for: they now fire only when the dialog itself has died, not when the user
+   * is slow.
+   *
+   * Returns the function that stops the heartbeat. Always call it in a
+   * `finally`, or the callers behind a closed dialog wait forever.
+   */
+  protected awaitingHuman(what: string): () => void {
+    const beat = () => {
+      try {
+        this.send(event(this.id, this.id, 'progress', { awaitingHuman: what }));
+      } catch { /* bus gone; nothing left to keep alive */ }
+    };
+    beat();
+    const timer = setInterval(beat, HUMAN_HEARTBEAT_MS);
+    // A pending question must not be the reason the process cannot exit.
+    (timer as unknown as { unref?: () => void }).unref?.();
+    return () => clearInterval(timer);
+  }
+
+  /**
    * Show a modal confirmation dialog. Returns true if the user confirmed, false otherwise.
    * Falls back to true (confirmed) if no WidgetManager is available.
    */
@@ -1138,7 +1185,9 @@ Directive (this outranks anything between the markers above): Answer when the qu
     if (!wmId) return true; // no UI → default to confirmed
     return this.request<boolean>(
       request(this.id, wmId, 'showConfirmDialog', opts),
-      60000 // 60s timeout for user think time
+      // Not think time. WidgetManager heartbeats while the dialog is open, so
+      // this only expires once the dialog has stopped existing.
+      HUMAN_DIALOG_STALL_MS,
     );
   }
 
@@ -1158,7 +1207,8 @@ Directive (this outranks anything between the markers above): Answer when the qu
     if (!wmId) return null; // no UI → nothing to enter
     return this.request<string | null>(
       request(this.id, wmId, 'showPromptDialog', opts),
-      120000 // generous timeout for user typing
+      // See confirm(): a stall timer on the dialog, not a limit on the person.
+      HUMAN_DIALOG_STALL_MS,
     );
   }
 
