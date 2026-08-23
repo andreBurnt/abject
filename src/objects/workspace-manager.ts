@@ -647,6 +647,12 @@ export class WorkspaceManager extends Abject {
       if (otherId) await this.switchWorkspace(otherId);
     }
 
+    // Remove and persist BEFORE tearing down children: the removal has to reach
+    // storage even if a teardown step throws, or the workspace comes back on the
+    // next load while the caller was told the delete succeeded.
+    this.workspaces.delete(workspaceId);
+    await this.persistWorkspaceList();
+
     // Unregister this workspace's Taskbar from WindowManager
     if (this.windowManagerId) {
       try {
@@ -662,8 +668,28 @@ export class WorkspaceManager extends Abject {
       } catch { /* may already be hidden */ }
     }
 
-    // Kill all per-workspace objects (in reverse order)
+    // Kill all per-workspace objects (in reverse order) — but only objects this
+    // workspace actually owns. childIds can be contaminated with ids that are not
+    // ours (the workspace registry's `list` unions local + global by design), and
+    // killing one of those stops the system objects — this manager included —
+    // halfway through the delete.
+    const protectedIds = new Set<AbjectId>();
+    for (const gid of [this.id, this.factoryId, this.globalRegistryId, this.globalStorageId,
+      this.supervisorId, this.uiServerId, this.widgetManagerId, this.windowManagerId,
+      this.workspaceSwitcherId, this.globalToolbarId, this.sidebarId]) {
+      if (gid) protectedIds.add(gid);
+    }
+    for (const [otherId, other] of this.workspaces) {
+      if (otherId === workspaceId) continue;
+      protectedIds.add(other.registryId);
+      for (const cid of other.childIds) protectedIds.add(cid);
+    }
+
     for (const childId of [...ws.childIds].reverse()) {
+      if (protectedIds.has(childId)) {
+        wsLog.warn(`Refusing to kill non-workspace object ${childId} while deleting '${ws.name}'`);
+        continue;
+      }
       try {
         await this.request(
           request(this.id, this.factoryId!, 'kill', { objectId: childId })
@@ -684,9 +710,6 @@ export class WorkspaceManager extends Abject {
         indexedDB.deleteDatabase(`abjects-storage-${workspaceId}`);
       } catch { /* best effort */ }
     }
-
-    this.workspaces.delete(workspaceId);
-    await this.persistWorkspaceList();
 
     // Rebuild switcher/taskbar with the updated workspace list (the earlier
     // refreshTaskbar inside switchWorkspace ran before the workspace was removed).
@@ -1387,10 +1410,13 @@ export class WorkspaceManager extends Abject {
       }
     }
 
-    // 5. Sync childIds with actual registry contents (picks up restored user objects)
+    // 5. Sync childIds with actual registry contents (picks up restored user objects).
+    // `listLocal`, never `list`: `list` unions this workspace's registry with the
+    // GLOBAL registry, which would adopt every system object as a child of this
+    // workspace and get it killed when the workspace is deleted.
     try {
       const registered = await this.request<Array<{ id: string; typeId?: string }>>(
-        request(this.id, wsRegistryId, 'list', {})
+        request(this.id, wsRegistryId, 'listLocal', {})
       );
       for (const entry of registered) {
         const eid = entry.id as AbjectId;

@@ -13,6 +13,9 @@
  *   - `list` / `listSummaries` always merge local + fallback because callers
  *     (CommandPalette, ProcessExplorer, AppExplorer-style UIs) need the
  *     complete picture: workspace-local Abjects *and* system services.
+ *   - `listLocal` never chains: it answers "which objects does THIS workspace
+ *     own?". Callers deciding lifecycle (WorkspaceManager's delete sweep) must
+ *     use it, or they mistake global system objects for workspace children.
  */
 
 import { AbjectId, AbjectManifest, AbjectMessage, DiscoveryQuery, InterfaceId, ObjectRegistration } from '../core/types.js';
@@ -125,6 +128,10 @@ export class WorkspaceRegistry extends Registry {
       const remote = await this.fallbackListSummaries();
       return mergeById(local as Array<{ id?: string }>, remote as Array<{ id?: string }>);
     });
+
+    // Local-only listing — deliberately does NOT chain to the fallback. This is
+    // the ownership view: only objects registered in this workspace's registry.
+    this.on('listLocal', async () => this.listObjects());
   }
 
   /**
