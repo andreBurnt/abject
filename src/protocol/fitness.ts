@@ -70,17 +70,27 @@ async function checkSchema(source: string, ev: FitnessEvidence, invoke: Invoker)
     const validate = ajv.compile(m.outputSchema);
     const probes = ev.cassettes.byMethod(m.name).map(c => c.args);
     if (probes.length === 0) probes.push({});
+    let validatedCount = 0;
+    let firstError: string | undefined;
     for (const args of probes) {
       let out: unknown;
       try {
         out = await invoke(source, m.name, args, stubFor(ev.cassettes));
-      } catch {
+      } catch (err) {
+        if (!firstError) {
+          firstError = err instanceof Error ? err.message : String(err);
+        }
         continue; // replay already judges throwing; schema judges shape of what returns
       }
       if (!validate(out)) {
         return { check: 'schema', pass: false,
           detail: `${m.name}: ${ajv.errorsText(validate.errors)}` };
       }
+      validatedCount++;
+    }
+    if (validatedCount === 0 && firstError) {
+      return { check: 'schema', pass: false,
+        detail: `${m.name}: no output could be validated (all probes threw: ${firstError})` };
     }
   }
   return { check: 'schema', pass: true, detail: 'all outputs validate' };

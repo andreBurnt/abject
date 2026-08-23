@@ -62,3 +62,12 @@ test('schema fails on schema-invalid output even when there is no cassette for i
   assert.equal(v.checks.find(c => c.check === 'schema')?.pass, false);
   assert.equal(v.pass, false);
 });
+
+test('schema fails when every probe throws and a schema is declared', async () => {
+  const throwing = `throw new Error('not implemented');`;
+  const v = await evaluate({ source: throwing },
+    { cassettes: new CassetteStore([]), methods }, testInvoker);
+  assert.equal(v.pass, false);
+  assert.equal(v.checks.find(c => c.check === 'schema')?.pass, false);
+  assert.match(v.checks.find(c => c.check === 'schema')!.detail, /no output could be validated/);
+});
