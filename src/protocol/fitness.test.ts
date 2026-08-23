@@ -171,3 +171,30 @@ test('maxMutants: 0 skips the mutation gate', async () => {
     { cassettes: new CassetteStore([cassette]), methods }, testInvoker, { maxMutants: 0 });
   assert.equal(v.checks.find(c => c.check === 'mutation')?.detail, 'skipped');
 });
+
+test('mutation gate counts kills on a source with real mutation points', async () => {
+  const KILLABLE_SOURCE = `
+  const res = http({ method: 'GET', url: 'https://example.test/events' });
+  if (!res) throw new Error('no stub');
+  const items = res.body.filter(e => e.kind === 'event');
+  return items;
+`;
+  const killCassette: Cassette = {
+    method: 'listEvents', args: {},
+    request: { method: 'GET', url: 'https://example.test/events' },
+    response: { status: 200, body: [{ kind: 'event', id: 1 }, { kind: 'other', id: 2 }] },
+    parsedOutput: [{ kind: 'event', id: 1 }],
+    recordedAt: 1,
+  };
+  const v = await evaluate({ source: KILLABLE_SOURCE },
+    { cassettes: new CassetteStore([killCassette]),
+      methods: [{ name: 'listEvents', description: '', parameters: [] }] },
+    testInvoker);
+  const mut = v.checks.find(c => c.check === 'mutation');
+  assert.ok(mut, 'mutation check ran');
+  assert.notEqual(mut!.detail, 'no mutation points');
+  // expected mutants: flip '===' -> '!==' (returns the wrong item), drop .filter (returns both) — both killed by replay
+  assert.equal(v.killRatio, 1);
+  assert.equal(mut!.pass, true);
+  assert.match(mut!.detail, /2\/2 mutants killed/);
+});
