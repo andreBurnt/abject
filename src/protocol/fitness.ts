@@ -9,8 +9,9 @@
  */
 import Ajv from 'ajv';
 import { createHash } from 'node:crypto';
-import { CassetteStore } from './cassette.js';
+import { HTTP_CASSETTE_METHOD, type CassetteStore } from './cassette.js';
 import { generateMutants } from './mutants.js';
+import type { Cassette } from './cassette.js';
 import type { MethodDeclaration } from '../core/types.js';
 
 /** One recorded response, as the fitness gate hands it to an invoker's HTTP
@@ -50,8 +51,18 @@ function stubFor(cassettes: CassetteStore): HttpStub {
   };
 }
 
+/** Cassettes the gate may replay as a METHOD call. '_http' cassettes are raw
+ *  traffic the recorder captured on the object's behalf: they are stubs for
+ *  the candidate's own outbound calls (see `stubFor`), not invocations any
+ *  object has a handler for. Replaying them asks for a handler that cannot
+ *  exist, which would brick every heal of an object that ever recorded. */
+function replayable(ev: FitnessEvidence, method?: string): Cassette[] {
+  const all = method === undefined ? ev.cassettes.all() : ev.cassettes.byMethod(method);
+  return all.filter(c => c.method !== HTTP_CASSETTE_METHOD);
+}
+
 async function checkReplay(source: string, ev: FitnessEvidence, invoke: Invoker): Promise<CheckResult> {
-  const all = ev.cassettes.all();
+  const all = replayable(ev);
   if (all.length === 0) {
     return { check: 'replay', pass: true, detail: 'no cassettes yet (first create); probe required by caller' };
   }
@@ -76,7 +87,7 @@ async function checkSchema(source: string, ev: FitnessEvidence, invoke: Invoker)
   for (const m of ev.methods) {
     if (!m.outputSchema) continue;
     const validate = ajv.compile(m.outputSchema);
-    const probes = ev.cassettes.byMethod(m.name).map(c => c.args);
+    const probes = replayable(ev, m.name).map(c => c.args);
     if (probes.length === 0) probes.push({});
     let validatedCount = 0;
     let firstError: string | undefined;
@@ -112,7 +123,7 @@ function fieldValue(el: unknown, field: string): unknown {
 async function checkRelations(source: string, ev: FitnessEvidence, invoke: Invoker): Promise<CheckResult> {
   for (const m of ev.methods) {
     if (!m.relations?.length) continue;
-    const probes = ev.cassettes.byMethod(m.name).map(c => c.args);
+    const probes = replayable(ev, m.name).map(c => c.args);
     if (probes.length === 0) probes.push({});
     for (const args of probes) {
       let out: unknown;
@@ -154,7 +165,7 @@ async function checkRelations(source: string, ev: FitnessEvidence, invoke: Invok
           }
           case 'subset-on-tighter-filter': {
             if (!rel.field) return fail('declared without a field');
-            const cs = ev.cassettes.byMethod(m.name)
+            const cs = replayable(ev, m.name)
               .filter(c => c.args[rel.field!] !== undefined);
             if (cs.length < 2) break; // insufficient cassettes: vacuous
             const sorted = [...cs].sort((a, b) => {
@@ -200,6 +211,21 @@ export async function evaluate(candidate: { source: string },
                                opts?: FitnessOptions): Promise<Verdict> {
   const checks: CheckResult[] = [];
 
+  // No evidence at all. Every check below would then be a probe with invented
+  // arguments against a candidate nothing has ever exercised: a declared
+  // outputSchema would fail on the {} probe, and a handler map would be
+  // mutation-tested with nothing able to kill a single mutant. Both are
+  // verdicts about the EVIDENCE, not the candidate, so say so and pass —
+  // an unverified pass, honestly labelled, beats a fabricated failure.
+  if (evidence.cassettes.all().length === 0) {
+    return { pass: true, checks: [
+      await checkReplay(candidate.source, evidence, invoker), // vacuous: invokes nothing
+      { check: 'schema', pass: true, detail: 'no cassettes — schema unverified' },
+      { check: 'relations', pass: true, detail: 'no cassettes — relations unverified' },
+      { check: 'mutation', pass: true, detail: 'no cassettes — mutation gate requires evidence' },
+    ] };
+  }
+
   const replay = await checkReplay(candidate.source, evidence, invoker);
   checks.push(replay);
   if (!replay.pass) return { pass: false, checks };
@@ -219,6 +245,12 @@ export async function evaluate(candidate: { source: string },
     return { pass: true, checks };
   }
   const mutants = generateMutants(candidate.source, maxMutants);
+  if (mutants === null) {
+    // Not "nothing to break" — the gate could not read the candidate under any
+    // dialect it knows, so the mutation evidence is absent rather than empty.
+    checks.push({ check: 'mutation', pass: false, detail: 'candidate does not parse' });
+    return { pass: false, checks };
+  }
   if (mutants.length === 0) {
     checks.push({ check: 'mutation', pass: true, detail: 'no mutation points' });
     return { pass: true, checks };

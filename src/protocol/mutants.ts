@@ -13,17 +13,42 @@ const FLIP: Record<string, string> = {
   '<': '>=', '>': '<=', '<=': '>', '>=': '<', '===': '!==', '!==': '===', '==': '!=', '!=': '==',
 };
 
-export function generateMutants(source: string, max: number): Mutant[] {
-  if (max <= 0) return [];
-  let ast: acorn.Node;
-  try {
-    // Handler sources are statement lists; wrap so 'return' parses.
-    ast = acorn.parse(`async function __m__(args, http) {${source}\n}`,
-      { ecmaVersion: 'latest', allowAwaitOutsideFunction: true });
-  } catch {
-    return [];
+const PARSE_OPTS: acorn.Options = { ecmaVersion: 'latest', allowAwaitOutsideFunction: true };
+
+/** The dialects a candidate may be written in, most canonical first.
+ *
+ *  The invoker runs a candidate as `return (${source});` — so the house-style
+ *  handler map is an EXPRESSION, and a bare-brace map (`{ async m(){} }`) is a
+ *  valid object literal but NOT a valid block. Parsing only the statement-list
+ *  dialect therefore found zero mutation sites in exactly the sources the gate
+ *  exists to judge. Expression first, statement list second. */
+const WRAPS: ReadonlyArray<{ prefix: string; suffix: string }> = [
+  { prefix: '(', suffix: ')' },
+  { prefix: 'async function __m__(args, http) {', suffix: '\n}' },
+];
+
+interface Parsed { ast: acorn.Node; offset: number; }
+
+function parseCandidate(source: string): Parsed | null {
+  for (const w of WRAPS) {
+    try {
+      return { ast: acorn.parse(`${w.prefix}${source}${w.suffix}`, PARSE_OPTS), offset: w.prefix.length };
+    } catch { /* not this dialect — try the next */ }
   }
-  const offset = 'async function __m__(args, http) {'.length;
+  return null;
+}
+
+/**
+ * Mutants of `source`, or `null` when the source parses under NO supported
+ * dialect. The distinction is load-bearing: an empty list means "nothing here
+ * to break", while null means the gate could not read the candidate at all —
+ * which must fail, not pass.
+ */
+export function generateMutants(source: string, max: number): Mutant[] | null {
+  const parsed = parseCandidate(source);
+  if (!parsed) return null;
+  if (max <= 0) return [];
+  const { ast, offset } = parsed;
   const sites: Site[] = [];
 
   (function walk(node: unknown): void {

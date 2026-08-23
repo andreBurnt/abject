@@ -54,23 +54,97 @@ test('replay fails and short-circuits when output diverges from the cassette', a
   assert.equal(v.checks.some(c => c.check === 'schema'), false); // short-circuit
 });
 
-test('schema fails on schema-invalid output even when there is no cassette for it', async () => {
+test('an empty cassette store yields an honest unverified pass, probing nothing', async () => {
+  const neverInvoked: Invoker = async () => {
+    throw new Error('the gate probed a candidate it has no evidence for');
+  };
+  const v = await evaluate({ source: 'return [{ notId: true }];' },
+    { cassettes: new CassetteStore([]), methods }, neverInvoked);
+  assert.equal(v.pass, true);
+  const detail = (name: string) => v.checks.find(c => c.check === name)!;
+  assert.equal(detail('replay').pass, true);
+  assert.equal(detail('schema').pass, true);
+  assert.equal(detail('schema').detail, 'no cassettes — schema unverified');
+  assert.equal(detail('relations').pass, true);
+  assert.equal(detail('relations').detail, 'no cassettes — relations unverified');
+  assert.equal(detail('mutation').pass, true);
+  assert.equal(detail('mutation').detail, 'no cassettes — mutation gate requires evidence');
+  assert.equal(v.killRatio, undefined);
+});
+
+test('schema fails on schema-invalid output', async () => {
   const badSchemaSource = `return [{ notId: true }];`;
+  const c: Cassette = {
+    ...cassette,
+    response: { status: 200, body: [{ notId: true }] },
+    rawBody: '[{"notId":true}]',
+    parsedOutput: [{ notId: true }],
+  };
   const v = await evaluate({ source: badSchemaSource },
-    { cassettes: new CassetteStore([]), methods }, testInvoker);
-  // no cassettes -> replay vacuously passes with a detail note; schema probe runs on empty args
-  assert.equal(v.checks.find(c => c.check === 'replay')?.pass, true);
-  assert.equal(v.checks.find(c => c.check === 'schema')?.pass, false);
+    { cassettes: new CassetteStore([c]), methods }, testInvoker);
+  // replay passes (the source reproduces the recording); schema still refuses it
+  assert.equal(v.checks.find(x => x.check === 'replay')?.pass, true);
+  assert.equal(v.checks.find(x => x.check === 'schema')?.pass, false);
   assert.equal(v.pass, false);
 });
 
 test('schema fails when every probe throws and a schema is declared', async () => {
-  const throwing = `throw new Error('not implemented');`;
-  const v = await evaluate({ source: throwing },
-    { cassettes: new CassetteStore([]), methods }, testInvoker);
+  // `listEvents` has evidence and reproduces it. `countEvents` declares a
+  // schema, owns no cassette, and throws on its one {} probe — so nothing
+  // about its contract was ever validated, which is a failure, not a pass.
+  const source = `return [{ id: 1, startsAt: '2026-08-23' }];`;
+  const throwsForCount: Invoker = async (src, method, args, http) => {
+    if (method === 'countEvents') throw new Error('not implemented');
+    return testInvoker(src, method, args, http);
+  };
+  const v = await evaluate({ source },
+    { cassettes: new CassetteStore([cassette]),
+      methods: [...methods,
+        { name: 'countEvents', description: '', parameters: [], outputSchema: { type: 'number' } }] },
+    throwsForCount, { maxMutants: 0 });
   assert.equal(v.pass, false);
   assert.equal(v.checks.find(c => c.check === 'schema')?.pass, false);
   assert.match(v.checks.find(c => c.check === 'schema')!.detail, /no output could be validated/);
+});
+
+test('_http cassettes stub HTTP but are never replayed as methods', async () => {
+  // The recorder writes every captured response under the method '_http'.
+  // Feeding those to the invoker asks it for a handler no object has.
+  const httpOnly: Cassette = {
+    method: '_http', args: {},
+    request: { method: 'GET', url: 'https://example.test/events' },
+    response: { status: 200, body: [{ id: 1, startsAt: '2026-08-23' }] },
+    rawBody: '[{"id":1,"startsAt":"2026-08-23"}]',
+    parsedOutput: [{ id: 1, startsAt: '2026-08-23' }],
+    recordedAt: 1,
+  };
+  const methodAware: Invoker = async (src, method, args, http) => {
+    if (method !== 'listEvents') throw new Error(`fitness: source has no handler for '${method}'`);
+    return testInvoker(src, method, args, http);
+  };
+  const fixedUrl = `
+    const res = http({ method: 'GET', url: 'https://example.test/events' });
+    if (!res) throw new Error('no stub');
+    return res.body;
+  `;
+  const v = await evaluate({ source: fixedUrl },
+    { cassettes: new CassetteStore([httpOnly]), methods }, methodAware, { maxMutants: 0 });
+  assert.equal(v.checks.find(c => c.check === 'replay')?.pass, true);
+  // and stubFor still served the recording: the schema probe fetched it
+  assert.equal(v.checks.find(c => c.check === 'schema')?.pass, true);
+  assert.equal(v.pass, true);
+});
+
+test('mutation fails when the candidate parses under no dialect', async () => {
+  // An invoker that ignores the source: replay/schema/relations all pass, so
+  // the verdict turns entirely on whether the gate admits it cannot read it.
+  const blind: Invoker = async () => [{ id: 1, startsAt: '2026-08-23' }];
+  const v = await evaluate({ source: `{ async listEvents(msg) { return [ }` },
+    { cassettes: new CassetteStore([cassette]), methods }, blind);
+  assert.equal(v.pass, false);
+  const mut = v.checks.find(c => c.check === 'mutation')!;
+  assert.equal(mut.pass, false);
+  assert.equal(mut.detail, 'candidate does not parse');
 });
 
 const relMethods: MethodDeclaration[] = [{
