@@ -1,5 +1,20 @@
 [
   {
+    "version": "0.9.12",
+    "date": "2026-08-23",
+    "title": "Smarter permissions, sturdier workspaces",
+    "summary": "This release rethinks how Abject decides what a command may do, and fixes a serious bug where deleting one workspace could destroy the system objects every workspace depends on.",
+    "highlights": [
+      "Permission decisions are now based on what a command actually does and where it runs, so approvals reflect real behavior rather than the command's name",
+      "Approving a permission request now covers the exact command that asked for it; you will no longer be re-prompted for the thing you just allowed"
+    ],
+    "fixes": [
+      "Deleting a workspace no longer destroys the global system objects shared by all workspaces",
+      "A question dialog on screen now holds its calling objects open until you answer, so replies no longer arrive at objects that have already shut down",
+      "The desktop app enforces one instance per data directory and no longer attempts to show dialogs after its pipe has closed"
+    ]
+  },
+  {
     "version": "0.9.11",
     "date": "2026-08-21",
     "title": "Patterns Take Shape",
