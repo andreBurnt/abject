@@ -31,14 +31,17 @@
  * Nothing an agent can say raises either axis. Levels move through the UI only.
  */
 
+import * as path from 'path';
+import * as os from 'os';
 import { AbjectId, AbjectMessage, InterfaceId } from '../core/types.js';
 import { Abject, DEFERRED_REPLY } from '../core/abject.js';
 import { request } from '../core/message.js';
 import { require as contractRequire, invariant } from '../core/contracts.js';
 import { Log } from '../core/timed-log.js';
 import {
-  analyzeCommand, checkContainment, protectedWrites, describeAnalysis, redactCommand,
-  effectRank, type CommandAnalysis, type EffectClass,
+  analyzeCommand, checkContainment, pathsOutside, protectedWrites, describeAnalysis,
+  redactCommand, isSensitivePath, effectRank,
+  type CommandAnalysis, type EffectClass, type Segment, type TouchedPath,
 } from '../core/command-analysis.js';
 import { isInside } from '../core/path-scope.js';
 import {
@@ -55,7 +58,13 @@ export const PERMISSION_BROKER_ID = 'abjects:permission-broker' as AbjectId;
 
 const STORAGE_KEY_RULES = 'permission-broker:rules';
 
-/** How long a request may wait for a human before it gives up. */
+/**
+ * How long to wait on the dialog with no sign of life from it.
+ *
+ * Not a limit on the person. GlobalSettings heartbeats for as long as the
+ * question is on screen, and every beat resets this, so reaching it means the
+ * dialog is gone rather than that the user is slow.
+ */
 const PROMPT_WAIT_MS = 30 * 60 * 1000;
 
 /** How long a "for this task" grant survives without being renewed. */
@@ -67,7 +76,7 @@ const DEFAULT_BUDGET = 200;
 /** Decisions this object understands, whether from a dialog or from policy. */
 export type PermissionDecision =
   | 'accept_once' | 'accept_always' | 'accept_object' | 'accept_session'
-  | 'accept_class' | 'accept_program'
+  | 'accept_class' | 'accept_program' | 'accept_path'
   | 'deny' | 'deny_always' | 'deny_object';
 
 export type RuleScope =
@@ -91,7 +100,10 @@ export type Rule =
 interface SessionGrant {
   caller: string;
   effect: EffectClass;
-  scope: RuleScope;
+  /** Territories this grant covers. `null` means unbounded. */
+  roots: string[] | null;
+  /** What the user was told they were allowing, for the log. */
+  label: string;
   expiresAt: number;
 }
 
@@ -461,10 +473,10 @@ export class PermissionBroker extends Abject {
 
     // 2. A standing allow rule, or a grant made for this task.
     const allowed = this.matchingRule(analysis, command, ctx.name, project, true)
-      ?? this.matchingSessionGrant(analysis, ctx.name, project);
+      ?? this.matchingSessionGrant(analysis, ctx.name);
     if (allowed) {
       this.record(req, ctx, 'accept_once', false,
-        typeof allowed === 'object' && 'kind' in allowed ? `rule: ${describeRule(allowed)}` : 'granted for this task',
+        'kind' in allowed ? `rule: ${describeRule(allowed)}` : `granted for this task: ${allowed.label}`,
         project);
       // A rule or task grant is something the user set up deliberately, so the
       // command keeps the environment it would have had if they had clicked.
@@ -607,19 +619,74 @@ export class PermissionBroker extends Abject {
   // Rules
   // ═══════════════════════════════════════════════════════════════════
 
-  private scopeMatches(scope: RuleScope, project?: ExternalProject): boolean {
-    if (scope.kind === 'anywhere') return true;
-    if (!project) return false;
-    if (scope.kind === 'project') return scope.name === project.name;
-    return isInside(scope.root, project.root) || isInside(project.root, scope.root);
+  /**
+   * The path territory a scope speaks for, resolved against where the command
+   * is actually running.
+   *
+   * This replaces a containment test that made grants unusable. Containment was
+   * re-checked against the project root for every rule, so "always allow grep in
+   * Abject", clicked on a command that asked precisely because it read outside
+   * Abject, produced a rule the next such command could not match. Every
+   * remembering button in the dialog was a no-op for the one case that raised
+   * it, and the only working answer was to keep clicking "allow once".
+   *
+   * A scope now names the territory it covers and containment is judged against
+   * that territory, so a button means what its label says:
+   *
+   *   - `null`      unbounded; "anywhere" waives containment outright
+   *   - a root      the grant covers paths at or beneath it
+   *   - `undefined` this scope has nothing to say about this command
+   */
+  private territoryOf(scope: RuleScope, project?: ExternalProject): string | null | undefined {
+    if (scope.kind === 'anywhere') return null;
+    if (scope.kind === 'path') return scope.root;
+    return project && scope.name === project.name ? project.root : undefined;
   }
 
   /**
-   * A rule covers a compound line only if it covers every program in it.
+   * The territories a set of scopes grants here, or `null` if any is unbounded.
+   * Scopes with nothing to say contribute nothing, so an empty array means
+   * "these rules do not reach this command" rather than "anywhere".
+   */
+  private territories(scopes: readonly RuleScope[], project?: ExternalProject): string[] | null {
+    const roots: string[] = [];
+    for (const scope of scopes) {
+      const t = this.territoryOf(scope, project);
+      if (t === null) return null;
+      if (t !== undefined) roots.push(t);
+    }
+    return roots;
+  }
+
+  /**
+   * Whether a deny rule has anything to say about one segment.
+   *
+   * A block is meant to be blunt, so `anywhere` and the project the command is
+   * running in both hit unconditionally. A path-scoped block hits only when the
+   * segment actually touches that path, because blocking a directory should not
+   * quietly become blocking a program everywhere.
+   */
+  private denyApplies(scope: RuleScope, seg: Segment, project?: ExternalProject): boolean {
+    const territory = this.territoryOf(scope, project);
+    if (territory === undefined) return false;
+    if (territory === null || scope.kind === 'project') return true;
+    return [...seg.reads, ...seg.writes].some(t => t.resolved && isInside(territory, t.resolved));
+  }
+
+  /** What this command touches that the project it runs in does not cover. */
+  private escapesOf(analysis: CommandAnalysis, project?: ExternalProject): TouchedPath[] {
+    return checkContainment(analysis, project ? [project.root] : []).escapes;
+  }
+
+  /**
+   * A rule covers a compound line only if it covers every program in it, and
+   * covers each program only inside the territory that program was granted.
    *
    * This is what makes a grant usable at all: `cd x && sed … | grep …` is
    * allowed when `cd`, `sed` and `grep` are each allowed, and refused the
-   * moment an unlisted program joins the pipeline.
+   * moment an unlisted program joins the pipeline. Paths are judged per
+   * segment, so permission to read one directory never leaks into the rest of
+   * the line.
    */
   private matchingRule(
     analysis: CommandAnalysis,
@@ -643,7 +710,7 @@ export class PermissionBroker extends Abject {
 
     if (!allow) {
       for (const seg of analysis.segments) {
-        const hit = programRules.find(r => r.program === seg.program && this.scopeMatches(r.scope, project));
+        const hit = programRules.find(r => r.program === seg.program && this.denyApplies(r.scope, seg, project));
         if (hit) return hit;
       }
       return undefined;
@@ -652,39 +719,42 @@ export class PermissionBroker extends Abject {
     if (analysis.opaque || analysis.effect === 'dangerous') return undefined;
     if (analysis.segments.length === 0) return undefined;
 
-    // A class rule has to cover the containment question too, or it would be a
-    // blanket grant for anything the program can reach.
-    const coveringClass = classRules.find(r =>
-      this.scopeMatches(r.scope, project)
-      && effectRank(analysis.effect) <= effectRank(r.effect)
-      && project !== undefined
-      && checkContainment(analysis, [project.root]).contained);
+    // A class rule answers for the whole line, so it is judged against the
+    // whole line's paths, inside the territory the class was granted in.
+    const coveringClass = classRules.find(r => {
+      if (effectRank(analysis.effect) > effectRank(r.effect)) return false;
+      const roots = this.territories([r.scope], project);
+      return roots === null
+        || (roots.length > 0 && checkContainment(analysis, roots).contained);
+    });
     if (coveringClass) return coveringClass;
 
     let matched: Rule | undefined;
     for (const seg of analysis.segments) {
-      const hit = programRules.find(r => r.program === seg.program && this.scopeMatches(r.scope, project));
-      if (!hit) return undefined;
-      matched = hit;
+      const hits = programRules.filter(r =>
+        r.program === seg.program && this.territoryOf(r.scope, project) !== undefined);
+      if (hits.length === 0) return undefined;
+      const roots = this.territories(hits.map(r => r.scope), project);
+      if (roots !== null && pathsOutside([...seg.reads, ...seg.writes], roots).length > 0) {
+        return undefined;
+      }
+      matched = hits[0];
     }
-    if (matched && project && !checkContainment(analysis, [project.root]).contained) return undefined;
     return matched;
   }
 
   private matchingSessionGrant(
     analysis: CommandAnalysis,
     caller: string,
-    project?: ExternalProject,
   ): SessionGrant | undefined {
     const now = Date.now();
     this.sessionGrants = this.sessionGrants.filter(g => g.expiresAt > now);
     if (analysis.opaque || analysis.effect === 'dangerous') return undefined;
     return this.sessionGrants.find(g =>
       g.caller === caller
-      && this.scopeMatches(g.scope, project)
       && effectRank(analysis.effect) <= effectRank(g.effect)
-      && !!project
-      && checkContainment(analysis, [project.root]).contained);
+      && (g.roots === null
+        || (g.roots.length > 0 && checkContainment(analysis, g.roots).contained)));
   }
 
   /**
@@ -748,6 +818,12 @@ export class PermissionBroker extends Abject {
   ): Promise<Outcome> {
     await this.enterPromptQueue();
     try {
+      // Logged before the dialog rather than after the answer, so a prompt
+      // nobody is at the keyboard for still says what it is waiting on. The
+      // reason used to exist only on screen, which left a repeated prompt with
+      // no trace in the log at all.
+      log.info(`asking ${ctx.name} about ${req.type}: `
+        + `${redactCommand(req.resource).slice(0, 160)} (${why})`);
       const decision = await this.showPrompt(req, ctx, analysis, why, project);
       await this.applyDecision(decision, req, ctx, analysis, project);
       this.record(req, ctx, decision, true, why, project, effective);
@@ -821,9 +897,16 @@ export class PermissionBroker extends Abject {
   /**
    * The buttons, grouped narrowest-first.
    *
-   * The program offered is the one that set the line's effect, not the first
-   * word, so an agent that opens every command with `cd` is never asked whether
-   * to block `cd`.
+   * Two rules govern what appears here. A grant names every program the line
+   * runs, not just the one that set its effect, because a rule covers a line
+   * only when it covers all of them. And nothing is offered that would fail to
+   * cover the command on screen: a button that leaves the next identical
+   * command asking is worse than no button, since the user believes they have
+   * answered.
+   *
+   * The program named in a block is still the one that set the line's effect,
+   * so an agent that opens every command with `cd` is never asked whether to
+   * block `cd`.
    */
   private optionsFor(
     req: PermissionRequest,
@@ -832,8 +915,10 @@ export class PermissionBroker extends Abject {
     project?: ExternalProject,
   ): PromptGroup[] {
     const groups: PromptGroup[] = [];
-    const program = analysis?.principalProgram;
     const canGrantBroadly = !!analysis && !analysis.opaque && analysis.effect !== 'dangerous';
+    const grantName = describePrograms(analysis?.programs ?? []);
+    const escapes = analysis ? this.escapesOf(analysis, project) : [];
+    const escapeRoot = grantableRoot(escapes);
 
     groups.push({
       label: 'This request',
@@ -843,7 +928,9 @@ export class PermissionBroker extends Abject {
       ],
     });
 
-    if (project && canGrantBroadly) {
+    // Everything scoped to the project answers only for a command that stays
+    // inside it, so these appear only when the line does.
+    if (project && canGrantBroadly && escapes.length === 0) {
       const options: PromptOption[] = [
         { id: 'accept_session', label: 'Allow for this task', tone: 'good' },
       ];
@@ -852,18 +939,32 @@ export class PermissionBroker extends Abject {
       } else if (analysis.effect === 'write') {
         options.push({ id: 'accept_class', label: `Allow file edits in ${project.name}`, tone: 'good' });
       }
-      if (program) {
-        options.push({ id: 'accept_program', label: `Always allow ${program} in ${project.name}`, tone: 'good' });
+      if (grantName) {
+        options.push({ id: 'accept_program', label: `Always allow ${grantName} in ${project.name}`, tone: 'good' });
       }
       groups.push({ label: `In ${project.name}`, options });
     }
 
-    const wide: PromptOption[] = [];
-    if (program && canGrantBroadly) {
-      wide.push({ id: 'accept_object', label: `Always allow ${program} anywhere`, tone: 'good' });
+    // The line reaches outside the project, which is usually why it is being
+    // asked about at all. A grant on the project alone can never answer that,
+    // so the offer names the directory the command actually needs.
+    if (canGrantBroadly && grantName && escapeRoot) {
+      const options: PromptOption[] = [
+        { id: 'accept_path', label: `Allow ${grantName} under ${displayPath(escapeRoot)}`, tone: 'good' },
+      ];
+      if (project) options.push({ id: 'accept_session', label: 'Allow for this task', tone: 'good' });
+      groups.push({
+        label: project ? `Outside ${project.name}` : `Under ${displayPath(escapeRoot)}`,
+        options,
+      });
     }
-    if (program) {
-      wide.push({ id: 'deny_object', label: `Block ${program}`, tone: 'bad' });
+
+    const wide: PromptOption[] = [];
+    if (grantName && canGrantBroadly) {
+      wide.push({ id: 'accept_object', label: `Always allow ${grantName} anywhere`, tone: 'good' });
+    }
+    if (analysis?.principalProgram) {
+      wide.push({ id: 'deny_object', label: `Block ${analysis.principalProgram}`, tone: 'bad' });
     }
     if (req.type !== 'shell') {
       wide.push({ id: 'accept_always', label: 'Always allow', tone: 'good' });
@@ -882,16 +983,25 @@ export class PermissionBroker extends Abject {
     analysis: CommandAnalysis | undefined,
     project?: ExternalProject,
   ): Promise<void> {
-    const program = analysis?.principalProgram;
+    // A grant is written for every program the line runs, because a rule
+    // covers a line only when it covers all of them. Granting the principal
+    // alone left `grep … | head` asking again with the same button on offer.
+    const programs = analysis?.programs.filter(Boolean) ?? [];
     const scope: RuleScope = project ? { kind: 'project', name: project.name } : { kind: 'anywhere' };
+    const escapeRoot = analysis ? grantableRoot(this.escapesOf(analysis, project)) : undefined;
 
     switch (decision) {
       case 'accept_session':
-        if (analysis) {
+        if (analysis && project) {
           this.sessionGrants.push({
             caller: ctx.name,
             effect: analysis.effect,
-            scope,
+            // A task grant that did not cover the path which raised the prompt
+            // would be answered by the same prompt a second later.
+            roots: escapeRoot ? [project.root, escapeRoot] : [project.root],
+            label: escapeRoot
+              ? `${analysis.effect} in ${project.name} and under ${displayPath(escapeRoot)}`
+              : `${analysis.effect} in ${project.name}`,
             expiresAt: Date.now() + SESSION_GRANT_MS,
           });
         }
@@ -900,13 +1010,44 @@ export class PermissionBroker extends Abject {
         if (analysis) await this.addRule({ kind: 'class', caller: ctx.name, effect: analysis.effect, scope, allow: true });
         return;
       case 'accept_program':
-        if (program) await this.addRule({ kind: 'program', caller: ctx.name, program, scope, allow: true });
+        for (const program of programs) {
+          await this.addRule({ kind: 'program', caller: ctx.name, program, scope, allow: true });
+        }
+        return;
+      case 'accept_path':
+        // Two rules per program: the directory the line reached for, and the
+        // project it was running in. Writing only the first would leave the
+        // in-project half of the same line uncovered, and it would ask again.
+        if (escapeRoot) {
+          for (const program of programs) {
+            await this.addRule({
+              kind: 'program', caller: ctx.name, program,
+              scope: { kind: 'path', root: escapeRoot }, allow: true,
+            });
+            if (project) {
+              await this.addRule({
+                kind: 'program', caller: ctx.name, program,
+                scope: { kind: 'project', name: project.name }, allow: true,
+              });
+            }
+          }
+        }
         return;
       case 'accept_object':
-        if (program) await this.addRule({ kind: 'program', caller: ctx.name, program, scope: { kind: 'anywhere' }, allow: true });
+        for (const program of programs) {
+          await this.addRule({ kind: 'program', caller: ctx.name, program, scope: { kind: 'anywhere' }, allow: true });
+        }
         return;
       case 'deny_object':
-        if (program) await this.addRule({ kind: 'program', caller: ctx.name, program, scope: { kind: 'anywhere' }, allow: false });
+        // A block stays on the one program the user pointed at. Widening an
+        // allow across a pipeline is a convenience; widening a block across one
+        // would be a far bigger answer than the button asked for.
+        if (analysis?.principalProgram) {
+          await this.addRule({
+            kind: 'program', caller: ctx.name, program: analysis.principalProgram,
+            scope: { kind: 'anywhere' }, allow: false,
+          });
+        }
         return;
       case 'accept_always':
         // Remembered here rather than pushed into the capability's own allow
@@ -950,7 +1091,9 @@ export class PermissionBroker extends Abject {
     };
     this.decisions.push(entry);
     if (this.decisions.length > 500) this.decisions.splice(0, this.decisions.length - 500);
-    if (!asked) log.info(`auto ${decision}: ${ctx.name} ${reason}`);
+    log.info(asked
+      ? `answered ${decision}: ${ctx.name} (${reason})`
+      : `auto ${decision}: ${ctx.name} ${reason}`);
     // Only prompted decisions are announced. An auto-approval happens as often
     // as an agent runs a command, and an event per decision is exactly the
     // shape that has flooded this bus before; anything wanting the full picture
@@ -1053,6 +1196,8 @@ export class PermissionBroker extends Abject {
     super.checkInvariants();
     for (const r of this.rules) {
       invariant(typeof r.caller === 'string' && r.caller.length > 0, 'a rule must name a caller');
+      invariant(r.kind === 'exact' || r.scope.kind !== 'path' || r.scope.root.length > 0,
+        'a path-scoped rule must name a root');
     }
   }
 }
@@ -1115,6 +1260,68 @@ interface WorkspaceRow {
  */
 function standingKey(type: string, resource: string): string {
   return `${type}:${resource}`;
+}
+
+/**
+ * How a grant over several programs reads on a button.
+ *
+ * The label lists what is actually being granted. Naming one program while
+ * quietly granting the rest of the pipeline would make the dialog a worse
+ * record of the decision than the rules it writes.
+ */
+function describePrograms(programs: readonly string[]): string {
+  const names = programs.filter(Boolean);
+  if (names.length === 0) return '';
+  if (names.length <= 3) return names.join(', ');
+  return `${names.slice(0, 3).join(', ')} and ${names.length - 3} more`;
+}
+
+/** A path as a person would write it, with the home directory as `~`. */
+function displayPath(p: string): string {
+  const home = os.homedir();
+  if (p === home) return '~';
+  return isInside(home, p) ? `~${p.slice(home.length)}` : p;
+}
+
+/**
+ * A directory a grant could honestly name to cover these escapes.
+ *
+ * Files reduce to their parent directory, because a grant on a single file is
+ * a loop waiting to happen: the next sibling asks again. Several escapes
+ * reduce to their common ancestor.
+ *
+ * The answer is withheld, and no such button is offered, when nothing honest
+ * could be granted: a path nobody can resolve is covered by no root at all,
+ * and an ancestor as broad as a home directory or a top-level system directory
+ * is not a permission anyone means to give from a dialog.
+ */
+function grantableRoot(escapes: readonly TouchedPath[]): string | undefined {
+  if (escapes.length === 0) return undefined;
+  if (escapes.some(e => e.unresolved || !e.resolved)) return undefined;
+
+  let root: string | undefined = path.dirname(escapes[0].resolved!);
+  for (const e of escapes.slice(1)) {
+    root = commonAncestor(root!, path.dirname(e.resolved!));
+    if (!root) return undefined;
+  }
+  if (!root || root === path.sep) return undefined;
+  if (root === os.homedir()) return undefined;
+  if (isSensitivePath(root)) return undefined;
+  // A single segment is a top-level directory: /etc, /usr, /var.
+  if (root.split(path.sep).filter(Boolean).length < 2) return undefined;
+  return root;
+}
+
+/** The deepest directory that is a prefix of both paths, on path boundaries. */
+function commonAncestor(a: string, b: string): string | undefined {
+  const left = a.split(path.sep);
+  const right = b.split(path.sep);
+  const shared: string[] = [];
+  for (let i = 0; i < Math.min(left.length, right.length); i++) {
+    if (left[i] !== right[i]) break;
+    shared.push(left[i]);
+  }
+  return shared.join(path.sep) || undefined;
 }
 
 function describeRule(r: Rule): string {

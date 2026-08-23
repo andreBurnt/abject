@@ -883,12 +883,30 @@ export function checkContainment(
   analysis: CommandAnalysis,
   roots: readonly string[],
 ): ContainmentResult {
-  const escapes: TouchedPath[] = [];
-  for (const t of [...analysis.reads, ...analysis.writes]) {
-    if (t.unresolved || !t.resolved) { escapes.push(t); continue; }
-    if (!roots.some(r => isInside(r, t.resolved!))) escapes.push(t);
-  }
+  const escapes = pathsOutside([...analysis.reads, ...analysis.writes], roots);
   return { contained: escapes.length === 0, escapes };
+}
+
+/**
+ * Which of `paths` fall outside every one of `roots`.
+ *
+ * Split out of `checkContainment` because a permission grant is judged per
+ * segment: the territory granted to `grep` should decide what `grep` may read,
+ * not what everything else in the pipeline may read.
+ *
+ * An unresolved path is always outside. Not knowing where something points is
+ * not the same as knowing it is safe.
+ */
+export function pathsOutside(
+  paths: readonly TouchedPath[],
+  roots: readonly string[],
+): TouchedPath[] {
+  const outside: TouchedPath[] = [];
+  for (const t of paths) {
+    if (t.unresolved || !t.resolved) { outside.push(t); continue; }
+    if (!roots.some(r => isInside(r, t.resolved!))) outside.push(t);
+  }
+  return outside;
 }
 
 /**
