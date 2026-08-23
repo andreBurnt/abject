@@ -276,3 +276,35 @@ test('mutation gate counts kills on a source with real mutation points', async (
   assert.equal(mut!.pass, true);
   assert.match(mut!.detail, /2\/2 mutants killed/);
 });
+
+test('mutation fails the verdict when the evidence cannot kill enough mutants', async () => {
+  // Four mutation sites, only one of them observable through the recording:
+  // the live filter excludes nothing the cassette contains, and `spare` is
+  // dead code. Weak evidence must read as a failure, not a pass.
+  const WEAK_SOURCE = `
+  const res = http({ method: 'GET', url: 'https://example.test/events' });
+  if (!res) throw new Error('no stub');
+  const items = res.body.filter(e => e.id > 0);
+  const spare = res.body.filter(e => e.id > 100);
+  return items;
+`;
+  const weak: Cassette = {
+    method: 'listEvents', args: {},
+    request: { method: 'GET', url: 'https://example.test/events' },
+    response: { status: 200, body: [{ id: 1 }, { id: 2 }] },
+    rawBody: '[{"id":1},{"id":2}]',
+    parsedOutput: [{ id: 1 }, { id: 2 }],
+    recordedAt: 1,
+  };
+  const v = await evaluate({ source: WEAK_SOURCE },
+    { cassettes: new CassetteStore([weak]),
+      methods: [{ name: 'listEvents', description: '', parameters: [] }] },
+    testInvoker);
+  assert.equal(v.pass, false);
+  const mut = v.checks.find(c => c.check === 'mutation')!;
+  assert.equal(mut.pass, false);
+  assert.ok(v.killRatio !== undefined && v.killRatio < 0.8, `killRatio was ${v.killRatio}`);
+  // measured: only the live filter's flipped guard changes what comes back
+  assert.equal(v.killRatio, 0.25);
+  assert.equal(mut.detail, '1/4 mutants killed (threshold 0.8)');
+});

@@ -9,9 +9,8 @@
  */
 import Ajv from 'ajv';
 import { createHash } from 'node:crypto';
-import { HTTP_CASSETTE_METHOD, type CassetteStore } from './cassette.js';
+import { HTTP_CASSETTE_METHOD, type Cassette, type CassetteStore } from './cassette.js';
 import { generateMutants } from './mutants.js';
-import type { Cassette } from './cassette.js';
 import type { MethodDeclaration } from '../core/types.js';
 
 /** One recorded response, as the fitness gate hands it to an invoker's HTTP

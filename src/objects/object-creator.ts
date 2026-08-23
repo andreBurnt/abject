@@ -683,7 +683,8 @@ When invited to a Sprint Plan, describe the concrete authoring or modification I
   // ── Staging, and when each check runs ─────────────────────────────────
   //
   // Every op that writes `state.draftSource` ends in `finishEdit`. Two checks
-  // exist and they have very different natures, so they run at different times:
+  // run themselves off an edit, and they have very different natures, so they
+  // run at different times:
   //
   //   SYNTAX — runs on EVERY edit, and is load-bearing. Members are addressed by
   //   name through the parsed object literal, so an unparseable draft cannot be
@@ -701,6 +702,12 @@ When invited to a Sprint Plan, describe the concrete authoring or modification I
   //   WAITS for the edit set to close: while more edits are coming (more actions
   //   of the same LLM response are queued, or the agent passed `more: true`) it
   //   does not run. It runs once, on the closing edit.
+  //
+  // A THIRD gate — FITNESS — also refuses a deploy, but it is not an edit-time
+  // check and it is not mechanical: it is explicit (`fitness()`), it judges the
+  // whole draft against the target's RECORDED TRAFFIC (replay, declared output
+  // schemas, declared relations, mutation), and it costs a step. See
+  // `opFitness` and `deployGate` in `../protocol/fitness.js`.
   //
   // A staging op never fails merely because the object is incomplete. That
   // matters mechanically: AgentAbject discards the rest of a batched response
@@ -1892,9 +1899,19 @@ When invited to a Sprint Plan, describe the concrete authoring or modification I
 
   // ── The deploy gate ───────────────────────────────────────────────────
   //
-  // Deploy is the ONLY place a check refuses to proceed, and it refuses on
-  // mechanical grounds only: a draft that does not parse, or that calls a method
-  // a dependency's live manifest does not have, must never reach the live object.
+  // Deploy is the ONLY place a check refuses to proceed, and it refuses on two
+  // different kinds of ground.
+  //
+  //   MECHANICAL (`gateDeploy`, below): a draft that does not parse, or that
+  //   calls a method a dependency's live manifest does not have, must never
+  //   reach the live object.
+  //
+  //   EVIDENTIAL (`deployGate`, ../protocol/fitness.js): the draft must carry a
+  //   PASSING fitness verdict — recorded traffic replayed, declared schemas and
+  //   relations upheld, mutants killed — for exactly this source, these
+  //   declarations, and this target. Not mechanical, and the only non-mechanical
+  //   refusal there is.
+  //
   // LLM judgments (the semantic reviewer) advise but never block — a deployed
   // object answering real calls teaches more per step than another blind pass.
 

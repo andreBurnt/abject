@@ -162,3 +162,49 @@ test('deployGate refuses a verdict earned against a different object', () => {
   assert.equal(deployGate(judged, src, methods).ok, true);
   assert.equal(deployGate({ ...judged, fitnessTargetId: undefined }, src, methods, 'obj-b').ok, true);
 });
+
+test('end to end, in the dialect an LLM actually writes', async () => {
+  // Everything the house style puts in one handler: a parenthesized handler
+  // map, a thin handler over a private helper reached through `this`, an
+  // HttpClient call whose response is checked with `res.ok` and parsed out of
+  // the raw `res.body` string — judged against one recorded cassette, through
+  // the real sandbox invoker, with every check armed.
+  const REAL = `({
+    async listEvents(msg) {
+      const res = await call('HttpClient', 'get', { url: 'https://example.test/events?q=' + msg.payload.q });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return this.shape(JSON.parse(res.body));
+    },
+    shape(rows) {
+      return rows.map(r => ({ id: r.id, name: r.name }));
+    }
+  })`;
+  const evidence: Cassette = {
+    method: 'listEvents', args: { q: 'all' },
+    request: { method: 'GET', url: 'https://example.test/events?q=all' },
+    response: { status: 200, body: [{ id: 1, name: 'Weekly Standup', extra: 9 }] },
+    rawBody: '[{"id":1,"name":"Weekly Standup","extra":9}]',
+    parsedOutput: [{ id: 1, name: 'Weekly Standup' }],
+    recordedAt: 1,
+  };
+  const declared: MethodDeclaration[] = [{
+    name: 'listEvents', description: '', parameters: [], effects: 'read',
+    outputSchema: {
+      type: 'array',
+      items: {
+        type: 'object', required: ['id', 'name'],
+        properties: { id: { type: 'number' }, name: { type: 'string' } },
+      },
+    },
+    relations: [{ kind: 'no-duplicates' }, { kind: 'idempotent' }, { kind: 'non-empty-for-known-entity' }],
+    knownEntity: 'Weekly Standup',
+  }];
+
+  const v = await evaluate({ source: REAL },
+    { cassettes: new CassetteStore([evidence]), methods: declared }, buildSandboxInvoker());
+
+  assert.equal(v.pass, true, JSON.stringify(v.checks, null, 2));
+  assert.equal(v.checks.find(c => c.check === 'replay')?.detail, '1 cassette(s) reproduced');
+  assert.equal(v.checks.find(c => c.check === 'schema')?.detail, 'all outputs validate');
+  assert.equal(v.checks.find(c => c.check === 'relations')?.detail, 'all declared relations hold');
+});
