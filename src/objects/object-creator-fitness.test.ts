@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { buildSandboxInvoker, FITNESS_INVOCATION_TIMEOUT_MS } from '../protocol/sandbox-invoker.js';
-import { deployGate, evaluate } from '../protocol/fitness.js';
+import { deployGate, evaluate, verdictDigest } from '../protocol/fitness.js';
 import { CassetteStore, type Cassette } from '../protocol/cassette.js';
 import type { MethodDeclaration } from '../core/types.js';
 
@@ -127,11 +127,38 @@ test('an invocation that never returns is killed by the deadline', async () => {
   assert.ok(Date.now() - started < 4000, 'the gate must not wait on a hung candidate');
 });
 
+test('verdictDigest covers the declarations, not just the source', () => {
+  const src = 'return 1;';
+  const more: MethodDeclaration[] = [...methods, { name: 'countEvents', description: '', parameters: [] }];
+  assert.notEqual(verdictDigest(src, methods), verdictDigest(src, more));
+  assert.equal(verdictDigest(src, methods), verdictDigest(src, [...methods]));
+  assert.equal(verdictDigest(src, methods),
+    createHash('sha256').update(src + '\0' + JSON.stringify(methods)).digest('hex'));
+});
+
 test('deployGate refuses without a verdict, with a failed verdict, and on a stale digest', () => {
   const src = 'return 1;';
-  const digest = createHash('sha256').update(src).digest('hex');
-  assert.equal(deployGate({}, src).ok, false);
-  assert.equal(deployGate({ fitnessVerdict: { pass: false, checks: [] }, fitnessSourceDigest: digest }, src).ok, false);
-  assert.equal(deployGate({ fitnessVerdict: { pass: true, checks: [] }, fitnessSourceDigest: digest }, 'return 2;').ok, false);
-  assert.equal(deployGate({ fitnessVerdict: { pass: true, checks: [] }, fitnessSourceDigest: digest }, src).ok, true);
+  const digest = verdictDigest(src, methods);
+  const passing = { fitnessVerdict: { pass: true, checks: [] }, fitnessSourceDigest: digest };
+  assert.equal(deployGate({}, src, methods).ok, false);
+  assert.equal(deployGate({ fitnessVerdict: { pass: false, checks: [] }, fitnessSourceDigest: digest }, src, methods).ok, false);
+  assert.equal(deployGate(passing, 'return 2;', methods).ok, false);
+  // a re-drafted manifest invalidates the verdict too: schema and relations
+  // were judged against the declarations as they stood
+  assert.equal(deployGate(passing, src,
+    [...methods, { name: 'countEvents', description: '', parameters: [] }]).ok, false);
+  assert.equal(deployGate(passing, src, methods).ok, true);
+});
+
+test('deployGate refuses a verdict earned against a different object', () => {
+  const src = 'return 1;';
+  const digest = verdictDigest(src, methods);
+  const judged = { fitnessVerdict: { pass: true, checks: [] }, fitnessSourceDigest: digest, fitnessTargetId: 'obj-a' };
+  const refusal = deployGate(judged, src, methods, 'obj-b');
+  assert.equal(refusal.ok, false);
+  assert.match((refusal as { error: string }).error, /fitness verdict is for a different object/);
+  assert.equal(deployGate(judged, src, methods, 'obj-a').ok, true);
+  // a create has no target on either side, and an unresolved target does not refuse
+  assert.equal(deployGate(judged, src, methods).ok, true);
+  assert.equal(deployGate({ ...judged, fitnessTargetId: undefined }, src, methods, 'obj-b').ok, true);
 });

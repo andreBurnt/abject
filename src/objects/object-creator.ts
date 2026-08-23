@@ -32,7 +32,7 @@ import { Log } from '../core/timed-log.js';
 import { applyDiff, parseSearchReplaceBlocks, levenshtein } from './source-diff.js';
 import { withKeyedLock } from '../core/keyed-lock.js';
 import * as acorn from 'acorn';
-import { evaluate, deployGate, sourceDigest, type Verdict } from '../protocol/fitness.js';
+import { evaluate, deployGate, verdictDigest, type Verdict } from '../protocol/fitness.js';
 import { CassetteStore } from '../protocol/cassette.js';
 import { buildSandboxInvoker } from '../protocol/sandbox-invoker.js';
 
@@ -290,11 +290,16 @@ interface LoopState {
   baselineCallKeys?: Set<string>;
   /** Source the semantic reviewer has already seen — never review the same draft twice. */
   semanticReviewedSource?: string;
-  /** The fitness gate's most recent verdict on a draft, and a digest of the
-   *  source it judged. A verdict is only valid for the exact source it was
-   *  computed against — see `deployGate` in `../protocol/fitness.js`. */
+  /** The fitness gate's most recent verdict on a draft, a digest of what it
+   *  judged (source AND declarations), and the object it judged it for. A
+   *  verdict is only valid for that exact triple — see `deployGate` in
+   *  `../protocol/fitness.js`. */
   fitnessVerdict?: Verdict;
   fitnessSourceDigest?: string;
+  fitnessTargetId?: AbjectId;
+  /** Live-manifest methods read for the heal path, cached so the deploy gate
+   *  recomputes the same digest without a second round trip. */
+  fitnessLiveMethods?: { targetId: AbjectId; methods: MethodDeclaration[]; note?: string };
 
   terminal?: { kind: 'done' | 'fail'; result?: unknown; error?: string };
   spawnedObjectId?: AbjectId;
@@ -1824,6 +1829,39 @@ When invited to a Sprint Plan, describe the concrete authoring or modification I
   }
 
   /**
+   * The method declarations the fitness gate judges against.
+   *
+   * Normally the staged draft manifest. On a HEAL the agent edits source
+   * without redrafting a manifest, so `draftManifest` is unset and the schema
+   * and relation checks would be vacuous against an empty method list — read
+   * the live target's manifest instead, the same `describe` a dependency
+   * lookup uses. Cached per target: the deploy gate must recompute the SAME
+   * digest, and must not fail a deploy because a best-effort read that
+   * succeeded at judgment time happens to fail now.
+   */
+  private async fitnessMethods(state: LoopState): Promise<{ methods: MethodDeclaration[]; note?: string }> {
+    const drafted = state.draftManifest?.interface?.methods;
+    if (drafted) return { methods: drafted };
+    const targetId = state.targetObjectId;
+    if (!targetId) return { methods: [] };
+    const cached = state.fitnessLiveMethods;
+    if (cached?.targetId === targetId) return { methods: cached.methods, note: cached.note };
+
+    let methods: MethodDeclaration[] = [];
+    let note: string | undefined;
+    try {
+      const ir = await this.sendRequest<Partial<IntrospectResult>>(targetId, 'describe', {}, 5000);
+      methods = (ir?.manifest as AbjectManifest | undefined)?.interface?.methods ?? [];
+      if (methods.length === 0) note = 'live manifest declares no methods — schema/relations vacuous';
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      note = `live manifest unreadable (${msg.slice(0, 60)}) — schema/relations vacuous`;
+    }
+    state.fitnessLiveMethods = { targetId, methods, note };
+    return { methods, note };
+  }
+
+  /**
    * The hard gate: replays the target's recorded cassettes, validates output
    * schemas and relations, and mutation-tests the staged draft — entirely
    * inside the sandbox, with every I/O call shimmed to the object's own
@@ -1833,18 +1871,20 @@ When invited to a Sprint Plan, describe the concrete authoring or modification I
    */
   private async opFitness(state: LoopState): Promise<{ ok: boolean; summary: string; error?: string; data?: unknown }> {
     if (!state.draftSource) return { ok: false, summary: 'fitness: no draft source', error: 'draft a source first' };
-    const methods = state.draftManifest?.interface?.methods ?? [];
+    const { methods, note } = await this.fitnessMethods(state);
     const cassettes = await this.loadCassettes(state.targetObjectId);
     const verdict = await evaluate({ source: state.draftSource }, { cassettes, methods },
       buildSandboxInvoker());
     state.fitnessVerdict = verdict;
-    state.fitnessSourceDigest = sourceDigest(state.draftSource);
+    state.fitnessSourceDigest = verdictDigest(state.draftSource, methods);
+    state.fitnessTargetId = state.targetObjectId;
     const failed = verdict.checks.filter(c => !c.pass).map(c => `${c.check}: ${c.detail}`).join('; ');
+    const caveat = note ? ` [${note}]` : '';
     return {
       ok: verdict.pass,
-      summary: verdict.pass
+      summary: (verdict.pass
         ? `fitness: PASS (${verdict.checks.map(c => c.check).join(', ')}${verdict.killRatio !== undefined ? `, kill ${verdict.killRatio.toFixed(2)}` : ''})`
-        : `fitness: FAIL — ${failed}`,
+        : `fitness: FAIL — ${failed}`) + caveat,
       error: verdict.pass ? undefined : failed,
       data: verdict,
     };
@@ -1958,7 +1998,8 @@ When invited to a Sprint Plan, describe the concrete authoring or modification I
     const refusal = this.gateDeploy(state, 'deploy_spawn');
     if (refusal) return refusal;
 
-    const gate = deployGate(state, state.draftSource!);
+    const gate = deployGate(state, state.draftSource,
+      (await this.fitnessMethods(state)).methods);
     if (!gate.ok) return { ok: false, summary: gate.error, error: gate.error };
 
     const spawnReq: SpawnRequest = {
@@ -2058,11 +2099,10 @@ When invited to a Sprint Plan, describe the concrete authoring or modification I
     const refusal = this.gateDeploy(state, 'deploy_update');
     if (refusal) return refusal;
 
-    const gate = deployGate(state, state.draftSource!);
-    if (!gate.ok) return { ok: false, summary: gate.error, error: gate.error };
-
-    // Resolve target: explicit objectId / targetName from action wins, else
-    // fall back to the kind:modify state target.
+    // Resolve target BEFORE the fitness gate: the action can name an object
+    // the gate never saw (the gate judged `state.targetObjectId`, which an
+    // explicit objectId/targetName overrides), and a verdict earned against
+    // another object's cassettes says nothing about this one.
     let targetId: AbjectId | undefined;
     let targetLabel: string | undefined;
     const explicitId = this.actionField(action, ['objectId']);
@@ -2083,6 +2123,10 @@ When invited to a Sprint Plan, describe the concrete authoring or modification I
     } else {
       return { ok: false, summary: 'deploy_update: no target', error: 'pass {objectId} or {targetName} in the action payload, or use deploy_spawn for new objects' };
     }
+
+    const gate = deployGate(state, state.draftSource,
+      (await this.fitnessMethods(state)).methods, targetId);
+    if (!gate.ok) return { ok: false, summary: gate.error, error: gate.error };
 
     // Everything from here is one write to one object. Two modify loops
     // running at once would otherwise interleave their four steps and leave

@@ -271,16 +271,28 @@ export async function evaluate(candidate: { source: string },
   return { pass, checks, killRatio };
 }
 
-export function sourceDigest(source: string): string {
-  return createHash('sha256').update(source).digest('hex');
+/** What a verdict is ABOUT. Not the source alone: the schema and relation
+ *  checks are judgments of the source AGAINST the declarations, so a redrafted
+ *  manifest invalidates a verdict exactly as a redrafted source does. */
+export function verdictDigest(source: string, methods: MethodDeclaration[]): string {
+  return createHash('sha256').update(source + '\0' + JSON.stringify(methods)).digest('hex');
 }
 
 /** The hard gate deploy ops consult. A deploy may proceed only when the
- *  CURRENT draft has a passing verdict -- verdicts do not survive edits. */
-export function deployGate(state: { fitnessVerdict?: Verdict; fitnessSourceDigest?: string },
-                           draftSource: string): { ok: true } | { ok: false; error: string } {
-  if (!state.fitnessVerdict || state.fitnessSourceDigest !== sourceDigest(draftSource)) {
+ *  CURRENT draft has a passing verdict -- verdicts do not survive edits --
+ *  and only onto the object that verdict was earned against: deploy_update
+ *  can resolve an explicit target the gate never saw, and a verdict built
+ *  from another object's cassettes says nothing about this one. */
+export function deployGate(state: { fitnessVerdict?: Verdict; fitnessSourceDigest?: string; fitnessTargetId?: string },
+                           draftSource: string,
+                           methods: MethodDeclaration[],
+                           resolvedTargetId?: string): { ok: true } | { ok: false; error: string } {
+  if (!state.fitnessVerdict || state.fitnessSourceDigest !== verdictDigest(draftSource, methods)) {
     return { ok: false, error: 'deploy refused: no passing fitness verdict for this draft — run fitness' };
+  }
+  if (state.fitnessTargetId !== undefined && resolvedTargetId !== undefined
+      && state.fitnessTargetId !== resolvedTargetId) {
+    return { ok: false, error: 'deploy refused: fitness verdict is for a different object' };
   }
   if (!state.fitnessVerdict.pass) {
     const failed = state.fitnessVerdict.checks.find(c => !c.pass);
