@@ -9,6 +9,7 @@
  */
 import Ajv from 'ajv';
 import { CassetteStore } from './cassette.js';
+import { generateMutants } from './mutants.js';
 import type { MethodDeclaration } from '../core/types.js';
 
 export interface HttpExchange { status: number; body: unknown; }
@@ -204,6 +205,29 @@ export async function evaluate(candidate: { source: string },
   checks.push(relations);
   if (!relations.pass) return { pass: false, checks };
 
-  checks.push({ check: 'mutation', pass: true, detail: 'not yet checked' });
-  return { pass: true, checks };
+  const maxMutants = opts?.maxMutants ?? 12;
+  const killThreshold = opts?.killThreshold ?? 0.8;
+  if (maxMutants === 0) {
+    checks.push({ check: 'mutation', pass: true, detail: 'skipped' });
+    return { pass: true, checks };
+  }
+  const mutants = generateMutants(candidate.source, maxMutants);
+  if (mutants.length === 0) {
+    checks.push({ check: 'mutation', pass: true, detail: 'no mutation points' });
+    return { pass: true, checks };
+  }
+  let killed = 0;
+  for (const m of mutants) {
+    const r = await checkReplay(m.source, evidence, invoker);
+    if (!r.pass) { killed++; continue; }
+    const s = await checkSchema(m.source, evidence, invoker);
+    if (!s.pass) { killed++; continue; }
+    const rel = await checkRelations(m.source, evidence, invoker);
+    if (!rel.pass) killed++;
+  }
+  const killRatio = killed / mutants.length;
+  const pass = killRatio >= killThreshold;
+  checks.push({ check: 'mutation', pass,
+    detail: `${killed}/${mutants.length} mutants killed (threshold ${killThreshold})` });
+  return { pass, checks, killRatio };
 }

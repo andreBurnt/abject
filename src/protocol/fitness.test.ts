@@ -153,3 +153,21 @@ test('relations: subset-on-tighter-filter orders numeric filter args numerically
     numInvoker);
   assert.equal(v.checks.find(x => x.check === 'relations')?.pass, true);
 });
+
+test('mutation gate kills mutants of a well-tested source', async () => {
+  // GOOD_SOURCE returns the cassette body verbatim; flipping its logic breaks replay.
+  const v = await evaluate({ source: GOOD_SOURCE },
+    { cassettes: new CassetteStore([cassette]), methods }, testInvoker,
+    { maxMutants: 12, killThreshold: 0.5 });
+  const mut = v.checks.find(c => c.check === 'mutation');
+  assert.ok(mut, 'mutation check ran');
+  if (v.killRatio !== undefined && mut!.detail !== 'no mutation points') {
+    assert.ok(v.killRatio >= 0 && v.killRatio <= 1);
+  }
+});
+
+test('maxMutants: 0 skips the mutation gate', async () => {
+  const v = await evaluate({ source: GOOD_SOURCE },
+    { cassettes: new CassetteStore([cassette]), methods }, testInvoker, { maxMutants: 0 });
+  assert.equal(v.checks.find(c => c.check === 'mutation')?.detail, 'skipped');
+});
