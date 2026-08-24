@@ -63,7 +63,8 @@ function replayable(ev: FitnessEvidence, method?: string): Cassette[] {
 async function checkReplay(source: string, ev: FitnessEvidence, invoke: Invoker): Promise<CheckResult> {
   const all = replayable(ev);
   if (all.length === 0) {
-    return { check: 'replay', pass: true, detail: 'no cassettes yet (first create); probe required by caller' };
+    return { check: 'replay', pass: true,
+      detail: 'no method-attributed cassettes; nothing replayed (probe required by caller)' };
   }
   for (const c of all) {
     let out: unknown;
@@ -120,14 +121,20 @@ function fieldValue(el: unknown, field: string): unknown {
 }
 
 async function checkRelations(source: string, ev: FitnessEvidence, invoke: Invoker): Promise<CheckResult> {
+  /** Methods whose relations nothing could be evaluated against: every probe
+   *  threw, so the loop below judged nothing about them. Saying the relations
+   *  hold would be a claim the evidence never supported. */
+  const unverified: string[] = [];
   for (const m of ev.methods) {
     if (!m.relations?.length) continue;
     const probes = replayable(ev, m.name).map(c => c.args);
     if (probes.length === 0) probes.push({});
+    let evaluated = 0;
     for (const args of probes) {
       let out: unknown;
       try { out = await invoke(source, m.name, args, stubFor(ev.cassettes)); }
       catch { continue; } // throwing is replay's failure, not relations'
+      evaluated++;
       for (const rel of m.relations) {
         const fail = (why: string): CheckResult =>
           ({ check: 'relations', pass: false, detail: `${m.name} ${rel.kind}: ${why}` });
@@ -200,6 +207,14 @@ async function checkRelations(source: string, ev: FitnessEvidence, invoke: Invok
         }
       }
     }
+    if (evaluated === 0) unverified.push(m.name);
+  }
+  // Mirrors checkSchema's `validatedCount === 0` guard. Unlike schema, an
+  // unverified pass (not a failure) keeps faith with `evaluate`'s no-evidence
+  // path: the mutation gate still refuses to certify what nothing can kill.
+  if (unverified.length > 0) {
+    return { check: 'relations', pass: true,
+      detail: `relations unverified (no replayable cassettes for ${unverified.join(', ')})` };
   }
   return { check: 'relations', pass: true, detail: 'all declared relations hold' };
 }
@@ -268,6 +283,23 @@ export async function evaluate(candidate: { source: string },
   checks.push({ check: 'mutation', pass,
     detail: `${killed}/${mutants.length} mutants killed (threshold ${killThreshold})` });
   return { pass, checks, killRatio };
+}
+
+/** The one line the loop's driver reads. A verdict whose checks judged no
+ *  evidence must not read like one that judged plenty, so checks that verified
+ *  nothing are named rather than silently counted among the passes. */
+export function summarizeVerdict(verdict: Verdict): string {
+  if (!verdict.pass) {
+    const failed = verdict.checks.filter(c => !c.pass).map(c => `${c.check}: ${c.detail}`).join('; ');
+    return `fitness: FAIL — ${failed}`;
+  }
+  const kill = verdict.killRatio !== undefined ? `, kill ${verdict.killRatio.toFixed(2)}` : '';
+  const names = verdict.checks.map(c => c.check).join(', ');
+  const unverified = verdict.checks
+    .filter(c => /unverified|nothing replayed|requires evidence/.test(c.detail))
+    .map(c => c.check);
+  const caveat = unverified.length > 0 ? ` — unverified: ${unverified.join(', ')}` : '';
+  return `fitness: PASS (${names}${kill})${caveat}`;
 }
 
 /** What a verdict is ABOUT. Not the source alone: the schema and relation

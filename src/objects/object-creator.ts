@@ -32,7 +32,7 @@ import { Log } from '../core/timed-log.js';
 import { applyDiff, parseSearchReplaceBlocks, levenshtein } from './source-diff.js';
 import { withKeyedLock } from '../core/keyed-lock.js';
 import * as acorn from 'acorn';
-import { evaluate, deployGate, verdictDigest, type Verdict } from '../protocol/fitness.js';
+import { evaluate, deployGate, verdictDigest, summarizeVerdict, type Verdict } from '../protocol/fitness.js';
 import { CassetteStore } from '../protocol/cassette.js';
 import { buildSandboxInvoker } from '../protocol/sandbox-invoker.js';
 
@@ -1822,8 +1822,11 @@ When invited to a Sprint Plan, describe the concrete authoring or modification I
    * Load the target object's persisted fitness cassettes from Storage
    * (key `cassettes:<objectId>`). Absent target, absent Storage, a missing
    * key, or a corrupt payload all fall back to an empty store rather than
-   * failing the fitness op — an empty store still exercises schema,
-   * relations, and mutation; only replay is vacuous without recordings.
+   * failing the fitness op. An empty store is judged by `evaluate`'s
+   * no-evidence path: every check returns an unverified pass, honestly
+   * labelled. A store holding only `_http` traffic is not empty but is
+   * equally unattributed, so replay and relations report unverified and a
+   * declared outputSchema fails closed.
    */
   private async loadCassettes(targetId?: AbjectId): Promise<CassetteStore> {
     if (!targetId || !this.storageId) return new CassetteStore();
@@ -1889,9 +1892,7 @@ When invited to a Sprint Plan, describe the concrete authoring or modification I
     const caveat = note ? ` [${note}]` : '';
     return {
       ok: verdict.pass,
-      summary: (verdict.pass
-        ? `fitness: PASS (${verdict.checks.map(c => c.check).join(', ')}${verdict.killRatio !== undefined ? `, kill ${verdict.killRatio.toFixed(2)}` : ''})`
-        : `fitness: FAIL — ${failed}`) + caveat,
+      summary: summarizeVerdict(verdict) + caveat,
       error: verdict.pass ? undefined : failed,
       data: verdict,
     };

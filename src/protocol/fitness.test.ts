@@ -1,7 +1,7 @@
 /** Run: pnpm tsx --test src/protocol/fitness.test.ts */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { evaluate, type Invoker } from './fitness.js';
+import { evaluate, summarizeVerdict, type Invoker } from './fitness.js';
 import { CassetteStore, type Cassette } from './cassette.js';
 import type { MethodDeclaration } from '../core/types.js';
 
@@ -307,4 +307,43 @@ test('mutation fails the verdict when the evidence cannot kill enough mutants', 
   // measured: only the live filter's flipped guard changes what comes back
   assert.equal(v.killRatio, 0.25);
   assert.equal(mut.detail, '1/4 mutants killed (threshold 0.8)');
+});
+
+test('relations say so when no cassette is attributed to the method', async () => {
+  // Only _http traffic was captured, so `replayable` finds nothing to probe
+  // with and falls back to a single {} call. A method that needs arguments
+  // throws on it, and the check must not report success it never earned.
+  const httpOnly: Cassette = {
+    method: '_http', args: {},
+    request: { method: 'GET', url: 'https://example.test/events?q=1' },
+    response: { status: 200, body: [{ id: 1 }, { id: 1 }] },
+    rawBody: '[{"id":1},{"id":1}]',
+    parsedOutput: [{ id: 1 }, { id: 1 }],
+    recordedAt: 1,
+  };
+  const needsArgs: Invoker = async (_src, _method, args) => {
+    if ((args as { q?: unknown }).q === undefined) throw new Error('q is required');
+    return [{ id: 1 }, { id: 1 }]; // duplicates: no-duplicates would FAIL if ever evaluated
+  };
+  const relMethods: MethodDeclaration[] = [{
+    name: 'listEvents', description: '', parameters: [], effects: 'read',
+    relations: [{ kind: 'no-duplicates' }],
+  }];
+  const v = await evaluate({ source: 'return [];' },
+    { cassettes: new CassetteStore([httpOnly]), methods: relMethods }, needsArgs, { maxMutants: 0 });
+  const rel = v.checks.find(c => c.check === 'relations')!;
+  assert.match(rel.detail, /unverified/,
+    'relations must report unverified evidence, not "all declared relations hold"');
+});
+
+test('a passing verdict names the checks that verified nothing', () => {
+  // The loop's LLM reads this line. Listing check NAMES alone reads as
+  // "four checks passed" when three of them judged no evidence at all.
+  const summary = summarizeVerdict({ pass: true, checks: [
+    { check: 'replay', pass: true, detail: 'no method-attributed cassettes; nothing replayed (probe required by caller)' },
+    { check: 'schema', pass: true, detail: 'all outputs validate' },
+    { check: 'relations', pass: true, detail: 'relations unverified (no replayable cassettes for listEvents)' },
+    { check: 'mutation', pass: true, detail: 'no mutation points' },
+  ] });
+  assert.match(summary, /unverified/, 'a pass built on no evidence must say so');
 });
