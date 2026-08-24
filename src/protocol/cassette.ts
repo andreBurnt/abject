@@ -1,5 +1,5 @@
 /**
- * Cassette -- the ratchet's memory.
+ * Cassette -- the evidence the fitness gate judges a candidate against.
  *
  * A cassette is one recorded truth: a request the object made, the response
  * the world gave, and the parsed answer the object produced from it. The

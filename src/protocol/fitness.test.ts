@@ -6,7 +6,9 @@ import { CassetteStore, type Cassette } from './cassette.js';
 import type { MethodDeclaration } from '../core/types.js';
 
 /** Test invoker: the "source" is the body of an async JS function
- *  (args, http) => output. Real sandboxing arrives with op_fitness (Task 6). */
+ *  (args, http) => output. The invoker the gate actually runs candidates
+ *  under lives in ./sandbox-invoker.ts; this one keeps these tests on the
+ *  checks themselves. */
 const testInvoker: Invoker = async (source, _method, args, http) => {
   const fn = new Function('args', 'http', `"use strict"; return (async () => { ${source} })();`);
   return fn(args, http);

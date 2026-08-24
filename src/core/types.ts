@@ -63,11 +63,11 @@ export type ErrorMessage = AbjectMessage<AbjectError>;
 // Interface Declaration
 // =============================================================================
 
-/** C2 contract: what calling a method does to the world. Reads are safe to
+/** What calling a method does to the world. Reads are safe to
  *  generate and heal autonomously; acts must cross a hand-written gate. */
 export type MethodEffect = 'read' | 'act';
 
-/** C2 contract: a metamorphic relation the method's outputs must satisfy.
+/** A metamorphic relation the method's outputs must satisfy.
  *  Checked by the fitness gate (src/protocol/fitness.ts) — never by an LLM. */
 export interface RelationDeclaration {
   kind: 'subset-on-tighter-filter' | 'idempotent' | 'no-duplicates'
@@ -82,7 +82,8 @@ export interface MethodDeclaration {
   description: string;
   parameters: ParameterDeclaration[];
   returns?: TypeDeclaration;
-  /** C2 contract fields — all optional; legacy manifests are untouched. */
+  /** Contract fields the fitness gate judges against. All optional, so a
+   *  manifest written before they existed stays valid. */
   effects?: MethodEffect;
   /** JSON Schema the method's return value must validate against. */
   outputSchema?: Record<string, unknown>;

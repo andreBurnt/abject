@@ -1,5 +1,5 @@
 /**
- * C2 manifest contract fields are optional and preserved.
+ * Manifest contract fields are optional and preserved.
  * Run: pnpm tsx --test src/core/manifest-contract.test.ts
  */
 import { test } from 'node:test';
