@@ -1,0 +1,322 @@
+[
+  {
+    "goalId": "01-http-weather",
+    "name": "WeatherFetcher",
+    "rawOutputLength": 2528,
+    "extractedCodeLength": 2509,
+    "hasFences": true,
+    "rawStartsParen": false,
+    "rawEndsParen": false,
+    "hasTrailingSemicolon": false,
+    "directParseOk": true,
+    "generateMutantsResult": {
+      "isNull": false,
+      "mutantCount": 12
+    },
+    "deviations": []
+  },
+  {
+    "goalId": "02-filter-sort-tasks",
+    "name": "TaskPrioritizer",
+    "rawOutputLength": 8647,
+    "extractedCodeLength": 8628,
+    "hasFences": true,
+    "rawStartsParen": false,
+    "rawEndsParen": false,
+    "hasTrailingSemicolon": false,
+    "directParseOk": true,
+    "generateMutantsResult": {
+      "isNull": false,
+      "mutantCount": 12
+    },
+    "deviations": []
+  },
+  {
+    "goalId": "03-multi-method-inventory",
+    "name": "InventoryManager",
+    "rawOutputLength": 6255,
+    "extractedCodeLength": 6236,
+    "hasFences": true,
+    "rawStartsParen": false,
+    "rawEndsParen": false,
+    "hasTrailingSemicolon": false,
+    "directParseOk": true,
+    "generateMutantsResult": {
+      "isNull": false,
+      "mutantCount": 12
+    },
+    "deviations": []
+  },
+  {
+    "goalId": "04-date-scheduler",
+    "name": "AppointmentScheduler",
+    "rawOutputLength": 5141,
+    "extractedCodeLength": 5122,
+    "hasFences": true,
+    "rawStartsParen": false,
+    "rawEndsParen": false,
+    "hasTrailingSemicolon": false,
+    "directParseOk": true,
+    "generateMutantsResult": {
+      "isNull": false,
+      "mutantCount": 12
+    },
+    "deviations": []
+  },
+  {
+    "goalId": "05-chained-calls-posts",
+    "name": "UserProfileFeed",
+    "rawOutputLength": 2673,
+    "extractedCodeLength": 2654,
+    "hasFences": true,
+    "rawStartsParen": false,
+    "rawEndsParen": false,
+    "hasTrailingSemicolon": false,
+    "directParseOk": true,
+    "generateMutantsResult": {
+      "isNull": false,
+      "mutantCount": 12
+    },
+    "deviations": []
+  },
+  {
+    "goalId": "06-counter-accumulator",
+    "name": "MetricsAccumulator",
+    "rawOutputLength": 4372,
+    "extractedCodeLength": 4353,
+    "hasFences": true,
+    "rawStartsParen": false,
+    "rawEndsParen": false,
+    "hasTrailingSemicolon": false,
+    "directParseOk": true,
+    "generateMutantsResult": {
+      "isNull": false,
+      "mutantCount": 12
+    },
+    "deviations": []
+  },
+  {
+    "goalId": "07-text-analyzer",
+    "name": "TextAnalyzer",
+    "rawOutputLength": 3540,
+    "extractedCodeLength": 3521,
+    "hasFences": true,
+    "rawStartsParen": false,
+    "rawEndsParen": false,
+    "hasTrailingSemicolon": false,
+    "directParseOk": true,
+    "generateMutantsResult": {
+      "isNull": false,
+      "mutantCount": 12
+    },
+    "deviations": []
+  },
+  {
+    "goalId": "08-key-value-ttl-cache",
+    "name": "TtlCache",
+    "rawOutputLength": 5691,
+    "extractedCodeLength": 5672,
+    "hasFences": true,
+    "rawStartsParen": false,
+    "rawEndsParen": false,
+    "hasTrailingSemicolon": false,
+    "directParseOk": true,
+    "generateMutantsResult": {
+      "isNull": false,
+      "mutantCount": 12
+    },
+    "deviations": []
+  },
+  {
+    "goalId": "09-currency-converter",
+    "name": "CurrencyConverter",
+    "rawOutputLength": 4515,
+    "extractedCodeLength": 4496,
+    "hasFences": true,
+    "rawStartsParen": false,
+    "rawEndsParen": false,
+    "hasTrailingSemicolon": false,
+    "directParseOk": true,
+    "generateMutantsResult": {
+      "isNull": false,
+      "mutantCount": 12
+    },
+    "deviations": []
+  },
+  {
+    "goalId": "10-rate-limiter",
+    "name": "RateLimiter",
+    "rawOutputLength": 4531,
+    "extractedCodeLength": 4512,
+    "hasFences": true,
+    "rawStartsParen": false,
+    "rawEndsParen": false,
+    "hasTrailingSemicolon": false,
+    "directParseOk": true,
+    "generateMutantsResult": {
+      "isNull": false,
+      "mutantCount": 12
+    },
+    "deviations": []
+  },
+  {
+    "goalId": "11-notification-pubsub",
+    "name": "NotificationHub",
+    "rawOutputLength": 6617,
+    "extractedCodeLength": 6598,
+    "hasFences": true,
+    "rawStartsParen": false,
+    "rawEndsParen": false,
+    "hasTrailingSemicolon": false,
+    "directParseOk": true,
+    "generateMutantsResult": {
+      "isNull": false,
+      "mutantCount": 12
+    },
+    "deviations": []
+  },
+  {
+    "goalId": "12-geo-distance",
+    "name": "GeoDistanceCalculator",
+    "rawOutputLength": 6520,
+    "extractedCodeLength": 6501,
+    "hasFences": true,
+    "rawStartsParen": false,
+    "rawEndsParen": false,
+    "hasTrailingSemicolon": false,
+    "directParseOk": true,
+    "generateMutantsResult": {
+      "isNull": false,
+      "mutantCount": 12
+    },
+    "deviations": []
+  },
+  {
+    "goalId": "13-rss-feed-normalizer",
+    "name": "RssFeedNormalizer",
+    "rawOutputLength": 3959,
+    "extractedCodeLength": 3940,
+    "hasFences": true,
+    "rawStartsParen": false,
+    "rawEndsParen": false,
+    "hasTrailingSemicolon": false,
+    "directParseOk": true,
+    "generateMutantsResult": {
+      "isNull": false,
+      "mutantCount": 6
+    },
+    "deviations": []
+  },
+  {
+    "goalId": "14-bookmark-manager",
+    "name": "BookmarkRepository",
+    "rawOutputLength": 6877,
+    "extractedCodeLength": 6858,
+    "hasFences": true,
+    "rawStartsParen": false,
+    "rawEndsParen": false,
+    "hasTrailingSemicolon": false,
+    "directParseOk": true,
+    "generateMutantsResult": {
+      "isNull": false,
+      "mutantCount": 12
+    },
+    "deviations": []
+  },
+  {
+    "goalId": "15-math-evaluator",
+    "name": "ExpressionEvaluator",
+    "rawOutputLength": 4954,
+    "extractedCodeLength": 4935,
+    "hasFences": true,
+    "rawStartsParen": false,
+    "rawEndsParen": false,
+    "hasTrailingSemicolon": false,
+    "directParseOk": true,
+    "generateMutantsResult": {
+      "isNull": false,
+      "mutantCount": 12
+    },
+    "deviations": []
+  },
+  {
+    "goalId": "16-temperature-logger",
+    "name": "TemperatureLogger",
+    "rawOutputLength": 5211,
+    "extractedCodeLength": 5192,
+    "hasFences": true,
+    "rawStartsParen": false,
+    "rawEndsParen": false,
+    "hasTrailingSemicolon": false,
+    "directParseOk": true,
+    "generateMutantsResult": {
+      "isNull": false,
+      "mutantCount": 12
+    },
+    "deviations": []
+  },
+  {
+    "goalId": "17-markdown-link-extractor",
+    "name": "MarkdownLinkExtractor",
+    "rawOutputLength": 5626,
+    "extractedCodeLength": 5607,
+    "hasFences": true,
+    "rawStartsParen": false,
+    "rawEndsParen": false,
+    "hasTrailingSemicolon": false,
+    "directParseOk": true,
+    "generateMutantsResult": {
+      "isNull": false,
+      "mutantCount": 12
+    },
+    "deviations": []
+  },
+  {
+    "goalId": "18-shopping-cart",
+    "name": "ShoppingCart",
+    "rawOutputLength": 5657,
+    "extractedCodeLength": 5638,
+    "hasFences": true,
+    "rawStartsParen": false,
+    "rawEndsParen": false,
+    "hasTrailingSemicolon": false,
+    "directParseOk": true,
+    "generateMutantsResult": {
+      "isNull": false,
+      "mutantCount": 12
+    },
+    "deviations": []
+  },
+  {
+    "goalId": "19-pagination-helper",
+    "name": "PaginationHelper",
+    "rawOutputLength": 2128,
+    "extractedCodeLength": 2109,
+    "hasFences": true,
+    "rawStartsParen": false,
+    "rawEndsParen": false,
+    "hasTrailingSemicolon": false,
+    "directParseOk": true,
+    "generateMutantsResult": {
+      "isNull": false,
+      "mutantCount": 12
+    },
+    "deviations": []
+  },
+  {
+    "goalId": "20-uptime-monitor",
+    "name": "UptimeMonitor",
+    "rawOutputLength": 4796,
+    "extractedCodeLength": 4777,
+    "hasFences": true,
+    "rawStartsParen": false,
+    "rawEndsParen": false,
+    "hasTrailingSemicolon": false,
+    "directParseOk": true,
+    "generateMutantsResult": {
+      "isNull": false,
+      "mutantCount": 12
+    },
+    "deviations": []
+  }
+]

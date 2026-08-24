@@ -1,0 +1,1857 @@
+[
+  {
+    "id": "fixture-events-scraper",
+    "name": "FixtureEventsScraper",
+    "totalMutants": 2,
+    "killedCount": 1,
+    "survivedCount": 1,
+    "killRatio": 0.5,
+    "breakdown": {
+      "caught_by_replay": 1,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 0,
+      "survived": 1
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "drop a .filter(...)",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "listEvents output diverged from cassette"
+      }
+    ]
+  },
+  {
+    "id": "fixture-two-method-calculator",
+    "name": "FixtureTwoMethodCalculator",
+    "totalMutants": 0,
+    "killedCount": 0,
+    "survivedCount": 0,
+    "killRatio": 1,
+    "breakdown": {
+      "caught_by_replay": 0,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 0,
+      "survived": 0
+    },
+    "majorityStubMiss": false,
+    "details": []
+  },
+  {
+    "id": "01-http-weather",
+    "name": "WeatherFetcher",
+    "totalMutants": 12,
+    "killedCount": 12,
+    "survivedCount": 0,
+    "killRatio": 1,
+    "breakdown": {
+      "caught_by_replay": 3,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 9,
+      "survived": 0
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): A non-empty city name string is required in msg.payload.city"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): A non-empty city name string is required in msg.payload.city"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "fetchWeather output diverged from cassette"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Weather API response must be a valid JSON object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "fetchWeather output diverged from cassette"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Weather API response must be a valid JSON object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Latest weather report must be stored in this.data"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): this.data must be an object"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "fetchWeather output diverged from cassette"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): latestReport must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): latestReport must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): latestReport.city must be a string"
+      }
+    ]
+  },
+  {
+    "id": "02-filter-sort-tasks",
+    "name": "TaskPrioritizer",
+    "totalMutants": 12,
+    "killedCount": 12,
+    "survivedCount": 0,
+    "killRatio": 1,
+    "breakdown": {
+      "caught_by_replay": 4,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 8,
+      "survived": 0
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): msg must be an object if provided"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): payload must be an object"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): payload must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "addTask output diverged from cassette"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): tasks must be initialized"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): payload object is required"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): title must be a non-empty string"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): title must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): priority must be a valid number"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "addTask output diverged from cassette"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "addTask output diverged from cassette"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "addTask output diverged from cassette"
+      }
+    ]
+  },
+  {
+    "id": "03-multi-method-inventory",
+    "name": "InventoryManager",
+    "totalMutants": 12,
+    "killedCount": 10,
+    "survivedCount": 2,
+    "killRatio": 0.8333333333333334,
+    "breakdown": {
+      "caught_by_replay": 0,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 10,
+      "survived": 2
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): State data must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Items repository must be an object map"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Item map key must be a non-empty string"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Item map key must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Item record must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Item id must match repository key"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Item name must be a non-empty string"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Item name must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Item quantity must be a non-negative finite number"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Item quantity must be a non-negative finite number"
+      }
+    ]
+  },
+  {
+    "id": "04-date-scheduler",
+    "name": "AppointmentScheduler",
+    "totalMutants": 12,
+    "killedCount": 6,
+    "survivedCount": 6,
+    "killRatio": 0.5,
+    "breakdown": {
+      "caught_by_replay": 0,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 6,
+      "survived": 6
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): id must be a non-empty string"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): id must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): title must be a non-empty string"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): title must be a non-empty string"
+      },
+      {
+        "description": "flip '<' to '>='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): startIso must be strictly before endIso"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Scheduled appointment must be recorded in data"
+      },
+      {
+        "description": "flip '<' to '>='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '<=' to '>'",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "drop a .filter(...)",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '<' to '>='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      }
+    ]
+  },
+  {
+    "id": "05-chained-calls-posts",
+    "name": "UserProfileFeed",
+    "totalMutants": 12,
+    "killedCount": 12,
+    "survivedCount": 0,
+    "killRatio": 1,
+    "breakdown": {
+      "caught_by_replay": 4,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 1,
+      "died_on_timeout": 0,
+      "runtime_exception": 7,
+      "survived": 0
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): userId is required and must be a string or number"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "fetchUserFeed output diverged from cassette"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): userId cannot be empty"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Expected valid profile object from HttpClient"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Expected valid profile object from HttpClient"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "died_on_stub_miss",
+        "killed": true,
+        "detail": "fitness: unstubbed I/O -- no cassette for GET https://api.users.test/posts?userId=u123"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "fetchUserFeed output diverged from cassette"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Postcondition failed: result must contain profile and posts array"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "fetchUserFeed output diverged from cassette"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): this.data must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "fetchUserFeed output diverged from cassette"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): this.data.profile must be null or an object"
+      }
+    ]
+  },
+  {
+    "id": "06-counter-accumulator",
+    "name": "MetricsAccumulator",
+    "totalMutants": 12,
+    "killedCount": 10,
+    "survivedCount": 2,
+    "killRatio": 0.8333333333333334,
+    "breakdown": {
+      "caught_by_replay": 0,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 10,
+      "survived": 2
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): this.data must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): this.data.metrics must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Metric key must be a non-empty string"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Metric key must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Each metric sample must have a finite numerical value"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Each metric sample must have a finite numerical value"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Payload must be an object"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Payload must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Metric name must be a non-empty string"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Metric name must be a non-empty string"
+      }
+    ]
+  },
+  {
+    "id": "07-text-analyzer",
+    "name": "TextAnalyzer",
+    "totalMutants": 12,
+    "killedCount": 12,
+    "survivedCount": 0,
+    "killRatio": 1,
+    "breakdown": {
+      "caught_by_replay": 2,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 10,
+      "survived": 0
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Invariant: data.text must be a string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Invariant: data.wordCount must be non-negative"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Invariant: data.wordCount must be non-negative"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Invariant: data.averageWordLength must be non-negative"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Invariant: data.averageWordLength must be non-negative"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Invariant: data.readingTimeMinutes must be non-negative"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Invariant: data.readingTimeMinutes must be non-negative"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): init accepts an optional object message"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): init must succeed"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): analyzeText requires msg.payload.text to be a string"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "analyzeText output diverged from cassette"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "analyzeText output diverged from cassette"
+      }
+    ]
+  },
+  {
+    "id": "08-key-value-ttl-cache",
+    "name": "TtlCache",
+    "totalMutants": 12,
+    "killedCount": 12,
+    "survivedCount": 0,
+    "killRatio": 1,
+    "breakdown": {
+      "caught_by_replay": 3,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 9,
+      "survived": 0
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "set output diverged from cassette"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "set output diverged from cassette"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "set output diverged from cassette"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): this.data must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): this.data.entries must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): this.data.stats must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): stats.hits must be a non-negative number"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): stats.hits must be a non-negative number"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): stats.misses must be a non-negative number"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): stats.misses must be a non-negative number"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): stats.sets must be a non-negative number"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): stats.sets must be a non-negative number"
+      }
+    ]
+  },
+  {
+    "id": "09-currency-converter",
+    "name": "CurrencyConverter",
+    "totalMutants": 12,
+    "killedCount": 0,
+    "survivedCount": 12,
+    "killRatio": 0,
+    "breakdown": {
+      "caught_by_replay": 0,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 0,
+      "survived": 12
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      }
+    ]
+  },
+  {
+    "id": "10-rate-limiter",
+    "name": "RateLimiter",
+    "totalMutants": 12,
+    "killedCount": 12,
+    "survivedCount": 0,
+    "killRatio": 1,
+    "breakdown": {
+      "caught_by_replay": 4,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 8,
+      "survived": 0
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): this.data must be a valid object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): this.data.clients must be a valid dictionary"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Stored client ID must be a string"
+      },
+      {
+        "description": "flip '<' to '>='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "checkLimit output diverged from cassette"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Timestamp must be a valid number"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Timestamps must be recorded in non-decreasing order"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "checkLimit output diverged from cassette"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "checkLimit output diverged from cassette"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "checkLimit output diverged from cassette"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Message must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Message payload is required"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): clientId must be a non-empty string"
+      }
+    ]
+  },
+  {
+    "id": "11-notification-pubsub",
+    "name": "NotificationHub",
+    "totalMutants": 12,
+    "killedCount": 8,
+    "survivedCount": 4,
+    "killRatio": 0.6666666666666666,
+    "breakdown": {
+      "caught_by_replay": 0,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 8,
+      "survived": 4
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): this.data must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): this.data.topics must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Topic keys must be non-empty strings"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Topic keys must be non-empty strings"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Topic 'news' must not contain duplicate subscribers"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Subscriber ID must be a non-empty string"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Subscriber ID must be a non-empty string"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "return [] instead of the array literal",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Subscriber must be present in topic subscribers list after subscribe"
+      }
+    ]
+  },
+  {
+    "id": "12-geo-distance",
+    "name": "GeoDistanceCalculator",
+    "totalMutants": 12,
+    "killedCount": 11,
+    "survivedCount": 1,
+    "killRatio": 0.9166666666666666,
+    "breakdown": {
+      "caught_by_replay": 0,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 11,
+      "survived": 1
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Model data must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Locations store must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Location key must be a non-empty string"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Location key must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Stored location must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Location name must be a non-empty string"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Location name must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Latitude must be within [-90, 90]"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Latitude must be within [-90, 90]"
+      },
+      {
+        "description": "flip '<=' to '>'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Latitude must be within [-90, 90]"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Longitude must be within [-180, 180]"
+      }
+    ]
+  },
+  {
+    "id": "13-rss-feed-normalizer",
+    "name": "RssFeedNormalizer",
+    "totalMutants": 6,
+    "killedCount": 3,
+    "survivedCount": 3,
+    "killRatio": 0.5,
+    "breakdown": {
+      "caught_by_replay": 0,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 3,
+      "survived": 3
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): this.data must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): this.data must be an object"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "Unexpected token '{'"
+      }
+    ]
+  },
+  {
+    "id": "14-bookmark-manager",
+    "name": "BookmarkRepository",
+    "totalMutants": 12,
+    "killedCount": 12,
+    "survivedCount": 0,
+    "killRatio": 1,
+    "breakdown": {
+      "caught_by_replay": 3,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 9,
+      "survived": 0
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "addBookmark output diverged from cassette"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "addBookmark output diverged from cassette"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): nextId must be a positive number"
+      },
+      {
+        "description": "flip '<' to '>='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "addBookmark output diverged from cassette"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Repository data must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Bookmarks store must be an object map"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): nextId must be a positive number"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): nextId must be a positive number"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Bookmark entry for 1 must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Bookmark ID mismatch: expected 1, found 1"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Bookmark 1 must have a non-empty string URL"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Bookmark 1 must have a non-empty string URL"
+      }
+    ]
+  },
+  {
+    "id": "15-math-evaluator",
+    "name": "ExpressionEvaluator",
+    "totalMutants": 12,
+    "killedCount": 7,
+    "survivedCount": 5,
+    "killRatio": 0.5833333333333334,
+    "breakdown": {
+      "caught_by_replay": 0,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 7,
+      "survived": 5
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): this.data must be an object"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): this.data must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Payload must contain a string 'expr'"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): 'vars' must be an object if provided"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "Expected token type NUMBER but got NUMBER ('2')"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "Expected 'undefined' but got '2'"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "Unexpected token '2' of type NUMBER"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      }
+    ]
+  },
+  {
+    "id": "16-temperature-logger",
+    "name": "TemperatureLogger",
+    "totalMutants": 12,
+    "killedCount": 2,
+    "survivedCount": 10,
+    "killRatio": 0.16666666666666666,
+    "breakdown": {
+      "caught_by_replay": 0,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 2,
+      "survived": 10
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Data must be an object"
+      },
+      {
+        "description": "flip '<' to '>='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Reading entry must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      }
+    ]
+  },
+  {
+    "id": "17-markdown-link-extractor",
+    "name": "MarkdownLinkExtractor",
+    "totalMutants": 12,
+    "killedCount": 6,
+    "survivedCount": 6,
+    "killRatio": 0.5,
+    "breakdown": {
+      "caught_by_replay": 0,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 6,
+      "survived": 6
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Model data must be an object"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Model data must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): extractedCount must be a non-negative number"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): extractedCount must be a non-negative number"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): validatedCount must be a non-negative number"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): validatedCount must be a non-negative number"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      }
+    ]
+  },
+  {
+    "id": "18-shopping-cart",
+    "name": "ShoppingCart",
+    "totalMutants": 12,
+    "killedCount": 11,
+    "survivedCount": 1,
+    "killRatio": 0.9166666666666666,
+    "breakdown": {
+      "caught_by_replay": 0,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 11,
+      "survived": 1
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): SKU must be a non-empty string"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): SKU must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Price must be a non-negative number"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Price must be a non-negative number"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Quantity must be a positive number"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Quantity must be a positive number"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Taxable flag must be a boolean"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "TypeError: Cannot read properties of undefined (reading 'qty')"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Item must be stored in the cart"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Item must be stored in the cart"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Item must be stored in the cart"
+      }
+    ]
+  },
+  {
+    "id": "19-pagination-helper",
+    "name": "PaginationHelper",
+    "totalMutants": 12,
+    "killedCount": 12,
+    "survivedCount": 0,
+    "killRatio": 1,
+    "breakdown": {
+      "caught_by_replay": 2,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 10,
+      "survived": 0
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): this.data must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): this.data must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Message must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): payload.page must be an integer >= 1"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): payload.page must be an integer >= 1"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): payload.pageSize must be an integer >= 1"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): payload.pageSize must be an integer >= 1"
+      },
+      {
+        "description": "flip '<' to '>='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "paginate output diverged from cassette"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "paginate output diverged from cassette"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): result.totalItems must match input item count"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): result.totalPages must match calculated total pages"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): result.hasNext must be a boolean"
+      }
+    ]
+  },
+  {
+    "id": "20-uptime-monitor",
+    "name": "UptimeMonitor",
+    "totalMutants": 12,
+    "killedCount": 11,
+    "survivedCount": 1,
+    "killRatio": 0.9166666666666666,
+    "breakdown": {
+      "caught_by_replay": 0,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 11,
+      "survived": 1
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Payload must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): serviceId must be a non-empty string"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): serviceId must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): ok must be a boolean"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): latencyMs must be a non-negative number"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): latencyMs must be a non-negative number"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Ping count must increment by 1"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Payload must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): serviceId must be a non-empty string"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): serviceId must be a non-empty string"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Uptime percentage must be between 0 and 100"
+      },
+      {
+        "description": "drop a .filter(...)",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      }
+    ]
+  }
+]

@@ -1,0 +1,35 @@
+[
+  {
+    "sampleName": "WeatherFetcher (HTTP + parser)",
+    "sourceLengthChars": 450,
+    "wallClockWithoutGateMs": 0.003,
+    "wallClockWithGateMs": 3.45,
+    "addedWallClockMs": 3.447,
+    "mutantCount": 12,
+    "totalInvokerCalls": 2,
+    "llmCallsMade": 0,
+    "verdictPass": true
+  },
+  {
+    "sampleName": "TaskPrioritizer (Filter / Sort / Invariants)",
+    "sourceLengthChars": 276,
+    "wallClockWithoutGateMs": 0.001,
+    "wallClockWithGateMs": 3.113,
+    "addedWallClockMs": 3.112,
+    "mutantCount": 12,
+    "totalInvokerCalls": 3,
+    "llmCallsMade": 0,
+    "verdictPass": true
+  },
+  {
+    "sampleName": "EmptyEvidence (First create pass-through)",
+    "sourceLengthChars": 73,
+    "wallClockWithoutGateMs": 0.002,
+    "wallClockWithGateMs": 0.006,
+    "addedWallClockMs": 0.005,
+    "mutantCount": 12,
+    "totalInvokerCalls": 0,
+    "llmCallsMade": 0,
+    "verdictPass": true
+  }
+]

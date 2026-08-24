@@ -1,0 +1,1857 @@
+[
+  {
+    "id": "fixture-events-scraper",
+    "name": "FixtureEventsScraper",
+    "totalMutants": 2,
+    "killedCount": 1,
+    "survivedCount": 1,
+    "killRatio": 0.5,
+    "breakdown": {
+      "caught_by_replay": 1,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 0,
+      "survived": 1
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "drop a .filter(...)",
+        "outcome": "survived",
+        "killed": false,
+        "detail": "mutant survived all checks"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "listEvents output diverged from cassette"
+      }
+    ]
+  },
+  {
+    "id": "fixture-two-method-calculator",
+    "name": "FixtureTwoMethodCalculator",
+    "totalMutants": 0,
+    "killedCount": 0,
+    "survivedCount": 0,
+    "killRatio": 1,
+    "breakdown": {
+      "caught_by_replay": 0,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 0,
+      "survived": 0
+    },
+    "majorityStubMiss": false,
+    "details": []
+  },
+  {
+    "id": "01-http-weather",
+    "name": "WeatherFetcher",
+    "totalMutants": 12,
+    "killedCount": 12,
+    "survivedCount": 0,
+    "killRatio": 1,
+    "breakdown": {
+      "caught_by_replay": 0,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 12,
+      "survived": 0
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "fitness: source has no handler for 'fetchForecast'"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "fitness: source has no handler for 'fetchForecast'"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "fitness: source has no handler for 'fetchForecast'"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "fitness: source has no handler for 'fetchForecast'"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "fitness: source has no handler for 'fetchForecast'"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "fitness: source has no handler for 'fetchForecast'"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "fitness: source has no handler for 'fetchForecast'"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "fitness: source has no handler for 'fetchForecast'"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "fitness: source has no handler for 'fetchForecast'"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "fitness: source has no handler for 'fetchForecast'"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "fitness: source has no handler for 'fetchForecast'"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "fitness: source has no handler for 'fetchForecast'"
+      }
+    ]
+  },
+  {
+    "id": "02-filter-sort-tasks",
+    "name": "TaskPrioritizer",
+    "totalMutants": 12,
+    "killedCount": 12,
+    "survivedCount": 0,
+    "killRatio": 1,
+    "breakdown": {
+      "caught_by_replay": 12,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 0,
+      "survived": 0
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "getPrioritizedTasks output diverged from cassette"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "getPrioritizedTasks output diverged from cassette"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "getPrioritizedTasks output diverged from cassette"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "getPrioritizedTasks output diverged from cassette"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "getPrioritizedTasks output diverged from cassette"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "getPrioritizedTasks output diverged from cassette"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "getPrioritizedTasks output diverged from cassette"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "getPrioritizedTasks output diverged from cassette"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "getPrioritizedTasks output diverged from cassette"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "getPrioritizedTasks output diverged from cassette"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "getPrioritizedTasks output diverged from cassette"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "getPrioritizedTasks output diverged from cassette"
+      }
+    ]
+  },
+  {
+    "id": "03-multi-method-inventory",
+    "name": "InventoryManager",
+    "totalMutants": 12,
+    "killedCount": 12,
+    "survivedCount": 0,
+    "killRatio": 1,
+    "breakdown": {
+      "caught_by_replay": 0,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 12,
+      "survived": 0
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Item id must be a non-empty string"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Item id must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Item id must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Item id must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Item id must be a non-empty string"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Item id must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Item id must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Item id must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Item id must be a non-empty string"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Item id must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Item id must be a non-empty string"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Item id must be a non-empty string"
+      }
+    ]
+  },
+  {
+    "id": "04-date-scheduler",
+    "name": "AppointmentScheduler",
+    "totalMutants": 12,
+    "killedCount": 12,
+    "survivedCount": 0,
+    "killRatio": 1,
+    "breakdown": {
+      "caught_by_replay": 0,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 12,
+      "survived": 0
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "TypeError: Cannot read properties of undefined (reading 'trim')"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): id must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): id must be a non-empty string"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): id must be a non-empty string"
+      },
+      {
+        "description": "flip '<' to '>='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): id must be a non-empty string"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): id must be a non-empty string"
+      },
+      {
+        "description": "flip '<' to '>='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): id must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): id must be a non-empty string"
+      },
+      {
+        "description": "flip '<=' to '>'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): id must be a non-empty string"
+      },
+      {
+        "description": "drop a .filter(...)",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): id must be a non-empty string"
+      },
+      {
+        "description": "flip '<' to '>='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): id must be a non-empty string"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): id must be a non-empty string"
+      }
+    ]
+  },
+  {
+    "id": "05-chained-calls-posts",
+    "name": "UserProfileFeed",
+    "totalMutants": 12,
+    "killedCount": 12,
+    "survivedCount": 0,
+    "killRatio": 1,
+    "breakdown": {
+      "caught_by_replay": 5,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 7,
+      "survived": 0
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): userId is required and must be a string or number"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "fetchUserFeed output diverged from cassette"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): userId cannot be empty"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Expected valid profile object from HttpClient"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Expected valid profile object from HttpClient"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "fetchUserFeed output diverged from cassette"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "fetchUserFeed output diverged from cassette"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Postcondition failed: result must contain profile and posts array"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "fetchUserFeed output diverged from cassette"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): this.data must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "fetchUserFeed output diverged from cassette"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): this.data.profile must be null or an object"
+      }
+    ]
+  },
+  {
+    "id": "06-counter-accumulator",
+    "name": "MetricsAccumulator",
+    "totalMutants": 12,
+    "killedCount": 12,
+    "survivedCount": 0,
+    "killRatio": 1,
+    "breakdown": {
+      "caught_by_replay": 0,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 12,
+      "survived": 0
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Metric name must be a non-empty string"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Metric name must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Metric name must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Metric name must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Metric name must be a non-empty string"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Metric name must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Metric name must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Metric name must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Payload must be an object"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Payload must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "TypeError: Cannot read properties of undefined (reading 'trim')"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Metric name must be a non-empty string"
+      }
+    ]
+  },
+  {
+    "id": "07-text-analyzer",
+    "name": "TextAnalyzer",
+    "totalMutants": 12,
+    "killedCount": 12,
+    "survivedCount": 0,
+    "killRatio": 1,
+    "breakdown": {
+      "caught_by_replay": 0,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 12,
+      "survived": 0
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): analyzeText requires msg.payload.text to be a string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): analyzeText requires msg.payload.text to be a string"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): analyzeText requires msg.payload.text to be a string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): analyzeText requires msg.payload.text to be a string"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): analyzeText requires msg.payload.text to be a string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): analyzeText requires msg.payload.text to be a string"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): analyzeText requires msg.payload.text to be a string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): analyzeText requires msg.payload.text to be a string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): analyzeText requires msg.payload.text to be a string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "TypeError: Cannot read properties of undefined (reading 'match')"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): analyzeText requires msg.payload.text to be a string"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): analyzeText requires msg.payload.text to be a string"
+      }
+    ]
+  },
+  {
+    "id": "08-key-value-ttl-cache",
+    "name": "TtlCache",
+    "totalMutants": 12,
+    "killedCount": 12,
+    "survivedCount": 0,
+    "killRatio": 1,
+    "breakdown": {
+      "caught_by_replay": 0,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 12,
+      "survived": 0
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): key must be a non-empty string"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): key must be a non-empty string"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): key must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): key must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): key must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): key must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): key must be a non-empty string"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): key must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): key must be a non-empty string"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): key must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): key must be a non-empty string"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): key must be a non-empty string"
+      }
+    ]
+  },
+  {
+    "id": "09-currency-converter",
+    "name": "CurrencyConverter",
+    "totalMutants": 12,
+    "killedCount": 12,
+    "survivedCount": 0,
+    "killRatio": 1,
+    "breakdown": {
+      "caught_by_replay": 0,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 12,
+      "survived": 0
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Source currency \"from\" must be a non-empty string"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Source currency \"from\" must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Source currency \"from\" must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Source currency \"from\" must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Source currency \"from\" must be a non-empty string"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Source currency \"from\" must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Source currency \"from\" must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Source currency \"from\" must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Source currency \"from\" must be a non-empty string"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Source currency \"from\" must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "TypeError: Cannot read properties of undefined (reading 'trim')"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Source currency \"from\" must be a non-empty string"
+      }
+    ]
+  },
+  {
+    "id": "10-rate-limiter",
+    "name": "RateLimiter",
+    "totalMutants": 12,
+    "killedCount": 12,
+    "survivedCount": 0,
+    "killRatio": 1,
+    "breakdown": {
+      "caught_by_replay": 0,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 12,
+      "survived": 0
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): clientId must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): clientId must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): clientId must be a non-empty string"
+      },
+      {
+        "description": "flip '<' to '>='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): clientId must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): clientId must be a non-empty string"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): clientId must be a non-empty string"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): clientId must be a non-empty string"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): clientId must be a non-empty string"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): clientId must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Message must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Message payload is required"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "TypeError: Cannot read properties of undefined (reading 'trim')"
+      }
+    ]
+  },
+  {
+    "id": "11-notification-pubsub",
+    "name": "NotificationHub",
+    "totalMutants": 12,
+    "killedCount": 12,
+    "survivedCount": 0,
+    "killRatio": 1,
+    "breakdown": {
+      "caught_by_replay": 0,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 12,
+      "survived": 0
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Topic must be a non-empty string"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Topic must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Topic must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Topic must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Topic must be a non-empty string"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Topic must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Topic must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Topic must be a non-empty string"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Topic must be a non-empty string"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Topic must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Topic must be a non-empty string"
+      },
+      {
+        "description": "return [] instead of the array literal",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Topic must be a non-empty string"
+      }
+    ]
+  },
+  {
+    "id": "12-geo-distance",
+    "name": "GeoDistanceCalculator",
+    "totalMutants": 12,
+    "killedCount": 12,
+    "survivedCount": 0,
+    "killRatio": 1,
+    "breakdown": {
+      "caught_by_replay": 0,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 12,
+      "survived": 0
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Location name must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Model data must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): Locations store must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Location name must be a non-empty string"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Location name must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Location name must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Location name must be a non-empty string"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Location name must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Location name must be a non-empty string"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Location name must be a non-empty string"
+      },
+      {
+        "description": "flip '<=' to '>'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Location name must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Location name must be a non-empty string"
+      }
+    ]
+  },
+  {
+    "id": "13-rss-feed-normalizer",
+    "name": "RssFeedNormalizer",
+    "totalMutants": 6,
+    "killedCount": 6,
+    "survivedCount": 0,
+    "killRatio": 1,
+    "breakdown": {
+      "caught_by_replay": 1,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 5,
+      "survived": 0
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "caught_by_replay",
+        "killed": true,
+        "detail": "parseFeed output diverged from cassette"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): parseFeed requires payload.xmlText to be a string"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): parseFeed requires payload.xmlText to be a string"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): parseFeed requires payload.xmlText to be a string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): parseFeed requires payload.xmlText to be a string"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "Unexpected token '{'"
+      }
+    ]
+  },
+  {
+    "id": "14-bookmark-manager",
+    "name": "BookmarkRepository",
+    "totalMutants": 12,
+    "killedCount": 12,
+    "survivedCount": 0,
+    "killRatio": 1,
+    "breakdown": {
+      "caught_by_replay": 0,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 12,
+      "survived": 0
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Precondition failed: url must be a non-empty string"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Precondition failed: url must be a non-empty string"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Precondition failed: url must be a non-empty string"
+      },
+      {
+        "description": "flip '<' to '>='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Precondition failed: url must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Precondition failed: url must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Precondition failed: url must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Precondition failed: url must be a non-empty string"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Precondition failed: url must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Precondition failed: url must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Precondition failed: url must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Precondition failed: url must be a non-empty string"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Precondition failed: url must be a non-empty string"
+      }
+    ]
+  },
+  {
+    "id": "15-math-evaluator",
+    "name": "ExpressionEvaluator",
+    "totalMutants": 12,
+    "killedCount": 12,
+    "survivedCount": 0,
+    "killRatio": 1,
+    "breakdown": {
+      "caught_by_replay": 0,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 12,
+      "survived": 0
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Payload must contain a string 'expr'"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Payload must contain a string 'expr'"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "TypeError: Cannot read properties of undefined (reading 'length')"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Payload must contain a string 'expr'"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Payload must contain a string 'expr'"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Payload must contain a string 'expr'"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Payload must contain a string 'expr'"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Payload must contain a string 'expr'"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Payload must contain a string 'expr'"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Payload must contain a string 'expr'"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Payload must contain a string 'expr'"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Payload must contain a string 'expr'"
+      }
+    ]
+  },
+  {
+    "id": "16-temperature-logger",
+    "name": "TemperatureLogger",
+    "totalMutants": 12,
+    "killedCount": 12,
+    "survivedCount": 0,
+    "killRatio": 1,
+    "breakdown": {
+      "caught_by_replay": 0,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 12,
+      "survived": 0
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): value must be a valid number"
+      },
+      {
+        "description": "flip '<' to '>='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): value must be a valid number"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): value must be a valid number"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): value must be a valid number"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): value must be a valid number"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): value must be a valid number"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): value must be a valid number"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): value must be a valid number"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): value must be a valid number"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): value must be a valid number"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): value must be a valid number"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): value must be a valid number"
+      }
+    ]
+  },
+  {
+    "id": "17-markdown-link-extractor",
+    "name": "MarkdownLinkExtractor",
+    "totalMutants": 12,
+    "killedCount": 12,
+    "survivedCount": 0,
+    "killRatio": 1,
+    "breakdown": {
+      "caught_by_replay": 0,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 12,
+      "survived": 0
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): markdown property must be a string"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): markdown property must be a string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): markdown property must be a string"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): markdown property must be a string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): markdown property must be a string"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): markdown property must be a string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Message must be an object"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Message must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Payload must be an object"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Payload must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (invariant): extractedCount must be a non-negative number"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): markdown property must be a string"
+      }
+    ]
+  },
+  {
+    "id": "18-shopping-cart",
+    "name": "ShoppingCart",
+    "totalMutants": 12,
+    "killedCount": 12,
+    "survivedCount": 0,
+    "killRatio": 1,
+    "breakdown": {
+      "caught_by_replay": 0,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 12,
+      "survived": 0
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "TypeError: Cannot read properties of undefined (reading 'trim')"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): SKU must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): SKU must be a non-empty string"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): SKU must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): SKU must be a non-empty string"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): SKU must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): SKU must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): SKU must be a non-empty string"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): SKU must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): SKU must be a non-empty string"
+      },
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): SKU must be a non-empty string"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): SKU must be a non-empty string"
+      }
+    ]
+  },
+  {
+    "id": "19-pagination-helper",
+    "name": "PaginationHelper",
+    "totalMutants": 12,
+    "killedCount": 12,
+    "survivedCount": 0,
+    "killRatio": 1,
+    "breakdown": {
+      "caught_by_replay": 0,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 12,
+      "survived": 0
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '!==' to '==='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): payload.items must be an array"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): payload.items must be an array"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Message must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): payload.items must be an array"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): payload.items must be an array"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): payload.items must be an array"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): payload.items must be an array"
+      },
+      {
+        "description": "flip '<' to '>='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): payload.items must be an array"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): payload.items must be an array"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): payload.items must be an array"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): payload.items must be an array"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): payload.items must be an array"
+      }
+    ]
+  },
+  {
+    "id": "20-uptime-monitor",
+    "name": "UptimeMonitor",
+    "totalMutants": 12,
+    "killedCount": 12,
+    "survivedCount": 0,
+    "killRatio": 1,
+    "breakdown": {
+      "caught_by_replay": 0,
+      "caught_by_schema": 0,
+      "caught_by_relation": 0,
+      "died_on_stub_miss": 0,
+      "died_on_timeout": 0,
+      "runtime_exception": 12,
+      "survived": 0
+    },
+    "majorityStubMiss": false,
+    "details": [
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): Payload must be an object"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "TypeError: Cannot read properties of undefined (reading 'trim')"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): serviceId must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): serviceId must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): serviceId must be a non-empty string"
+      },
+      {
+        "description": "flip '>=' to '<'",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): serviceId must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): serviceId must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): serviceId must be a non-empty string"
+      },
+      {
+        "description": "flip '===' to '!=='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): serviceId must be a non-empty string"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): serviceId must be a non-empty string"
+      },
+      {
+        "description": "flip '>' to '<='",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): serviceId must be a non-empty string"
+      },
+      {
+        "description": "drop a .filter(...)",
+        "outcome": "runtime_exception",
+        "killed": true,
+        "detail": "ContractViolation (ensure): serviceId must be a non-empty string"
+      }
+    ]
+  }
+]
