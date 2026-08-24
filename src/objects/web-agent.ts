@@ -674,9 +674,17 @@ Set keepPageOpen: false to explicitly close the page when done.
       this.resetPendingTicketTimeouts();
       const { taskId, action } = msg.payload as { taskId: string; step: number; action: AgentAction };
       // Heartbeat: a single browse step (large page navigate, screenshot,
-      // structured extraction) can run minutes; keep the parent's inactivity
-      // timer reset while we're awaiting it.
-      const heartbeat = setInterval(() => this.resetPendingTicketTimeouts(), 60000);
+      // structured extraction, human handoff) can run minutes without a phase
+      // change, so nothing else reaches upstream for the whole step. Reset our
+      // own ticket timers AND send progress to JobManager, whose handler
+      // bubbles it to every ancestor's stall timer — otherwise the caller's
+      // submitJob times out while this step is still legitimately running.
+      const heartbeat = setInterval(() => {
+        this.resetPendingTicketTimeouts();
+        if (this.jobManagerId) {
+          this.send(event(this.id, this.jobManagerId, 'progress', { phase: 'acting' }));
+        }
+      }, 60000);
       try {
         return await this.handleAct(taskId, action);
       } finally {
