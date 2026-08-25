@@ -306,9 +306,11 @@ test('mutation fails the verdict when the evidence cannot kill enough mutants', 
   const mut = v.checks.find(c => c.check === 'mutation')!;
   assert.equal(mut.pass, false);
   assert.ok(v.killRatio !== undefined && v.killRatio < 0.8, `killRatio was ${v.killRatio}`);
-  // measured: only the live filter's flipped guard changes what comes back
-  assert.equal(v.killRatio, 0.25);
-  assert.equal(mut.detail, '1/4 mutants killed (threshold 0.8)');
+  // measured: of six sites (two guard flips, two boundary nudges, two
+  // filter drops), only the live filter's flipped guard changes what
+  // comes back through this recording
+  assert.equal(v.killRatio, 1 / 6);
+  assert.equal(mut.detail, '1/6 mutants killed (threshold 0.8)');
 });
 
 test('relations say so when no cassette is attributed to the method', async () => {

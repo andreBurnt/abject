@@ -53,3 +53,15 @@ test('a source that parses under no dialect returns null, not an empty list', ()
   assert.equal(generateMutants(`{ async listEvents(msg) { return [ }`, 12), null);
   assert.equal(generateMutants(`function ( {`, 12), null);
 });
+
+test('comparison operators yield boundary mutants, not just negations', () => {
+  const ms = generateMutants(`({ f(msg) { return msg.payload.n < 10; } })`, 20)!;
+  assert.ok(ms.some(m => m.description.includes("boundary '<' to '<='")),
+    JSON.stringify(ms.map(m => m.description)));
+  assert.ok(ms.some(m => m.source.includes('<= 10') && !m.source.includes('>=')));
+});
+
+test('arithmetic plus and minus are swapped', () => {
+  const ms = generateMutants(`({ f(msg) { return msg.payload.a + 1; } })`, 20)!;
+  assert.ok(ms.some(m => m.source.includes('- 1')), JSON.stringify(ms.map(m => m.source)));
+});

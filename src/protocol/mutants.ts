@@ -13,6 +13,15 @@ const FLIP: Record<string, string> = {
   '<': '>=', '>': '<=', '<=': '>', '>=': '<', '===': '!==', '!==': '===', '==': '!=', '!=': '==',
 };
 
+/** Off-by-one, not negation: a candidate whose evidence cannot tell `<`
+ *  from `<=` cannot certify a boundary. */
+const BOUNDARY: Record<string, string> = {
+  '<': '<=', '<=': '<', '>': '>=', '>=': '>',
+};
+
+/** Sign mistakes: pagination offsets, totals, deltas. */
+const ARITH: Record<string, string> = { '+': '-', '-': '+' };
+
 const PARSE_OPTS: acorn.Options = { ecmaVersion: 'latest', allowAwaitOutsideFunction: true };
 
 /** The dialects a candidate may be written in, most canonical first.
@@ -55,13 +64,17 @@ export function generateMutants(source: string, max: number): Mutant[] | null {
     if (node === null || typeof node !== 'object') return;
     const n = node as acorn.Node & Record<string, unknown>;
     if (typeof n.type === 'string') {
-      if (n.type === 'BinaryExpression' && FLIP[(n as { operator?: string }).operator ?? '']) {
+      if (n.type === 'BinaryExpression') {
         const op = (n as unknown as { operator: string; left: acorn.Node; right: acorn.Node });
-        sites.push({
-          start: op.left.end, end: op.right.start,
-          replacement: ` ${FLIP[op.operator]} `,
-          description: `flip '${op.operator}' to '${FLIP[op.operator]}'`,
-        });
+        for (const [table, verb] of [[FLIP, 'flip'], [BOUNDARY, 'boundary'], [ARITH, 'swap']] as const) {
+          const to = table[op.operator];
+          if (!to) continue;
+          sites.push({
+            start: op.left.end, end: op.right.start,
+            replacement: ` ${to} `,
+            description: `${verb} '${op.operator}' to '${to}'`,
+          });
+        }
       }
       if (n.type === 'CallExpression') {
         const callee = n.callee as (acorn.Node & { type: string; property?: { name?: string }; object?: acorn.Node });
