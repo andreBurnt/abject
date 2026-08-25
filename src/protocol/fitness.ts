@@ -25,6 +25,12 @@ export type Invoker = (source: string, method: string,
 export interface CheckResult {
   check: 'replay' | 'schema' | 'relations' | 'mutation';
   pass: boolean;
+  /** Whether the check judged any actual invocation outcome. A pass with
+   *  `verified: false` is an honest "nothing here could be judged", and the
+   *  mutation gate refuses to run when no baseline check verified anything --
+   *  a loop over checks that cannot fail kills nothing and would report the
+   *  candidate unfit for the evidence's failing. */
+  verified: boolean;
   detail: string;
 }
 export interface Verdict { pass: boolean; checks: CheckResult[]; killRatio?: number; }
@@ -63,7 +69,7 @@ function replayable(ev: FitnessEvidence, method?: string): Cassette[] {
 async function checkReplay(source: string, ev: FitnessEvidence, invoke: Invoker): Promise<CheckResult> {
   const all = replayable(ev);
   if (all.length === 0) {
-    return { check: 'replay', pass: true,
+    return { check: 'replay', pass: true, verified: false,
       detail: 'no method-attributed cassettes; nothing replayed (probe required by caller)' };
   }
   for (const c of all) {
@@ -71,19 +77,20 @@ async function checkReplay(source: string, ev: FitnessEvidence, invoke: Invoker)
     try {
       out = await invoke(source, c.method, c.args, stubFor(ev.cassettes));
     } catch (err) {
-      return { check: 'replay', pass: false,
+      return { check: 'replay', pass: false, verified: true,
         detail: `${c.method}(${JSON.stringify(c.args)}) threw: ${err instanceof Error ? err.message : String(err)}` };
     }
     if (!deepEqual(out, c.parsedOutput)) {
-      return { check: 'replay', pass: false,
+      return { check: 'replay', pass: false, verified: true,
         detail: `${c.method}(${JSON.stringify(c.args)}) diverged from cassette recorded at ${c.recordedAt}` };
     }
   }
-  return { check: 'replay', pass: true, detail: `${all.length} cassette(s) reproduced` };
+  return { check: 'replay', pass: true, verified: true, detail: `${all.length} cassette(s) reproduced` };
 }
 
 async function checkSchema(source: string, ev: FitnessEvidence, invoke: Invoker): Promise<CheckResult> {
   const ajv = new Ajv({ allErrors: true, strict: false });
+  let anyValidated = false;
   for (const m of ev.methods) {
     if (!m.outputSchema) continue;
     const validate = ajv.compile(m.outputSchema);
@@ -102,17 +109,21 @@ async function checkSchema(source: string, ev: FitnessEvidence, invoke: Invoker)
         continue; // replay already judges throwing; schema judges shape of what returns
       }
       if (!validate(out)) {
-        return { check: 'schema', pass: false,
+        return { check: 'schema', pass: false, verified: true,
           detail: `${m.name}: ${ajv.errorsText(validate.errors)}` };
       }
       validatedCount++;
+      anyValidated = true;
     }
     if (validatedCount === 0 && firstError) {
-      return { check: 'schema', pass: false,
+      return { check: 'schema', pass: false, verified: true,
         detail: `${m.name}: no output could be validated (all probes threw: ${firstError})` };
     }
   }
-  return { check: 'schema', pass: true, detail: 'all outputs validate' };
+  if (!anyValidated) {
+    return { check: 'schema', pass: true, verified: false, detail: 'no output schemas declared' };
+  }
+  return { check: 'schema', pass: true, verified: true, detail: 'all outputs validate' };
 }
 
 function fieldValue(el: unknown, field: string): unknown {
@@ -125,8 +136,10 @@ async function checkRelations(source: string, ev: FitnessEvidence, invoke: Invok
    *  threw, so the loop below judged nothing about them. Saying the relations
    *  hold would be a claim the evidence never supported. */
   const unverified: string[] = [];
+  let anyDeclared = false;
   for (const m of ev.methods) {
     if (!m.relations?.length) continue;
+    anyDeclared = true;
     const probes = replayable(ev, m.name).map(c => c.args);
     if (probes.length === 0) probes.push({});
     let evaluated = 0;
@@ -137,7 +150,7 @@ async function checkRelations(source: string, ev: FitnessEvidence, invoke: Invok
       evaluated++;
       for (const rel of m.relations) {
         const fail = (why: string): CheckResult =>
-          ({ check: 'relations', pass: false, detail: `${m.name} ${rel.kind}: ${why}` });
+          ({ check: 'relations', pass: false, verified: true, detail: `${m.name} ${rel.kind}: ${why}` });
         switch (rel.kind) {
           case 'idempotent': {
             let again: unknown;
@@ -213,10 +226,13 @@ async function checkRelations(source: string, ev: FitnessEvidence, invoke: Invok
   // unverified pass (not a failure) keeps faith with `evaluate`'s no-evidence
   // path: the mutation gate still refuses to certify what nothing can kill.
   if (unverified.length > 0) {
-    return { check: 'relations', pass: true,
+    return { check: 'relations', pass: true, verified: false,
       detail: `relations unverified (no replayable cassettes for ${unverified.join(', ')})` };
   }
-  return { check: 'relations', pass: true, detail: 'all declared relations hold' };
+  if (!anyDeclared) {
+    return { check: 'relations', pass: true, verified: false, detail: 'no relations declared' };
+  }
+  return { check: 'relations', pass: true, verified: true, detail: 'all declared relations hold' };
 }
 
 export async function evaluate(candidate: { source: string },
@@ -234,9 +250,9 @@ export async function evaluate(candidate: { source: string },
   if (evidence.cassettes.all().length === 0) {
     return { pass: true, checks: [
       await checkReplay(candidate.source, evidence, invoker), // vacuous: invokes nothing
-      { check: 'schema', pass: true, detail: 'no cassettes — schema unverified' },
-      { check: 'relations', pass: true, detail: 'no cassettes — relations unverified' },
-      { check: 'mutation', pass: true, detail: 'no cassettes — mutation gate requires evidence' },
+      { check: 'schema', pass: true, verified: false, detail: 'no cassettes — schema unverified' },
+      { check: 'relations', pass: true, verified: false, detail: 'no cassettes — relations unverified' },
+      { check: 'mutation', pass: true, verified: false, detail: 'no cassettes — mutation gate requires evidence' },
     ] };
   }
 
@@ -255,18 +271,29 @@ export async function evaluate(candidate: { source: string },
   const maxMutants = opts?.maxMutants ?? 12;
   const killThreshold = opts?.killThreshold ?? 0.8;
   if (maxMutants === 0) {
-    checks.push({ check: 'mutation', pass: true, detail: 'skipped' });
+    checks.push({ check: 'mutation', pass: true, verified: false, detail: 'skipped' });
+    return { pass: true, checks };
+  }
+  // Mutation testing asks: could this evidence tell a broken copy from the
+  // real thing? When no baseline check verified anything, the answer is
+  // already known -- no check can kill a mutant, and running the loop anyway
+  // would fail the candidate for the evidence's poverty. This is the state a
+  // store reaches when the recorder has captured raw traffic but no method
+  // calls have been attributed yet.
+  if (!checks.some(c => c.verified)) {
+    checks.push({ check: 'mutation', pass: true, verified: false,
+      detail: 'no check can kill a mutant — evidence insufficient' });
     return { pass: true, checks };
   }
   const mutants = generateMutants(candidate.source, maxMutants);
   if (mutants === null) {
     // Not "nothing to break" — the gate could not read the candidate under any
     // dialect it knows, so the mutation evidence is absent rather than empty.
-    checks.push({ check: 'mutation', pass: false, detail: 'candidate does not parse' });
+    checks.push({ check: 'mutation', pass: false, verified: true, detail: 'candidate does not parse' });
     return { pass: false, checks };
   }
   if (mutants.length === 0) {
-    checks.push({ check: 'mutation', pass: true, detail: 'no mutation points' });
+    checks.push({ check: 'mutation', pass: true, verified: true, detail: 'no mutation points' });
     return { pass: true, checks };
   }
   let killed = 0;
@@ -280,7 +307,7 @@ export async function evaluate(candidate: { source: string },
   }
   const killRatio = killed / mutants.length;
   const pass = killRatio >= killThreshold;
-  checks.push({ check: 'mutation', pass,
+  checks.push({ check: 'mutation', pass, verified: true,
     detail: `${killed}/${mutants.length} mutants killed (threshold ${killThreshold})` });
   return { pass, checks, killRatio };
 }
@@ -295,9 +322,7 @@ export function summarizeVerdict(verdict: Verdict): string {
   }
   const kill = verdict.killRatio !== undefined ? `, kill ${verdict.killRatio.toFixed(2)}` : '';
   const names = verdict.checks.map(c => c.check).join(', ');
-  const unverified = verdict.checks
-    .filter(c => /unverified|nothing replayed|requires evidence/.test(c.detail))
-    .map(c => c.check);
+  const unverified = verdict.checks.filter(c => !c.verified).map(c => c.check);
   const caveat = unverified.length > 0 ? ` — unverified: ${unverified.join(', ')}` : '';
   return `fitness: PASS (${names}${kill})${caveat}`;
 }

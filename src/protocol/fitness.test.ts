@@ -342,10 +342,10 @@ test('a passing verdict names the checks that verified nothing', () => {
   // The loop's LLM reads this line. Listing check NAMES alone reads as
   // "four checks passed" when three of them judged no evidence at all.
   const summary = summarizeVerdict({ pass: true, checks: [
-    { check: 'replay', pass: true, detail: 'no method-attributed cassettes; nothing replayed (probe required by caller)' },
-    { check: 'schema', pass: true, detail: 'all outputs validate' },
-    { check: 'relations', pass: true, detail: 'relations unverified (no replayable cassettes for listEvents)' },
-    { check: 'mutation', pass: true, detail: 'no mutation points' },
+    { check: 'replay', pass: true, verified: false, detail: 'no method-attributed cassettes; nothing replayed (probe required by caller)' },
+    { check: 'schema', pass: true, verified: true, detail: 'all outputs validate' },
+    { check: 'relations', pass: true, verified: false, detail: 'relations unverified (no replayable cassettes for listEvents)' },
+    { check: 'mutation', pass: true, verified: true, detail: 'no mutation points' },
   ] });
   assert.match(summary, /unverified/, 'a pass built on no evidence must say so');
 });
@@ -374,4 +374,48 @@ test('digest is stable under object key order in methods', () => {
   const reordered = methods.map(m => ({ outputSchema: m.outputSchema, name: m.name,
     description: m.description, parameters: m.parameters, effects: m.effects })) as MethodDeclaration[];
   assert.equal(verdictDigest(GOOD_SOURCE, methods), verdictDigest(GOOD_SOURCE, reordered));
+});
+
+test('recording-only evidence does not brick a candidate with no discriminators', async () => {
+  const httpOnly: Cassette = { ...cassette, method: '_http', args: {} };
+  const bare: MethodDeclaration[] = [{ name: 'listEvents', description: '', parameters: [] }];
+  const verdict = await evaluate({ source: GOOD_SOURCE },
+    { cassettes: new CassetteStore([httpOnly]), methods: bare }, testInvoker);
+  assert.equal(verdict.pass, true, 'turning recording on must not fail working objects');
+  const mutation = verdict.checks.find(c => c.check === 'mutation')!;
+  assert.equal(mutation.verified, false);
+  assert.match(mutation.detail, /evidence insufficient/);
+});
+
+test('relations-only candidate whose probes all throw is not bricked either', async () => {
+  const httpOnly: Cassette = { ...cassette, method: '_http', args: {} };
+  const relOnly: MethodDeclaration[] = [{ name: 'listEvents', description: '', parameters: [],
+    relations: [{ kind: 'no-duplicates' }] }];
+  const throwing = `throw new Error('needs real args');`;
+  const verdict = await evaluate({ source: throwing },
+    { cassettes: new CassetteStore([httpOnly]), methods: relOnly }, testInvoker);
+  assert.equal(verdict.pass, true);
+  assert.equal(verdict.checks.find(c => c.check === 'mutation')!.verified, false);
+});
+
+test('a verified discriminator still runs the mutation loop', async () => {
+  const withSite = `
+    const res = http({ method: 'GET', url: 'https://example.test/events?q=' + args.q });
+    if (!res) throw new Error('no stub');
+    if (res.status >= 400) throw new Error('bad status');
+    return res.body;
+  `;
+  const verdict = await evaluate({ source: withSite },
+    { cassettes: new CassetteStore([cassette]), methods }, testInvoker);
+  assert.equal(verdict.checks.find(c => c.check === 'mutation')!.verified, true);
+  assert.notEqual(verdict.killRatio, undefined);
+});
+
+test('summarizeVerdict names unverified checks from the flag, not the wording', () => {
+  const s = summarizeVerdict({ pass: true, checks: [
+    { check: 'replay', pass: true, verified: false, detail: 'anything at all' },
+    { check: 'schema', pass: true, verified: true, detail: 'all outputs validate' },
+  ] });
+  assert.match(s, /unverified: replay/);
+  assert.doesNotMatch(s, /unverified:.*schema/);
 });
