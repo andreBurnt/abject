@@ -381,7 +381,7 @@ export class ChatBrowser extends Abject {
     // Clicking a row opens the conversation; the action button deletes it.
     const { widgetIds: [listId] } = await this.request<{ widgetIds: AbjectId[] }>(
       request(this.id, this.widgetManagerId!, 'create', {
-        specs: [{ type: 'list', windowId: this.windowId, items: [], searchable: false }],
+        specs: [{ type: 'list', windowId: this.windowId, items: [], searchable: true }],
       })
     );
     this.listWidgetId = listId;
@@ -392,15 +392,47 @@ export class ChatBrowser extends Abject {
     }));
     this.send(request(this.id, this.listWidgetId, 'addDependent', {}));
 
-    const items: ListItem[] = rows.map(c => this.toListItem(c));
+    const items: ListItem[] = await Promise.all(
+      rows.map(async (c) => {
+        const historyText = await this.fetchConversationHistory(c.conversationId);
+        return this.toListItem(c, historyText);
+      })
+    );
     await this.request(request(this.id, this.listWidgetId, 'update', { items }));
   }
 
-  private toListItem(c: PersistedConversation): ListItem {
+  private async fetchConversationHistory(conversationId: string): Promise<string> {
+    if (!this.chatManagerId) return '';
+    try {
+      const entries = await this.request<unknown[] | null>(
+        request(this.id, this.chatManagerId, 'getHistory', { conversationId }),
+        5000,
+      );
+      if (!Array.isArray(entries)) return '';
+      const textParts: string[] = [];
+      for (const entry of entries) {
+        if (typeof entry === 'string') {
+          textParts.push(entry);
+        } else if (entry && typeof entry === 'object' && 'content' in entry) {
+          const content = (entry as { content?: unknown }).content;
+          if (typeof content === 'string' && content.trim()) {
+            textParts.push(content.trim());
+          }
+        }
+      }
+      return textParts.join(' ');
+    } catch (err) {
+      log.warn(`fetchConversationHistory failed for ${conversationId.slice(0, 8)}: ${String(err)}`);
+      return '';
+    }
+  }
+
+  private toListItem(c: PersistedConversation, searchableContent?: string): ListItem {
     return {
       label: c.title,
       value: c.conversationId,
       detail: formatRelativeTime(c.lastActiveAt),
+      secondary: searchableContent || undefined,
       actions: [
         {
           id: 'delete',
