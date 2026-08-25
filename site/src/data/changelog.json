@@ -1,5 +1,18 @@
 [
   {
+    "version": "0.9.13",
+    "date": "2026-08-25",
+    "title": "Clean Exits, Steady Handoffs",
+    "summary": "A small stability release. The Linux desktop app now quits cleanly, and web agents keep reporting progress while you take the wheel.",
+    "highlights": [
+      "Stability fixes for desktop shutdown and for web agent tasks during human handoffs."
+    ],
+    "fixes": [
+      "The Linux AppImage no longer hangs on shutdown; quitting the app exits cleanly.",
+      "Web agent tasks no longer appear stalled when a human takes over the browser; the progress heartbeat stays alive through the handoff."
+    ]
+  },
+  {
     "version": "0.9.12",
     "date": "2026-08-23",
     "title": "Smarter permissions, sturdier workspaces",
