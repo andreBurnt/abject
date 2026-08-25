@@ -121,7 +121,7 @@ import { loadAuthConfig, SessionStore, authenticateConnection } from './auth.js'
 import { CliServer } from './cli-server.js';
 import { Log } from '../src/core/timed-log.js';
 import * as path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -1088,6 +1088,74 @@ async function main(): Promise<void> {
   console.log(`  Objects:    ${runtime.objectRegistry.objectCount}`);
   console.log('');
 
+  /**
+   * Arm a hard exit that does not depend on this thread's event loop.
+   *
+   * The one call that can wedge shutdown — libdatachannel's `cleanup` — is
+   * synchronous native code. While it blocks, this thread runs no timers, no
+   * promises and no signal handlers, which is why a `setTimeout` deadline is
+   * worthless against it and why Ctrl-C stopped working: SIGINT was caught,
+   * but the handler was JS and needed a loop that was already gone.
+   *
+   * A separate *process* has its own everything and goes on running while
+   * ours is stuck, so it can still fire. It sends SIGKILL, the one signal
+   * nothing can swallow. Every child process of our own has already been
+   * reaped before this is armed, so there is nothing left to orphan.
+   *
+   * It cannot be a worker thread. A worker can rescue a main thread blocked
+   * in native code — that much was measured — but not one blocked inside
+   * `process.exit()`, because Node's exit sequence stops sub-worker contexts
+   * on its way out and so kills the rescuer first. That is precisely where
+   * this last hung: the teardown below finished in 25ms and the process
+   * still never left.
+   *
+   * There is no disarm and it needs none. The child holds a pipe to us and
+   * reads its closing as "the parent is gone", so a normal exit collapses it
+   * before the deadline and it fires only when we genuinely failed to leave.
+   * Watching the pipe rather than a pid also means it can never SIGKILL
+   * whatever unrelated process later inherits ours.
+   */
+  const armExitWatchdog = (ms: number, what: string): void => {
+    const notice = JSON.stringify(`[Abject] ${what} did not finish within ${ms}ms — hard-exiting\n`);
+    const child = `
+      let gone = false;
+      const leave = () => { gone = true; process.exit(0); };
+      process.stdin.resume();
+      process.stdin.on('end', leave);
+      process.stdin.on('close', leave);
+      process.stdin.on('error', leave);
+      setTimeout(() => {
+        if (gone) return;
+        try { process.stderr.write(${notice}); } catch {}
+        try { process.kill(${process.pid}, 'SIGKILL'); } catch {}
+        process.exit(0);
+      }, ${ms});
+    `;
+    try {
+      const watchdog = spawn(process.execPath, ['-e', child], {
+        detached: true,
+        stdio: ['pipe', 'ignore', 'inherit'],
+        // In the desktop app execPath is the Electron binary, which would
+        // otherwise start a whole second app instead of evaluating this.
+        // Plain node ignores the variable.
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      });
+      // The watchdog must never be the reason the process stays up.
+      watchdog.unref();
+      (watchdog.stdin as unknown as { unref?: () => void } | null)?.unref?.();
+    } catch (err) {
+      alog.warn('could not arm the exit watchdog:', err);
+    }
+  };
+
+  /**
+   * How long the whole departure gets before the watchdog stops waiting.
+   * Comfortably above a healthy teardown (25ms) and above Electron's own
+   * quit sequence (~6.5s of its own timers), so it only ever fires on a
+   * genuine wedge.
+   */
+  const SHUTDOWN_DEADLINE_MS = 10_000;
+
   // Handle graceful shutdown
   let shuttingDown = false;
 
@@ -1106,6 +1174,12 @@ async function main(): Promise<void> {
    * after the last window has gone.
    */
   const releaseEverything = async (): Promise<void> => {
+    // Arm the watchdog before anything else, and never disarm it. The hang
+    // that outlived every earlier fix was not in the teardown at all but in
+    // the `process.exit()` after it, so a watchdog scoped to one slow call
+    // was disarmed a moment before it was needed. This one covers the whole
+    // departure, and both callers inherit it.
+    armExitWatchdog(SHUTDOWN_DEADLINE_MS, 'shutdown');
     sessionStore.destroy();
     // Release every listening socket before the slow work. Whatever happens
     // to the runtime teardown after this, the next `awaken` can bind.
@@ -1113,6 +1187,35 @@ async function main(): Promise<void> {
       wsServer.close(),
       cliServer ? cliServer.stop() : Promise.resolve(),
     ]);
+    // Stop the dedicated workers first — and stop their objects before their
+    // threads.
+    //
+    // runtime.stop() reaches the worker pool and the objects in this thread's
+    // factory, and nothing else. The UI and P2P workers are dedicated threads
+    // whose objects it has never seen, so they used to outlive the runtime
+    // completely: the log showed the P2P worker dialing brand new peers a
+    // second and a half after "runtime stopped", because its auto-connect loop
+    // was still running and nobody had ever told it to stop. Asking each
+    // worker to stop its own objects is what finally runs PeerRegistry's
+    // onStop() — the teardown that closes the peer connections, stops that
+    // loop and disconnects the signaling client, and which had been sitting
+    // there correct and unreachable. Terminating the threads afterwards is
+    // what guarantees no new PeerConnection can appear while the cleanup
+    // below walks the ones that exist.
+    //
+    // Before runtime.stop(), because the bus those objects speak on is only
+    // up until it returns.
+    const [p2pSettled] = await Promise.allSettled([
+      p2pBridge?.shutdownWorker(3000),
+      uiBridge?.shutdownWorker(2000),
+    ]);
+
+    // Did the P2P worker manage to shut libdatachannel down on its own thread?
+    // That is the only teardown that can actually join the RTC threads, so it
+    // decides whether there is anything left for us to do below.
+    const workerShutDownRtc =
+      p2pSettled.status === 'fulfilled' && p2pSettled.value?.nativeCleanup === true;
+
     await runtime.stop().catch(() => { /* teardown is best effort */ });
 
     // Shut libdatachannel down explicitly.
@@ -1124,10 +1227,42 @@ async function main(): Promise<void> {
     // AppImage's own FUSE mount behind, which is what holds the file busy
     // against the next update. `cleanup` is the library's own answer to this;
     // terminating the worker does not unload the addon.
+    if (workerShutDownRtc) {
+      // Already done, on the thread that owns the callbacks — and this thread
+      // must not even import the addon. Loading it here puts it in an env that
+      // never held a PeerConnection: cleanup() from there walks empty instance
+      // sets while re-entering a library that is already down.
+      alog.info('node-datachannel was shut down by the P2P worker — skipping main-thread cleanup');
+      return;
+    }
+
+    // The worker could not confirm (it timed out, or died before answering),
+    // so fall back to shutting the library down from here.
+    let dc: typeof import('node-datachannel') | undefined;
     try {
-      const dc = await import('node-datachannel');
-      await dc.cleanup();
+      dc = await import('node-datachannel');
     } catch { /* never loaded, or a version without it */ }
+
+    if (dc) {
+      // Synchronous native code: it holds this thread until it converges or
+      // gives up on its own 10s deadline. It could not converge before,
+      // because the P2P worker was still alive above it and still creating
+      // PeerConnections — CloseAll() walked a set another thread kept
+      // inserting into. (That set, `PeerConnectionWrapper::instances` in
+      // node-datachannel, has no mutex; the race is real but the fix belongs
+      // upstream. Stopping the only other thread that touches it is what
+      // makes this call safe from here.)
+      const startedAt = Date.now();
+      try {
+        dc.cleanup();
+        alog.info(`node-datachannel cleanup returned in ${Date.now() - startedAt}ms`);
+      } catch (err) {
+        // "cleanup timeout (possible deadlock)" lands here. It used to be
+        // swallowed by a bare catch written for the import failing, which is
+        // how ten blocked seconds and a failed teardown left no trace at all.
+        alog.warn(`node-datachannel cleanup failed after ${Date.now() - startedAt}ms:`, err);
+      }
+    }
   };
   backendShutdown = releaseEverything;
 
@@ -1142,8 +1277,17 @@ async function main(): Promise<void> {
     }
     shuttingDown = true;
     alog.info(`Shutting down (${signal})...`);
-    releaseEverything().finally(() => process.exit(0));
-    // If cleanup takes too long, force exit
+    releaseEverything().finally(() => {
+      // Timestamped on purpose: everything logged before this line is our own
+      // teardown, everything after it belongs to the runtime's exit. Without
+      // that boundary a hang here looks exactly like a hang in the teardown,
+      // which is how the last one hid for so long.
+      alog.info('Teardown complete — exiting');
+      process.exit(0);
+    });
+    // Covers a teardown that is merely slow. A teardown *blocked* in native
+    // code cannot be rescued by a timer on the thread it is blocking — the
+    // watchdog thread inside releaseEverything() is what covers that.
     setTimeout(() => process.exit(1), 3000);
   };
 

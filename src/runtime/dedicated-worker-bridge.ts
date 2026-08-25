@@ -18,6 +18,24 @@ import { Log } from '../core/timed-log.js';
 const log = new Log('DedicatedWorkerBridge');
 
 /**
+ * How long to let a confirmed worker's loop turn before destroying its env.
+ * Short on purpose: it is slack for an in-flight callback, not a drain.
+ */
+const TERMINATE_GRACE_MS = 150;
+
+/** What a worker reports back when asked to shut down. */
+export interface WorkerShutdownResult {
+  /** The worker answered before the deadline — its objects really did stop. */
+  confirmed: boolean;
+  /**
+   * The worker shut libdatachannel down in its own env. The main thread must
+   * then leave it alone: calling cleanup() again from an env that never owned
+   * a PeerConnection drains nothing and only loads the addon somewhere new.
+   */
+  nativeCleanup: boolean;
+}
+
+/**
  * Custom message from main thread → dedicated worker.
  */
 export interface DedicatedInboundMessage {
@@ -74,6 +92,62 @@ export class DedicatedWorkerBridge extends WorkerBridge {
    */
   onCustom(type: string, handler: (data: DedicatedOutboundMessage) => void): void {
     this.customHandlers.set(type, handler);
+  }
+
+  /**
+   * Stop the worker's objects, then terminate the thread.
+   *
+   * Terminating alone is not enough and stopping alone is not enough. The
+   * objects a dedicated worker builds — PeerRegistry above all — own things
+   * the process cannot exit while holding: live PeerConnections, a signaling
+   * socket, an auto-connect loop that keeps dialing. Only their own onStop()
+   * closes those, and nothing else in the shutdown path ever reaches them,
+   * so we ask the worker to run it and wait for the confirmation. The
+   * terminate() afterwards is what guarantees the thread cannot mint a new
+   * connection while the main thread is inside libdatachannel's cleanup.
+   *
+   * The wait is bounded: a worker too wedged to answer still gets terminated.
+   */
+  async shutdownWorker(timeoutMs = 3000): Promise<WorkerShutdownResult> {
+    if (this.isDead) {
+      log.warn('worker was already dead before shutdown — its objects never stopped');
+      return { confirmed: false, nativeCleanup: false };
+    }
+    const startedAt = Date.now();
+    let result: WorkerShutdownResult = { confirmed: false, nativeCleanup: false };
+    try {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const confirmed = new Promise<WorkerShutdownResult>((resolve) => {
+        this.onCustom('shutdown-complete', (data) => resolve({
+          confirmed: true,
+          nativeCleanup: data.nativeCleanup === true,
+        }));
+        timer = setTimeout(() => resolve({ confirmed: false, nativeCleanup: false }), timeoutMs);
+      });
+      this.sendCustom({ type: 'shutdown' });
+      result = await confirmed;
+      if (timer) clearTimeout(timer);
+      if (result.confirmed) {
+        const native = result.nativeCleanup ? ', libdatachannel shut down in-worker' : '';
+        log.info(`worker confirmed shutdown in ${Date.now() - startedAt}ms${native}`);
+        // A confirmed worker is still holding a live event loop for a moment.
+        // Terminating destroys its env, and anything already queued on that
+        // loop then has nowhere to land — which is exactly how a native
+        // callback aborted the process with `Error::Error
+        // napi_define_properties` under `Worker::Run`. Joining the RTC threads
+        // inside the worker is what actually removes those callers; this is
+        // just a turn or two of slack for whatever was already in flight when
+        // it answered.
+        await new Promise((r) => setTimeout(r, TERMINATE_GRACE_MS));
+      } else {
+        log.warn(`worker did not confirm shutdown within ${timeoutMs}ms — terminating anyway`);
+      }
+    } catch (err) {
+      log.warn('worker shutdown request failed, terminating anyway:', err);
+    } finally {
+      this.terminate();
+    }
+    return result;
   }
 
   /**

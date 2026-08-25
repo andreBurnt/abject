@@ -65,6 +65,67 @@ const log = new Log('P2PWorker');
 const workerBus = new WorkerBus((data) => port.postMessage(data));
 let peerRegistryObj: PeerRegistry | null = null;
 
+/**
+ * Every object this worker constructs, in construction order.
+ *
+ * Shutdown walks it backwards. PeerRegistry.onStop() is the reason it
+ * exists: it closes every peer transport, stops the auto-connect loop and
+ * disconnects the signaling client, and until now nothing ever called it —
+ * these objects live inside this thread, so the main thread's runtime.stop()
+ * never saw them and the worker went on dialing new peers after the runtime
+ * was gone.
+ */
+const p2pObjects: Array<{ stop(): Promise<void> }> = [];
+let peerStatusTimer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Shut libdatachannel down from inside this worker, on the thread that owns
+ * every PeerConnection in the process.
+ *
+ * The native state is process-global, but the bridge back to JS is not:
+ * node-datachannel calls into JS through thread-safe functions bound to the
+ * env that created the connections, and that env is this one. Draining from
+ * the main thread after this thread was terminated drained nothing — the env
+ * those callbacks targeted no longer existed, so `cleanup()` returned in
+ * milliseconds having joined nothing, the RTC threads survived into the
+ * library's global destructors, and exit blocked there.
+ *
+ * Worse, the callbacks that were still in flight had nowhere to land. One of
+ * them tried to build a JS Error in an env that was already being torn down
+ * and took the whole process with it:
+ *
+ *   FATAL ERROR: Error::Error napi_define_properties
+ *     ... node_datachannel.node
+ *     uv_run -> SpinEventLoopInternal -> node::worker::Worker::Run
+ *
+ * `Worker::Run` spinning its loop is this thread on its way out. Running
+ * rtc::Cleanup() here joins the RTC threads first, so by the time the env
+ * goes away there is no one left to call into it.
+ *
+ * Synchronous native code — it holds this thread until it converges or hits
+ * the library's own 10s deadline. After PeerRegistry.onStop() has closed the
+ * transports there should be nothing left to wait for.
+ */
+async function drainDataChannel(): Promise<boolean> {
+  let dc: typeof import('node-datachannel') | undefined;
+  try {
+    dc = await import('node-datachannel');
+  } catch (err) {
+    log.warn('node-datachannel not loadable here — skipping cleanup:', err);
+    return false;
+  }
+  const startedAt = Date.now();
+  try {
+    dc.cleanup();
+    log.info(`node-datachannel cleanup returned in ${Date.now() - startedAt}ms`);
+    return true;
+  } catch (err) {
+    // "cleanup timeout (possible deadlock)" lands here. Never silent again.
+    log.warn(`node-datachannel cleanup failed after ${Date.now() - startedAt}ms:`, err);
+    return false;
+  }
+}
+
 interface P2PConfig {
   identityId: string;
   peerRegistryId: string;
@@ -100,6 +161,7 @@ async function bootstrapP2P(config: P2PConfig): Promise<void> {
     identityObj.setTypeId(config.identityTypeId as TypeId);
   }
   await identityObj.init(workerBus);
+  p2pObjects.push(identityObj);
   log.info('IdentityObject initialized');
 
   // Get peerId by sending a message to Identity (it's local to this worker)
@@ -128,6 +190,7 @@ async function bootstrapP2P(config: P2PConfig): Promise<void> {
     peerRegistryObj.setTypeId(config.peerRegistryTypeId as TypeId);
   }
   await peerRegistryObj.init(workerBus);
+  p2pObjects.push(peerRegistryObj);
   log.info('PeerRegistry initialized');
 
   // 3. SignalingRelay
@@ -138,6 +201,7 @@ async function bootstrapP2P(config: P2PConfig): Promise<void> {
     signalingRelayObj.setTypeId(config.signalingRelayTypeId as TypeId);
   }
   await signalingRelayObj.init(workerBus);
+  p2pObjects.push(signalingRelayObj);
 
   // 4. PeerDiscovery
   const peerDiscoveryObj = new PeerDiscoveryObject();
@@ -147,6 +211,7 @@ async function bootstrapP2P(config: P2PConfig): Promise<void> {
     peerDiscoveryObj.setTypeId(config.peerDiscoveryTypeId as TypeId);
   }
   await peerDiscoveryObj.init(workerBus);
+  p2pObjects.push(peerDiscoveryObj);
 
   // 5. RemoteRegistry
   const remoteRegistryObj = new RemoteRegistry();
@@ -156,6 +221,7 @@ async function bootstrapP2P(config: P2PConfig): Promise<void> {
     remoteRegistryObj.setTypeId(config.remoteRegistryTypeId as TypeId);
   }
   await remoteRegistryObj.init(workerBus);
+  p2pObjects.push(remoteRegistryObj);
 
   // Wire direct refs within the worker (same as server/index.ts did)
   signalingRelayObj.setPeerRegistry(peerRegistryObj);
@@ -195,6 +261,7 @@ async function bootstrapP2P(config: P2PConfig): Promise<void> {
       );
     });
     await remoteUIAccessObj.init(workerBus);
+    p2pObjects.push(remoteUIAccessObj);
     log.info('RemoteUIAccess initialized');
   }
 
@@ -222,7 +289,7 @@ async function bootstrapP2P(config: P2PConfig): Promise<void> {
   // the Abject event system (bus), but the main thread's PeerRouter also needs
   // the connectedPeersCache to be up-to-date for synchronous isPeerConnected() checks.
   // Poll every 2s — getConnectedPeers is O(n) with n ≈ 20, very cheap.
-  setInterval(() => {
+  peerStatusTimer = setInterval(() => {
     if (peerRegistryObj) {
       const connectedPeers = peerRegistryObj.getConnectedPeers();
       port.postMessage({
@@ -289,6 +356,61 @@ port.on('message', async (data: { type: string; [key: string]: unknown }) => {
         }
       } else {
         log.warn(`send-to-peer: no connected transport to ${peerId.slice(0, 16)}`);
+      }
+      break;
+    }
+
+    case 'shutdown': {
+      const shutdownStartedAt = Date.now();
+      let nativeCleanup = false;
+      log.info(`Shutdown requested — stopping ${p2pObjects.length} P2P objects...`);
+      if (peerStatusTimer) {
+        clearInterval(peerStatusTimer);
+        peerStatusTimer = null;
+      }
+      try {
+        // Backwards through construction: discovery and the relay go first so
+        // nothing can start a new dial, then PeerRegistry — whose onStop()
+        // closes every transport and disconnects the signaling client — and
+        // Identity last.
+        //
+        // Each object is named and timed as it goes. "Shutdown requested" on
+        // its own only ever proved the handler had been entered; a thread
+        // killed halfway through this loop left a log identical to a clean
+        // stop, which is how a half-torn-down PeerRegistry — transports still
+        // open, libdatachannel still live — hid behind a line that said
+        // nothing about finishing.
+        for (const obj of [...p2pObjects].reverse()) {
+          const name = obj.constructor.name;
+          const objStartedAt = Date.now();
+          try {
+            await obj.stop();
+            log.info(`  stopped ${name} (${Date.now() - objStartedAt}ms)`);
+          } catch (err) {
+            log.warn(`  ${name}.stop() failed after ${Date.now() - objStartedAt}ms:`, err);
+          }
+        }
+        p2pObjects.length = 0;
+        // Nothing in this thread may open a PeerConnection past this point,
+        // which is the precondition for the main thread's dc.cleanup().
+        peerRegistryObj = null;
+        log.info(`P2P objects stopped in ${Date.now() - shutdownStartedAt}ms`);
+
+        // Every transport is closed and nothing here can open another, so
+        // this is the moment to join libdatachannel's threads — while this
+        // env is still alive to receive whatever they have left to say.
+        nativeCleanup = await drainDataChannel();
+      } catch (err) {
+        log.warn('P2P shutdown failed:', err);
+      } finally {
+        // Always answer. A worker that cannot finish its teardown must still
+        // release the main thread rather than make it wait out the timeout —
+        // and an escaping rejection here would take the whole thread down.
+        // `nativeCleanup` tells the main thread whether libdatachannel is
+        // already down. If it is, that thread must not load the addon again
+        // just to call cleanup() a second time from an env that never owned
+        // a connection.
+        port.postMessage({ type: 'shutdown-complete', nativeCleanup });
       }
       break;
     }

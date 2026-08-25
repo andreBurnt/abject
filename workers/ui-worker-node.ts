@@ -104,6 +104,19 @@ port.on('message', async (data: { type: string; [key: string]: unknown }) => {
       break;
     }
 
+    case 'shutdown': {
+      log.info('Shutdown requested — stopping BackendUI...');
+      try {
+        await backendUI?.stop();
+      } catch (err) {
+        log.warn('BackendUI stop failed during shutdown:', err);
+      }
+      backendUI = null;
+      log.info('BackendUI stopped');
+      port.postMessage({ type: 'shutdown-complete' });
+      break;
+    }
+
     // Standard WorkerBridge protocol messages
     case 'bus:deliver': {
       const msg = (data as WorkerInboundMessage).message;

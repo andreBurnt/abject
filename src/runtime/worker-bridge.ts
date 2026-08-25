@@ -67,6 +67,13 @@ export class WorkerBridge {
   private pendingSpawns: Map<AbjectId, { resolve: () => void; reject: (err: Error) => void }> = new Map();
   private pendingKills: Map<AbjectId, { resolve: () => void; reject: (err: Error) => void }> = new Map();
   private _dead = false;
+  /**
+   * Set by terminate() so the exit that follows is understood as ours.
+   * Without it every deliberate shutdown reports itself as a worker death:
+   * the loud "WORKER DIED" line and the onDead observers exist for a worker
+   * that fell over on its own, not one we just asked to leave.
+   */
+  private terminating = false;
 
   get isDead(): boolean { return this._dead; }
 
@@ -105,7 +112,11 @@ export class WorkerBridge {
     this.worker.onexit = (e) => {
       this._dead = true;
       const objectIds = [...this.hostedObjects];
-      log.error(`Worker exited (code ${e.code}), lost ${objectIds.length} objects: [${objectIds.map(id => id.slice(0, 8)).join(', ')}]`);
+      if (this.terminating) {
+        log.info(`Worker exited (code ${e.code}) after terminate(), releasing ${objectIds.length} objects`);
+      } else {
+        log.error(`Worker exited (code ${e.code}), lost ${objectIds.length} objects: [${objectIds.map(id => id.slice(0, 8)).join(', ')}]`);
+      }
       // Unregister all hosted objects from the bus so senders get immediate errors
       for (const objectId of objectIds) {
         this.bus.unregister(objectId);
@@ -120,7 +131,11 @@ export class WorkerBridge {
         pending.reject(new Error(`Worker exited with code ${e.code}`));
       }
       this.pendingKills.clear();
-      try { this.onDead?.(e.code); } catch { /* observer error must not mask the exit */ }
+      // Only an unexpected exit is a death. A terminate() we issued during
+      // shutdown must not trip the "the UI is gone" alarms.
+      if (!this.terminating) {
+        try { this.onDead?.(e.code); } catch { /* observer error must not mask the exit */ }
+      }
     };
   }
 
@@ -241,6 +256,7 @@ export class WorkerBridge {
    * Terminate the worker.
    */
   terminate(): void {
+    this.terminating = true;
     this.worker.terminate();
     this.hostedObjects.clear();
 

@@ -300,10 +300,18 @@ export class PeerTransport extends Transport {
     this.handshakeState = 'none';
     this.pendingCandidates = [];
     if (this.dataChannel) {
+      this.dataChannel.onopen = null;
+      this.dataChannel.onclose = null;
+      this.dataChannel.onerror = null;
+      this.dataChannel.onmessage = null;
       this.dataChannel.close();
       this.dataChannel = undefined;
     }
     if (this.peerConnection) {
+      this.peerConnection.oniceconnectionstatechange = null;
+      this.peerConnection.ondatachannel = null;
+      this.peerConnection.onicecandidate = null;
+      this.peerConnection.ontrack = null;
       this.peerConnection.close();
       this.peerConnection = undefined;
     }
