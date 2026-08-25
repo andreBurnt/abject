@@ -113,9 +113,9 @@ test('ensure/invariant throw on a falsy condition', async () => {
   assert.match(v.checks[0].detail, /ContractViolation \(ensure\): nope/);
 });
 
-test('an invocation that never returns is killed by the deadline', async () => {
-  // runSandboxed's own timeout is synchronous-only, so an await inside a
-  // flipped loop used to hang evaluate forever.
+test('an invocation that never settles is killed by the deadline', async () => {
+  // The worker is terminated on expiry, so nothing a candidate does can make
+  // the gate wait on it.
   assert.equal(FITNESS_INVOCATION_TIMEOUT_MS, 5000);
   const hangs = `{ async listEvents(msg) { await new Promise(() => {}); return []; } }`;
   const started = Date.now();
@@ -210,4 +210,41 @@ test('end to end, in the dialect an LLM actually writes', async () => {
   assert.equal(v.checks.find(c => c.check === 'replay')?.detail, '1 cassette(s) reproduced');
   assert.equal(v.checks.find(c => c.check === 'schema')?.detail, 'all outputs validate');
   assert.equal(v.checks.find(c => c.check === 'relations')?.detail, 'all declared relations hold');
+});
+
+test('a synchronous spin in a handler is killed by the watchdog, not hung', async () => {
+  const spin = `({ async listEvents() { while (true) {} } })`;
+  const invoker = buildSandboxInvoker({ timeoutMs: 300 });
+  await assert.rejects(() => invoker(spin, 'listEvents', {}, () => undefined),
+    /timed out|timeout/i);
+});
+
+test('a spin AFTER awaiting the stub is also killed', async () => {
+  const spin = `({ async listEvents() {
+    await this.call('HttpClient', 'get', { url: 'https://example.test/events?q=1' });
+    while (true) {}
+  } })`;
+  const invoker = buildSandboxInvoker({ timeoutMs: 300 });
+  await assert.rejects(() => invoker(spin, 'listEvents', {},
+    () => ({ status: 200, body: [1], rawBody: '[1]' })), /timed out|timeout/i);
+});
+
+test('a candidate legitimately using timers is judged, not killed', async () => {
+  // The worker has its own event loop, so retry-with-backoff style handlers
+  // resolve normally instead of being mistaken for hostile code.
+  const timerUser = `({ async listEvents() {
+    await new Promise(r => setTimeout(r, 10)); return [];
+  } })`;
+  const invoker = buildSandboxInvoker({ timeoutMs: 3000 });
+  const out = await invoker(timerUser, 'listEvents', {}, () => undefined);
+  assert.deepEqual(out, []);
+});
+
+test('a candidate reaching for Atomics is refused outright', async () => {
+  const atomicsUser = `({ async listEvents() {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
+  } })`;
+  const invoker = buildSandboxInvoker({ timeoutMs: 300 });
+  await assert.rejects(() => invoker(atomicsUser, 'listEvents', {}, () => undefined),
+    /Atomics|blocked/i);
 });

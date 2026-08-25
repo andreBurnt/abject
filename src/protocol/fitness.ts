@@ -18,7 +18,7 @@ import type { MethodDeclaration } from '../core/types.js';
  *  unchanged, because HttpClient promises objects a raw string body. `body`
  *  is the same response already parsed, for invokers that want it. */
 export interface HttpExchange { status: number; body: unknown; rawBody: string; }
-export type HttpStub = (req: { method: string; url: string }) => HttpExchange | undefined;
+export type HttpStub = (req: { method: string; url: string; body?: unknown }) => HttpExchange | undefined;
 export type Invoker = (source: string, method: string,
                        args: Record<string, unknown>, http: HttpStub) => Promise<unknown>;
 
