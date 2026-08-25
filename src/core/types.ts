@@ -90,6 +90,10 @@ export interface MethodDeclaration {
   relations?: RelationDeclaration[];
   /** A value that must appear somewhere in a healthy output (known-entity probe). */
   knownEntity?: string;
+  /** Dot-paths masked in this method's recorded response bodies before they
+   *  reach cassette storage (e.g. 'user.ssn'). For payload fields the header
+   *  and query redaction cannot know about. */
+  redactPaths?: string[];
 }
 
 export interface ParameterDeclaration {

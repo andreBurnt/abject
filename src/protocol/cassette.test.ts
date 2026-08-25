@@ -61,3 +61,45 @@ test('fromJSON derives rawBody for entries recorded before it existed', () => {
   assert.equal(store.all().length, 1);
   assert.equal(store.all()[0].rawBody, JSON.stringify([{ id: 7 }]));
 });
+
+test('two POSTs to one url with different bodies are distinct cassettes', () => {
+  const store = new CassetteStore();
+  const base = { method: 'send', args: {}, parsedOutput: 'x', recordedAt: 1 };
+  store.add({ ...base, request: { method: 'POST', url: 'https://x.test/api', body: { amount: 1 } },
+    response: { status: 200, body: 'a' }, rawBody: 'a' });
+  store.add({ ...base, request: { method: 'POST', url: 'https://x.test/api', body: { amount: 2 } },
+    response: { status: 200, body: 'b' }, rawBody: 'b' });
+  const hit = store.matchRequest({ method: 'POST', url: 'https://x.test/api', body: { amount: 2 } });
+  assert.equal(hit?.rawBody, 'b');
+});
+
+test('omitting the body does not match a cassette recorded FOR a body', () => {
+  const store = new CassetteStore();
+  store.add({ method: 'send', args: {},
+    request: { method: 'POST', url: 'https://x.test/api', body: { amount: 1 } },
+    response: { status: 200, body: 'a' }, rawBody: 'a', parsedOutput: 'a', recordedAt: 1 });
+  assert.equal(store.matchRequest({ method: 'POST', url: 'https://x.test/api' }), undefined);
+});
+
+test('legacy body-less cassettes still match body-less requests', () => {
+  const store = new CassetteStore([mk(1)]);
+  assert.notEqual(store.matchRequest({ method: 'GET', url: 'https://example.test/events?q=1' }), undefined);
+});
+
+test('body key order does not decide a match', () => {
+  const store = new CassetteStore();
+  store.add({ method: 'send', args: {},
+    request: { method: 'POST', url: 'https://x.test/api', body: { a: 1, b: 2 } },
+    response: { status: 200, body: 'a' }, rawBody: 'a', parsedOutput: 'a', recordedAt: 1 });
+  assert.notEqual(store.matchRequest({ method: 'POST', url: 'https://x.test/api', body: { b: 2, a: 1 } }), undefined);
+});
+
+test('secret query params are redacted before storage', () => {
+  const store = new CassetteStore();
+  store.add({ method: 'get', args: {},
+    request: { method: 'GET', url: 'https://x.test/a?api_key=hunter2&q=1' },
+    response: { status: 200, body: 1 }, rawBody: '1', parsedOutput: 1, recordedAt: 1 });
+  const url = store.all()[0].request.url;
+  assert.doesNotMatch(url, /hunter2/);
+  assert.match(url, /q=1/);
+});

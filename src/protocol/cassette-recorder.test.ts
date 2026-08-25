@@ -68,3 +68,13 @@ test('non-JSON rawBody records as the raw text', () => {
     { status: 200, rawBody: 'plain text' });
   assert.equal(store.all()[0].response.body, 'plain text');
 });
+
+test('redactPaths masks recorded response bodies at the declared paths', () => {
+  const store = new CassetteStore();
+  setRecorder('obj-1', { mode: 'record', store, redactPaths: ['user.ssn'] });
+  afterResponse('obj-1', { method: 'GET', url: 'https://x.test/u' },
+    { status: 200, rawBody: '{"user":{"ssn":"123-45-6789","name":"A"}}' });
+  const rec = store.all()[0];
+  assert.deepEqual(rec.response.body, { user: { ssn: 'REDACTED', name: 'A' } });
+  assert.doesNotMatch(rec.rawBody, /123-45-6789/);
+});

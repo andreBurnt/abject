@@ -310,7 +310,7 @@ export class HttpClient extends Abject {
 
     // Replay seam: a registered replay-mode caller is served from its
     // cassette store and never touches the network. A miss throws.
-    const replayed = beforeRequest(callerId, { method: req.method, url: req.url, headers: req.headers });
+    const replayed = beforeRequest(callerId, { method: req.method, url: req.url, headers: req.headers, body: req.body });
     if (replayed) {
       // A full HttpResponse, with the recorded body text verbatim — the
       // caller must not be able to tell replay from the live network.
@@ -361,7 +361,7 @@ export class HttpClient extends Abject {
         // Read body
         const body = await response.text();
 
-        afterResponse(callerId, { method: req.method, url: req.url, headers: req.headers },
+        afterResponse(callerId, { method: req.method, url: req.url, headers: req.headers, body: req.body },
           { status: response.status, rawBody: body });
 
         return {

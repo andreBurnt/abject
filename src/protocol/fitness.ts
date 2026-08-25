@@ -8,7 +8,7 @@
  * failure short-circuits.
  */
 import Ajv from 'ajv';
-import { createHash } from 'node:crypto';
+import { canonicalJson, sha256 } from './canonical.js';
 import { HTTP_CASSETTE_METHOD, type Cassette, type CassetteStore } from './cassette.js';
 import { generateMutants } from './mutants.js';
 import type { MethodDeclaration } from '../core/types.js';
@@ -49,7 +49,7 @@ function deepEqual(a: unknown, b: unknown): boolean {
 
 function stubFor(cassettes: CassetteStore): HttpStub {
   return req => {
-    const hit = cassettes.matchRequest({ method: req.method, url: req.url });
+    const hit = cassettes.matchRequest({ method: req.method, url: req.url, body: req.body });
     return hit
       ? { status: hit.response.status, body: hit.response.body, rawBody: hit.rawBody }
       : undefined;
@@ -326,21 +326,6 @@ export function summarizeVerdict(verdict: Verdict): string {
   const caveat = unverified.length > 0 ? ` — unverified: ${unverified.join(', ')}` : '';
   return `fitness: PASS (${names}${kill})${caveat}`;
 }
-
-/** JSON with object keys sorted (arrays keep their order). The digest below
- *  must not depend on property insertion order, or two readings of the same
- *  manifest could disagree about whether a verdict is still valid. */
-function canonicalJson(v: unknown): string {
-  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(',')}]`;
-  if (v !== null && typeof v === 'object') {
-    const keys = Object.keys(v as object).sort();
-    return `{${keys.map(k =>
-      `${JSON.stringify(k)}:${canonicalJson((v as Record<string, unknown>)[k])}`).join(',')}}`;
-  }
-  return JSON.stringify(v) ?? 'null';
-}
-
-const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
 
 /** What a verdict is ABOUT: the target it was earned against, the source, and
  *  the declarations it was judged under. A redrafted manifest invalidates a

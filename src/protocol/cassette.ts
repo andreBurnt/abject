@@ -7,6 +7,7 @@
  * that cannot reproduce recorded meaning does not deploy. Requests are
  * redacted before storage so a cassette can never leak a credential.
  */
+import { canonicalJson, sha256 } from './canonical.js';
 
 export interface CassetteRequest {
   method: string;
@@ -19,6 +20,11 @@ export interface Cassette {
   method: string;
   args: Record<string, unknown>;
   request: CassetteRequest;
+  /** Canonical hash of `request.body`, set by the store when the request
+   *  carried one. Matching is symmetric on it: a body-less request matches
+   *  only body-less recordings, so a caller cannot skip the body and pick up
+   *  an answer that was recorded for a specific payload. */
+  bodyHash?: string;
   response: { status: number; body: unknown };
   /** The response body EXACTLY as the world sent it, before any parsing.
    *  HttpClient's contract says `body` is always a raw string, so replay must
@@ -36,14 +42,34 @@ export const CASSETTE_CAP_PER_METHOD = 20;
 export const HTTP_CASSETTE_METHOD = '_http';
 
 const REDACTED_HEADERS = new Set(['authorization', 'cookie', 'set-cookie']);
+const SECRET_QUERY_PARAM = /^(key|api_key|token|access_token|secret|auth|apikey)$/i;
+
+/** The canonical hash matching compares. `undefined` for a body-less
+ *  request -- and only for one. */
+export function requestBodyHash(body: unknown): string | undefined {
+  return body === undefined ? undefined : sha256(canonicalJson(body));
+}
 
 export function redactRequest(req: CassetteRequest): CassetteRequest {
-  if (!req.headers) return req;
-  const headers: Record<string, string> = {};
-  for (const [k, v] of Object.entries(req.headers)) {
-    if (!REDACTED_HEADERS.has(k.toLowerCase())) headers[k] = v;
+  let out = req;
+  if (out.headers) {
+    const headers: Record<string, string> = {};
+    for (const [k, v] of Object.entries(out.headers)) {
+      if (!REDACTED_HEADERS.has(k.toLowerCase())) headers[k] = v;
+    }
+    out = { ...out, headers };
   }
-  return { ...req, headers };
+  // Credentials travel in query strings too (?api_key=...); a cassette must
+  // never store one.
+  try {
+    const u = new URL(out.url);
+    let touched = false;
+    for (const name of [...u.searchParams.keys()]) {
+      if (SECRET_QUERY_PARAM.test(name)) { u.searchParams.set(name, 'REDACTED'); touched = true; }
+    }
+    if (touched) out = { ...out, url: u.toString() };
+  } catch { /* unparseable url -- store as given */ }
+  return out;
 }
 
 function hostPath(url: string): string | undefined {
@@ -75,7 +101,8 @@ export class CassetteStore {
   }
 
   add(c: Cassette): void {
-    this.cassettes.push({ ...c, request: redactRequest(c.request), rawBody: rawBodyOf(c) });
+    this.cassettes.push({ ...c, request: redactRequest(c.request), rawBody: rawBodyOf(c),
+      bodyHash: c.bodyHash ?? requestBodyHash(c.request.body) });
     const forMethod = this.cassettes.filter(x => x.method === c.method);
     if (forMethod.length > CASSETTE_CAP_PER_METHOD) {
       const evict = forMethod
@@ -93,12 +120,17 @@ export class CassetteStore {
 
   all(): Cassette[] { return [...this.cassettes]; }
 
-  /** Exact method+url only. Replay is argument-dependent: `?q=1` and
+  /** Exact method+url+body. Replay is argument-dependent: `?q=1` and
    *  `?q=other` are different questions, and answering one with the other's
-   *  recording would let a candidate "reproduce" traffic it never made. */
+   *  recording would let a candidate "reproduce" traffic it never made. The
+   *  body comparison is symmetric -- a body-less request matches only
+   *  body-less recordings -- so omitting the body is a miss, never a
+   *  wildcard. */
   matchRequest(req: CassetteRequest): Cassette | undefined {
+    const hash = requestBodyHash(req.body);
     return this.cassettes.find(
-      c => c.request.method === req.method && c.request.url === req.url);
+      c => c.request.method === req.method && c.request.url === req.url
+        && c.bodyHash === hash);
   }
 
   /** Exact match, else any recording of the same host+path. Deliberately NOT
