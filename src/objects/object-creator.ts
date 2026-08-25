@@ -1461,16 +1461,9 @@ When invited to a Sprint Plan, describe the concrete authoring or modification I
       try { spawnReq.data = JSON.parse(JSON.stringify(registration.data)); } catch { spawnReq.data = {}; }
     }
 
-    let result: SpawnResult;
-    try {
-      result = await this.sendRequest<SpawnResult>(this.factoryId, 'spawn', spawnReq, 120000);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return { ok: false, summary: `clone_object: spawn failed: ${msg.slice(0, 120)}`, error: msg };
-    }
-    if (!result?.objectId) {
-      return { ok: false, summary: 'clone_object: Factory returned no objectId', error: 'unexpected Factory response' };
-    }
+    const spawned = await this.gatedSpawn(state, spawnReq, 'clone_object', 'redeploys-live-source');
+    if ('refusal' in spawned) return spawned.refusal;
+    const result = spawned.result;
 
     // Persist so the clone survives a restart (same as deploy_spawn).
     if (this.abjectStoreId) {
@@ -1999,6 +1992,53 @@ When invited to a Sprint Plan, describe the concrete authoring or modification I
   }
 
   /**
+   * The one door to Factory.spawn. Every op that creates an object routes
+   * through here with an explicit policy:
+   *
+   *   'gate-draft'          -- the source being deployed is a STAGED DRAFT;
+   *                            deployGate must hold a passing fitness verdict
+   *                            for it (digest-bound to source, declarations,
+   *                            and target) or the spawn is refused.
+   *   'redeploys-live-source' -- the source is copied VERBATIM from an object
+   *                            that is already live (clone, extract). There
+   *                            is no draft to judge and no cassettes exist
+   *                            under the not-yet-existing id. Exemption
+   *                            raised with the upstream maintainer on PR #11;
+   *                            tightening it is a one-line policy change.
+   *
+   * `judgeSource` is what the gate judges when it differs from what the
+   * Factory receives -- an organism deploys a JSON spec, but the code being
+   * shipped inside it is the staged membrane source.
+   */
+  private async gatedSpawn(state: LoopState, spawnReq: SpawnRequest, label: string,
+                           policy: 'gate-draft' | 'redeploys-live-source',
+                           judgeSource?: string):
+      Promise<{ result: SpawnResult } | { refusal: { ok: false; summary: string; error: string } }> {
+    if (!this.factoryId) {
+      return { refusal: { ok: false, summary: `${label}: Factory unavailable`, error: 'Factory not resolved' } };
+    }
+    if (policy === 'gate-draft') {
+      const judged = judgeSource ?? spawnReq.source;
+      if (typeof judged !== 'string' || judged.length === 0) {
+        return { refusal: { ok: false, summary: `${label}: no source to judge`, error: 'stage a source first' } };
+      }
+      const gate = deployGate(state, judged, (await this.fitnessMethods(state)).methods);
+      if (!gate.ok) return { refusal: { ok: false, summary: gate.error, error: gate.error } };
+    }
+    let result: SpawnResult;
+    try {
+      result = await this.sendRequest<SpawnResult>(this.factoryId, 'spawn', spawnReq, 120000);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { refusal: { ok: false, summary: `${label}: spawn failed: ${msg.slice(0, 120)}`, error: msg } };
+    }
+    if (!result?.objectId) {
+      return { refusal: { ok: false, summary: `${label}: Factory returned no objectId`, error: 'unexpected Factory response' } };
+    }
+    return { result };
+  }
+
+  /**
    * Deploy a CREATE: read the staged manifest + source from the loop state
    * and send Factory.spawn server-side. Still pure message passing — this
    * dispatches `request(this.id, factoryId, 'spawn', payload)` — but the
@@ -2013,10 +2053,6 @@ When invited to a Sprint Plan, describe the concrete authoring or modification I
     const refusal = this.gateDeploy(state, 'deploy_spawn');
     if (refusal) return refusal;
 
-    const gate = deployGate(state, state.draftSource,
-      (await this.fitnessMethods(state)).methods);
-    if (!gate.ok) return { ok: false, summary: gate.error, error: gate.error };
-
     const spawnReq: SpawnRequest = {
       manifest: state.draftManifest,
       source: state.draftSource,
@@ -2025,17 +2061,9 @@ When invited to a Sprint Plan, describe the concrete authoring or modification I
       registryHint: this.registryId,
     };
 
-    let result: SpawnResult;
-    try {
-      result = await this.sendRequest<SpawnResult>(this.factoryId, 'spawn', spawnReq, 120000);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return { ok: false, summary: `deploy_spawn: ${msg.slice(0, 120)}`, error: msg };
-    }
-
-    if (!result?.objectId) {
-      return { ok: false, summary: 'deploy_spawn: Factory returned no objectId', error: 'unexpected Factory response' };
-    }
+    const spawned = await this.gatedSpawn(state, spawnReq, 'deploy_spawn', 'gate-draft');
+    if ('refusal' in spawned) return spawned.refusal;
+    const result = spawned.result;
 
     state.spawnedObjectId = result.objectId;
 
@@ -2425,16 +2453,11 @@ When invited to a Sprint Plan, describe the concrete authoring or modification I
       registryHint: this.registryId,
     };
 
-    let result: SpawnResult;
-    try {
-      result = await this.sendRequest<SpawnResult>(this.factoryId, 'spawn', spawnReq, 120000);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return { ok: false, summary: `compose_organism: spawn failed: ${msg.slice(0, 120)}`, error: msg };
-    }
-    if (!result?.objectId) {
-      return { ok: false, summary: 'compose_organism: Factory returned no objectId', error: 'unexpected Factory response' };
-    }
+    // The organism's Factory source is the JSON spec, but the code being
+    // shipped is the membrane draft -- that is what the gate judges.
+    const spawned = await this.gatedSpawn(state, spawnReq, 'compose_organism', 'gate-draft', membraneSource);
+    if ('refusal' in spawned) return spawned.refusal;
+    const result = spawned.result;
 
     state.spawnedObjectId = result.objectId;
     // The staged membrane drafts are now live inside the organism.
@@ -2495,16 +2518,9 @@ When invited to a Sprint Plan, describe the concrete authoring or modification I
       parentId: this.id,
       registryHint: this.registryId,
     };
-    let result: SpawnResult;
-    try {
-      result = await this.sendRequest<SpawnResult>(this.factoryId, 'spawn', spawnReq, 120000);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return { ok: false, summary: `extract_organelle: spawn failed: ${msg.slice(0, 120)}`, error: msg };
-    }
-    if (!result?.objectId) {
-      return { ok: false, summary: 'extract_organelle: Factory returned no objectId', error: 'unexpected Factory response' };
-    }
+    const spawned = await this.gatedSpawn(state, spawnReq, 'extract_organelle', 'redeploys-live-source');
+    if ('refusal' in spawned) return spawned.refusal;
+    const result = spawned.result;
 
     state.spawnedObjectId = result.objectId;
 

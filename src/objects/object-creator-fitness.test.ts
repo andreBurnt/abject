@@ -248,3 +248,12 @@ test('a candidate reaching for Atomics is refused outright', async () => {
   await assert.rejects(() => invoker(atomicsUser, 'listEvents', {}, () => undefined),
     /Atomics|blocked/i);
 });
+
+test('every Factory spawn goes through the gated helper', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const src = await readFile(new URL('./object-creator.ts', import.meta.url), 'utf8');
+  const direct = src.split('\n')
+    .filter(l => l.includes("'spawn'") && l.includes('sendRequest'));
+  assert.equal(direct.length, 1,
+    `Factory.spawn call sites outside gatedSpawn: ${direct.length - 1} too many`);
+});
