@@ -290,13 +290,11 @@ interface LoopState {
   baselineCallKeys?: Set<string>;
   /** Source the semantic reviewer has already seen — never review the same draft twice. */
   semanticReviewedSource?: string;
-  /** The fitness gate's most recent verdict on a draft, a digest of what it
-   *  judged (source AND declarations), and the object it judged it for. A
-   *  verdict is only valid for that exact triple — see `deployGate` in
-   *  `../protocol/fitness.js`. */
+  /** The fitness gate's most recent verdict on a draft, and a digest of what
+   *  it judged: target, source, AND declarations. A verdict is only valid for
+   *  that exact triple — see `deployGate` in `../protocol/fitness.js`. */
   fitnessVerdict?: Verdict;
   fitnessSourceDigest?: string;
-  fitnessTargetId?: AbjectId;
   /** Live-manifest methods read for the heal path, cached so the deploy gate
    *  recomputes the same digest without a second round trip. */
   fitnessLiveMethods?: { targetId: AbjectId; methods: MethodDeclaration[]; note?: string };
@@ -1886,8 +1884,7 @@ When invited to a Sprint Plan, describe the concrete authoring or modification I
     const verdict = await evaluate({ source: state.draftSource }, { cassettes, methods },
       buildSandboxInvoker());
     state.fitnessVerdict = verdict;
-    state.fitnessSourceDigest = verdictDigest(state.draftSource, methods);
-    state.fitnessTargetId = state.targetObjectId;
+    state.fitnessSourceDigest = verdictDigest(state.draftSource, methods, state.targetObjectId);
     const failed = verdict.checks.filter(c => !c.pass).map(c => `${c.check}: ${c.detail}`).join('; ');
     const caveat = note ? ` [${note}]` : '';
     return {

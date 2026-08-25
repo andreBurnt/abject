@@ -127,13 +127,13 @@ test('an invocation that never returns is killed by the deadline', async () => {
   assert.ok(Date.now() - started < 4000, 'the gate must not wait on a hung candidate');
 });
 
-test('verdictDigest covers the declarations, not just the source', () => {
+test('verdictDigest covers the declarations and the target, not just the source', () => {
   const src = 'return 1;';
   const more: MethodDeclaration[] = [...methods, { name: 'countEvents', description: '', parameters: [] }];
   assert.notEqual(verdictDigest(src, methods), verdictDigest(src, more));
   assert.equal(verdictDigest(src, methods), verdictDigest(src, [...methods]));
-  assert.equal(verdictDigest(src, methods),
-    createHash('sha256').update(src + '\0' + JSON.stringify(methods)).digest('hex'));
+  assert.notEqual(verdictDigest(src, methods), verdictDigest(src, methods, 'obj-a'));
+  assert.notEqual(verdictDigest(src, methods, 'obj-a'), verdictDigest(src, methods, 'obj-b'));
 });
 
 test('deployGate refuses without a verdict, with a failed verdict, and on a stale digest', () => {
@@ -152,15 +152,18 @@ test('deployGate refuses without a verdict, with a failed verdict, and on a stal
 
 test('deployGate refuses a verdict earned against a different object', () => {
   const src = 'return 1;';
-  const digest = verdictDigest(src, methods);
-  const judged = { fitnessVerdict: { pass: true, checks: [] }, fitnessSourceDigest: digest, fitnessTargetId: 'obj-a' };
+  const judged = { fitnessVerdict: { pass: true, checks: [] },
+    fitnessSourceDigest: verdictDigest(src, methods, 'obj-a') };
   const refusal = deployGate(judged, src, methods, 'obj-b');
   assert.equal(refusal.ok, false);
-  assert.match((refusal as { error: string }).error, /fitness verdict is for a different object/);
   assert.equal(deployGate(judged, src, methods, 'obj-a').ok, true);
-  // a create has no target on either side, and an unresolved target does not refuse
-  assert.equal(deployGate(judged, src, methods).ok, true);
-  assert.equal(deployGate({ ...judged, fitnessTargetId: undefined }, src, methods, 'obj-b').ok, true);
+  // the target lives in the digest, so a targetless deploy cannot use a
+  // targeted verdict — and a targeted deploy cannot use a targetless one
+  assert.equal(deployGate(judged, src, methods).ok, false);
+  const targetless = { fitnessVerdict: { pass: true, checks: [] },
+    fitnessSourceDigest: verdictDigest(src, methods) };
+  assert.equal(deployGate(targetless, src, methods, 'obj-b').ok, false);
+  assert.equal(deployGate(targetless, src, methods).ok, true);
 });
 
 test('end to end, in the dialect an LLM actually writes', async () => {

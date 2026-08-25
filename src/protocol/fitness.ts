@@ -302,28 +302,45 @@ export function summarizeVerdict(verdict: Verdict): string {
   return `fitness: PASS (${names}${kill})${caveat}`;
 }
 
-/** What a verdict is ABOUT. Not the source alone: the schema and relation
- *  checks are judgments of the source AGAINST the declarations, so a redrafted
- *  manifest invalidates a verdict exactly as a redrafted source does. */
-export function verdictDigest(source: string, methods: MethodDeclaration[]): string {
-  return createHash('sha256').update(source + '\0' + JSON.stringify(methods)).digest('hex');
+/** JSON with object keys sorted (arrays keep their order). The digest below
+ *  must not depend on property insertion order, or two readings of the same
+ *  manifest could disagree about whether a verdict is still valid. */
+function canonicalJson(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(',')}]`;
+  if (v !== null && typeof v === 'object') {
+    const keys = Object.keys(v as object).sort();
+    return `{${keys.map(k =>
+      `${JSON.stringify(k)}:${canonicalJson((v as Record<string, unknown>)[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(v) ?? 'null';
+}
+
+const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
+
+/** What a verdict is ABOUT: the target it was earned against, the source, and
+ *  the declarations it was judged under. A redrafted manifest invalidates a
+ *  verdict exactly as a redrafted source does, and a verdict earned with no
+ *  target (a spawn) says nothing about any existing object. Components are
+ *  hashed separately before the outer hash: `source` is generated text that
+ *  may contain any byte, so field boundaries must not be reconstructible from
+ *  a delimited concatenation. */
+export function verdictDigest(source: string, methods: MethodDeclaration[], targetId?: string): string {
+  return sha256(sha256(targetId ?? '') + sha256(source) + sha256(canonicalJson(methods)));
 }
 
 /** The hard gate deploy ops consult. A deploy may proceed only when the
  *  CURRENT draft has a passing verdict -- verdicts do not survive edits --
- *  and only onto the object that verdict was earned against: deploy_update
- *  can resolve an explicit target the gate never saw, and a verdict built
- *  from another object's cassettes says nothing about this one. */
-export function deployGate(state: { fitnessVerdict?: Verdict; fitnessSourceDigest?: string; fitnessTargetId?: string },
+ *  and only onto the target inside that verdict's digest: deploy_update can
+ *  resolve an explicit target the gate never saw, and a targetless (spawn)
+ *  verdict earns nothing against any existing object. The target lives in
+ *  the digest preimage rather than beside it, so there is no state to check
+ *  separately and no unbound case to slip through. */
+export function deployGate(state: { fitnessVerdict?: Verdict; fitnessSourceDigest?: string },
                            draftSource: string,
                            methods: MethodDeclaration[],
                            resolvedTargetId?: string): { ok: true } | { ok: false; error: string } {
-  if (!state.fitnessVerdict || state.fitnessSourceDigest !== verdictDigest(draftSource, methods)) {
-    return { ok: false, error: 'deploy refused: no passing fitness verdict for this draft — run fitness' };
-  }
-  if (state.fitnessTargetId !== undefined && resolvedTargetId !== undefined
-      && state.fitnessTargetId !== resolvedTargetId) {
-    return { ok: false, error: 'deploy refused: fitness verdict is for a different object' };
+  if (!state.fitnessVerdict || state.fitnessSourceDigest !== verdictDigest(draftSource, methods, resolvedTargetId)) {
+    return { ok: false, error: 'deploy refused: no passing fitness verdict for this draft and target — run fitness' };
   }
   if (!state.fitnessVerdict.pass) {
     const failed = state.fitnessVerdict.checks.find(c => !c.pass);

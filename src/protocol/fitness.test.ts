@@ -1,7 +1,7 @@
 /** Run: pnpm tsx --test src/protocol/fitness.test.ts */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { evaluate, summarizeVerdict, type Invoker } from './fitness.js';
+import { evaluate, summarizeVerdict, verdictDigest, deployGate, type Invoker } from './fitness.js';
 import { CassetteStore, type Cassette } from './cassette.js';
 import type { MethodDeclaration } from '../core/types.js';
 
@@ -348,4 +348,30 @@ test('a passing verdict names the checks that verified nothing', () => {
     { check: 'mutation', pass: true, detail: 'no mutation points' },
   ] });
   assert.match(summary, /unverified/, 'a pass built on no evidence must say so');
+});
+
+test('a targetless verdict does not authorize a targeted deploy', () => {
+  const digest = verdictDigest(GOOD_SOURCE, methods); // fitness ran with no target
+  const state = { fitnessVerdict: { pass: true, checks: [] }, fitnessSourceDigest: digest };
+  const gate = deployGate(state, GOOD_SOURCE, methods, 'object-B');
+  assert.equal(gate.ok, false, 'an update to an explicit target must refuse a targetless verdict');
+});
+
+test('a verdict earned against a target authorizes exactly that target', () => {
+  const digest = verdictDigest(GOOD_SOURCE, methods, 'object-A');
+  const state = { fitnessVerdict: { pass: true, checks: [] }, fitnessSourceDigest: digest };
+  assert.equal(deployGate(state, GOOD_SOURCE, methods, 'object-A').ok, true);
+  assert.equal(deployGate(state, GOOD_SOURCE, methods, 'object-B').ok, false);
+});
+
+test('digest components cannot bleed across field boundaries', () => {
+  // A NUL inside the (generated) source must not collide with a NUL split
+  // placed in the targetId — the preimage must be canonical.
+  assert.notEqual(verdictDigest('B\0C', methods, 'A'), verdictDigest('C', methods, 'A\0B'));
+});
+
+test('digest is stable under object key order in methods', () => {
+  const reordered = methods.map(m => ({ outputSchema: m.outputSchema, name: m.name,
+    description: m.description, parameters: m.parameters, effects: m.effects })) as MethodDeclaration[];
+  assert.equal(verdictDigest(GOOD_SOURCE, methods), verdictDigest(GOOD_SOURCE, reordered));
 });
