@@ -19,8 +19,18 @@ const BOUNDARY: Record<string, string> = {
   '<': '<=', '<=': '<', '>': '>=', '>=': '>',
 };
 
-/** Sign mistakes: pagination offsets, totals, deltas. */
+/** Sign mistakes: pagination offsets, totals, deltas. `+` with a string
+ *  literal or template operand is message formatting, not arithmetic --
+ *  its mutants would measure error text, never behavior. */
 const ARITH: Record<string, string> = { '+': '-', '-': '+' };
+
+function looksLikeConcat(node: { operator: string; left: acorn.Node; right: acorn.Node }): boolean {
+  if (node.operator !== '+') return false;
+  const stringy = (n: acorn.Node): boolean =>
+    n.type === 'TemplateLiteral'
+    || (n.type === 'Literal' && typeof (n as unknown as { value?: unknown }).value === 'string');
+  return stringy(node.left) || stringy(node.right);
+}
 
 const PARSE_OPTS: acorn.Options = { ecmaVersion: 'latest', allowAwaitOutsideFunction: true };
 
@@ -69,6 +79,7 @@ export function generateMutants(source: string, max: number): Mutant[] | null {
         for (const [table, verb] of [[FLIP, 'flip'], [BOUNDARY, 'boundary'], [ARITH, 'swap']] as const) {
           const to = table[op.operator];
           if (!to) continue;
+          if (table === ARITH && looksLikeConcat(op)) continue;
           sites.push({
             start: op.left.end, end: op.right.start,
             replacement: ` ${to} `,

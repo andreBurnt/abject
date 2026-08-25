@@ -65,3 +65,9 @@ test('arithmetic plus and minus are swapped', () => {
   const ms = generateMutants(`({ f(msg) { return msg.payload.a + 1; } })`, 20)!;
   assert.ok(ms.some(m => m.source.includes('- 1')), JSON.stringify(ms.map(m => m.source)));
 });
+
+test('string concatenation is not mistaken for arithmetic', () => {
+  const ms = generateMutants(`({ f(msg) { return 'HTTP ' + msg.payload.status; } })`, 20)!;
+  assert.ok(!ms.some(m => m.description.includes("swap '+'")),
+    JSON.stringify(ms.map(m => m.description)));
+});
