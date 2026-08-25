@@ -65,7 +65,7 @@ export type ErrorMessage = AbjectMessage<AbjectError>;
 
 /** What calling a method does to the world. Reads are safe to
  *  generate and heal autonomously; acts must cross a hand-written gate. */
-export type MethodEffect = 'read' | 'act';
+export type SideEffect = 'read-only' | 'mutating';
 
 /** A metamorphic relation the method's outputs must satisfy.
  *  Checked by the fitness gate (src/protocol/fitness.ts) — never by an LLM. */
@@ -84,12 +84,12 @@ export interface MethodDeclaration {
   returns?: TypeDeclaration;
   /** Contract fields the fitness gate judges against. All optional, so a
    *  manifest written before they existed stays valid. */
-  effects?: MethodEffect;
+  sideEffects?: SideEffect;
   /** JSON Schema the method's return value must validate against. */
   outputSchema?: Record<string, unknown>;
   relations?: RelationDeclaration[];
   /** A value that must appear somewhere in a healthy output (known-entity probe). */
-  knownEntity?: string;
+  entityRef?: string;
   /** Dot-paths masked in this method's recorded response bodies before they
    *  reach cassette storage (e.g. 'user.ssn'). For payload fields the header
    *  and query redaction cannot know about. */

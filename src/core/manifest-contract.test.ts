@@ -4,13 +4,13 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { MethodDeclaration, RelationDeclaration, MethodEffect } from './types.js';
+import type { MethodDeclaration, RelationDeclaration, SideEffect } from './types.js';
 
 test('a legacy method declaration without contract fields is valid', () => {
   const m: MethodDeclaration = {
     name: 'listEvents', description: 'list', parameters: [],
   };
-  assert.equal(m.effects, undefined);
+  assert.equal(m.sideEffects, undefined);
 });
 
 test('contract fields round-trip', () => {
@@ -19,15 +19,15 @@ test('contract fields round-trip', () => {
     { kind: 'sorted-by', field: 'startsAt' },
     { kind: 'non-empty-for-known-entity' },
   ];
-  const effects: MethodEffect = 'read';
+  const sideEffects: SideEffect = 'read-only';
   const m: MethodDeclaration = {
     name: 'listEvents', description: 'list', parameters: [],
-    effects,
+    sideEffects,
     outputSchema: { type: 'array', items: { type: 'object' } },
     relations,
-    knownEntity: 'Weekly Standup',
+    entityRef: 'Weekly Standup',
   };
-  assert.equal(m.effects, 'read');
+  assert.equal(m.sideEffects, 'read-only');
   assert.equal(m.relations?.length, 3);
-  assert.equal(m.knownEntity, 'Weekly Standup');
+  assert.equal(m.entityRef, 'Weekly Standup');
 });

@@ -212,9 +212,9 @@ async function checkRelations(source: string, ev: FitnessEvidence, invoke: Invok
             break;
           }
           case 'non-empty-for-known-entity': {
-            if (!m.knownEntity) break; // vacuous without a declared entity
-            if (!JSON.stringify(out ?? '').includes(m.knownEntity))
-              return fail(`'${m.knownEntity}' absent from output`);
+            if (!m.entityRef) break; // vacuous without a declared entity
+            if (!JSON.stringify(out ?? '').includes(m.entityRef))
+              return fail(`'${m.entityRef}' absent from output`);
             break;
           }
         }

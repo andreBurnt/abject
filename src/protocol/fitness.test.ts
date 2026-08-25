@@ -32,7 +32,7 @@ const cassette: Cassette = {
 
 const methods: MethodDeclaration[] = [{
   name: 'listEvents', description: '', parameters: [],
-  effects: 'read',
+  sideEffects: 'read-only',
   outputSchema: {
     type: 'array',
     items: { type: 'object', required: ['id'], properties: { id: { type: 'number' } } },
@@ -152,7 +152,7 @@ test('mutation fails when the candidate parses under no dialect', async () => {
 const relMethods: MethodDeclaration[] = [{
   name: 'listEvents', description: '', parameters: [],
   relations: [{ kind: 'no-duplicates' }, { kind: 'sorted-by', field: 'startsAt' }],
-  knownEntity: 'Weekly Standup',
+  entityRef: 'Weekly Standup',
 }];
 
 const relCassette: Cassette = {
@@ -328,7 +328,7 @@ test('relations say so when no cassette is attributed to the method', async () =
     return [{ id: 1 }, { id: 1 }]; // duplicates: no-duplicates would FAIL if ever evaluated
   };
   const relMethods: MethodDeclaration[] = [{
-    name: 'listEvents', description: '', parameters: [], effects: 'read',
+    name: 'listEvents', description: '', parameters: [], sideEffects: 'read-only',
     relations: [{ kind: 'no-duplicates' }],
   }];
   const v = await evaluate({ source: 'return [];' },
@@ -372,7 +372,7 @@ test('digest components cannot bleed across field boundaries', () => {
 
 test('digest is stable under object key order in methods', () => {
   const reordered = methods.map(m => ({ outputSchema: m.outputSchema, name: m.name,
-    description: m.description, parameters: m.parameters, effects: m.effects })) as MethodDeclaration[];
+    description: m.description, parameters: m.parameters, sideEffects: m.sideEffects })) as MethodDeclaration[];
   assert.equal(verdictDigest(GOOD_SOURCE, methods), verdictDigest(GOOD_SOURCE, reordered));
 });
 

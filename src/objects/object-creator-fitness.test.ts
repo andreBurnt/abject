@@ -191,7 +191,7 @@ test('end to end, in the dialect an LLM actually writes', async () => {
     recordedAt: 1,
   };
   const declared: MethodDeclaration[] = [{
-    name: 'listEvents', description: '', parameters: [], effects: 'read',
+    name: 'listEvents', description: '', parameters: [], sideEffects: 'read-only',
     outputSchema: {
       type: 'array',
       items: {
@@ -200,7 +200,7 @@ test('end to end, in the dialect an LLM actually writes', async () => {
       },
     },
     relations: [{ kind: 'no-duplicates' }, { kind: 'idempotent' }, { kind: 'non-empty-for-known-entity' }],
-    knownEntity: 'Weekly Standup',
+    entityRef: 'Weekly Standup',
   }];
 
   const v = await evaluate({ source: REAL },
