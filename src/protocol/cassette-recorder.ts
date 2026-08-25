@@ -35,17 +35,22 @@ export function beforeRequest(objectId: string | undefined, req: CassetteRequest
 }
 
 export function afterResponse(objectId: string | undefined, req: CassetteRequest,
-                              res: { status: number; body: unknown; rawBody: string }): void {
+                              res: { status: number; rawBody: string }): void {
   if (!objectId) return;
   const r = recorders.get(objectId);
   if (!r || r.mode !== 'record') return;
   if (res.status < 200 || res.status >= 300) return;
+  // Parse HERE, not in HttpClient: the recorder is the only consumer of the
+  // parsed shape, and parsing every response in the system to feed a recorder
+  // that is almost never attached would tax the entire runtime's HTTP path.
+  let body: unknown = res.rawBody;
+  try { body = JSON.parse(res.rawBody); } catch { /* not JSON — keep the text */ }
   r.store.add({
     method: HTTP_CASSETTE_METHOD, args: {},
     request: redactRequest(req),
-    response: { status: res.status, body: res.body },
+    response: { status: res.status, body },
     rawBody: res.rawBody,
-    parsedOutput: res.body,
+    parsedOutput: body,
     recordedAt: Date.now(),
   });
   r.onRecord?.(r.store);

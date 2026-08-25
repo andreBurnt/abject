@@ -361,16 +361,8 @@ export class HttpClient extends Abject {
         // Read body
         const body = await response.text();
 
-        // Record seam: JSON-parse the body when possible so the cassette
-        // carries a matchable structure; fall back to the raw text.
-        let parsedBody: unknown = body;
-        try {
-          parsedBody = JSON.parse(body);
-        } catch {
-          // not JSON — keep parsedBody as the raw text
-        }
         afterResponse(callerId, { method: req.method, url: req.url, headers: req.headers },
-          { status: response.status, body: parsedBody, rawBody: body });
+          { status: response.status, rawBody: body });
 
         return {
           status: response.status,
