@@ -6,6 +6,9 @@ import { AbjectId, AbjectMessage } from '../../core/types.js';
 import { Abject, DEFERRED_REPLY } from '../../core/abject.js';
 import { error } from '../../core/message.js';
 import { Capabilities } from '../../core/capability.js';
+import { Log } from '../../core/timed-log.js';
+
+const log = new Log('HTTP');
 
 const HTTP_INTERFACE = 'abjects:http';
 
@@ -24,6 +27,28 @@ export interface HttpResponse {
   body: string;
   ok: boolean;
 }
+
+/** What dependents receive per completed request (aspect `httpExchange`).
+ *  Redacted and size-capped BEFORE emission: secrets never cross the bus,
+ *  and multi-megabyte bodies never ride it. Bodies stay text — nothing on
+ *  this path parses JSON. */
+export interface HttpExchangeEvent {
+  /** Verified by recorders against the registry, not trusted from here. */
+  caller: AbjectId;
+  request: { method: string; url: string; headers?: Record<string, string>; bodyText?: string; truncated?: boolean };
+  response: { status: number; headers?: Record<string, string>; bodyText?: string; truncated?: boolean };
+  durationMs: number;
+  at: number;
+}
+
+/** Stem match on the NAME of a header, query param, or body field. Stems
+ *  rather than exact names, so client_secret, refresh_token, x-amz-security-
+ *  token, and whatever header a generated object invents all match; a false
+ *  positive redacts something harmless, a false negative persists a live
+ *  credential, so this errs toward matching. (`auth(?!or\b)` keeps
+ *  authorization in while leaving author alone.) */
+const SECRET_NAME_STEM = /key|token|secret|passw|credential|session|signature|cookie|auth(?!or\b)/i;
+const EXCHANGE_BODY_CAP = 64 * 1024; // characters, not bytes
 
 /**
  * HTTP Client capability object.
@@ -190,7 +215,7 @@ export class HttpClient extends Abject {
     // for health pings during long-running fetches (e.g. LLM API calls).
     this.on('request', async (msg: AbjectMessage) => {
       const req = msg.payload as HttpRequest;
-      this.makeRequest(req).then(
+      this.tracked(msg, req).then(
         (result) => this.sendDeferredReply(msg, result),
         (err) => {
           this.send(error(msg, 'HTTP_ERROR',
@@ -206,7 +231,7 @@ export class HttpClient extends Abject {
         url: string;
         headers?: Record<string, string>;
       };
-      this.makeRequest({ method: 'GET', url, headers }).then(
+      this.tracked(msg, { method: 'GET', url, headers }).then(
         (result) => this.sendDeferredReply(msg, result),
         (err) => {
           this.send(error(msg, 'HTTP_ERROR',
@@ -223,7 +248,7 @@ export class HttpClient extends Abject {
         body: string;
         headers?: Record<string, string>;
       };
-      this.makeRequest({ method: 'POST', url, body, headers }).then(
+      this.tracked(msg, { method: 'POST', url, body, headers }).then(
         (result) => this.sendDeferredReply(msg, result),
         (err) => {
           this.send(error(msg, 'HTTP_ERROR',
@@ -255,7 +280,7 @@ export class HttpClient extends Abject {
         url: string;
         data: object;
       };
-      this.makeRequest({
+      this.tracked(msg, {
         method: 'POST',
         url,
         body: data,
@@ -300,6 +325,53 @@ export class HttpClient extends Abject {
   /**
    * Make an HTTP request with retry for transient errors.
    */
+  /**
+   * makeRequest plus the `httpExchange` event dependents subscribe to
+   * (a CassetteRecorder, typically). Wraps the message entry points only:
+   * `msg.routing.from` is the caller identity a recorder attributes the
+   * exchange to. Emission failures never break the request path, and with
+   * no dependents `changed()` walks an empty set.
+   */
+  private async tracked(msg: AbjectMessage, req: HttpRequest): Promise<HttpResponse> {
+    const started = Date.now();
+    const result = await this.makeRequest(req);
+    // Nobody subscribed: skip serializing/redacting a payload nobody hears.
+    if (!this.hasDependents) return result;
+    try {
+      this.emitExchange(msg.routing.from, req, result, Date.now() - started);
+    } catch (err) {
+      // recording is best-effort; the reply to the caller is not
+      log.warn('httpExchange emission failed', err);
+    }
+    return result;
+  }
+
+  private emitExchange(caller: AbjectId, req: HttpRequest, res: HttpResponse, durationMs: number): void {
+    const reqBody = typeof req.body === 'string' ? req.body
+      : req.body !== undefined ? JSON.stringify(req.body) : undefined;
+    const [reqBodyText, reqTruncated] = capBody(reqBody);
+    const [resBodyText, resTruncated] = capBody(res.body);
+    const exchange: HttpExchangeEvent = {
+      caller,
+      request: {
+        method: req.method,
+        url: redactUrl(req.url),
+        headers: redactHeaders(req.headers),
+        ...(reqBodyText !== undefined ? { bodyText: reqBodyText } : {}),
+        ...(reqTruncated ? { truncated: true } : {}),
+      },
+      response: {
+        status: res.status,
+        headers: redactHeaders(res.headers),
+        ...(resBodyText !== undefined ? { bodyText: resBodyText } : {}),
+        ...(resTruncated ? { truncated: true } : {}),
+      },
+      durationMs,
+      at: Date.now(),
+    };
+    this.changed('httpExchange', exchange);
+  }
+
   async makeRequest(req: HttpRequest): Promise<HttpResponse> {
     if (this.webDisabled) throw new Error('Web access is disabled. Enable it in Settings > Permissions.');
     // Validate URL
@@ -585,3 +657,53 @@ Every response has: { status, statusText, headers, body, ok }
 
 // Well-known HTTP client ID
 export const HTTP_CLIENT_ID = 'abjects:http-client' as AbjectId;
+
+/** Secret-bearing query params and headers are replaced, never dropped:
+ *  the shape of the request stays visible, the credential does not. */
+function redactUrl(rawUrl: string): string {
+  try {
+    const u = new URL(rawUrl);
+    let touched = false;
+    for (const name of Array.from(u.searchParams.keys())) {
+      if (SECRET_NAME_STEM.test(name)) {
+        u.searchParams.set(name, 'REDACTED');
+        touched = true;
+      }
+    }
+    return touched ? u.toString() : rawUrl;
+  } catch {
+    return rawUrl.split('?')[0];
+  }
+}
+
+function redactHeaders(headers?: Record<string, string>): Record<string, string> | undefined {
+  if (!headers) return undefined;
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers)) {
+    out[name] = SECRET_NAME_STEM.test(name) ? 'REDACTED' : value;
+  }
+  return out;
+}
+
+/** Field-level scrub of body TEXT: the value of any JSON string field or
+ *  form-encoded field whose NAME matches the secret stems is replaced. Plain
+ *  regex over text - no JSON.parse on this path, ever. Pattern-based, so it
+ *  catches named fields (access_token, client_secret, password), not a
+ *  secret embedded in free text under an innocent name. */
+const JSON_SECRET_FIELD = new RegExp(
+  `("(?:[^"\\\\]*(?:${SECRET_NAME_STEM.source})[^"\\\\]*)"\\s*:\\s*")(?:[^"\\\\]|\\\\.)*(")`, 'gi');
+const FORM_SECRET_FIELD = new RegExp(
+  `((?:^|[&?])[^=&]*(?:${SECRET_NAME_STEM.source})[^=&]*=)[^&]*`, 'gi');
+
+function redactBodyText(body: string): string {
+  return body
+    .replace(JSON_SECRET_FIELD, '$1REDACTED$2')
+    .replace(FORM_SECRET_FIELD, '$1REDACTED');
+}
+
+function capBody(body: string | undefined): [string | undefined, boolean] {
+  if (body === undefined) return [undefined, false];
+  const scrubbed = redactBodyText(body);
+  if (scrubbed.length <= EXCHANGE_BODY_CAP) return [scrubbed, false];
+  return [scrubbed.slice(0, EXCHANGE_BODY_CAP), true];
+}
