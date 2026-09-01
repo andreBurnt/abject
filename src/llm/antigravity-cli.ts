@@ -52,6 +52,7 @@ import {
   LLMProviderDescription,
   LLMStreamChunk,
   ModelInfo,
+  ModelTier,
   cliIsRetryable,
 } from './provider.js';
 
@@ -80,9 +81,6 @@ const AGY_MODELS: ModelInfo[] = [
   { id: 'gemini-3.6-flash-high',    name: 'Gemini 3.6 Flash (High)', vision: false },
   { id: 'gemini-3.6-flash-medium',  name: 'Gemini 3.6 Flash (Medium)', vision: false },
   { id: 'gemini-3.6-flash-low',     name: 'Gemini 3.6 Flash (Low)', vision: false },
-  { id: 'gemini-3.5-flash-high',    name: 'Gemini 3.5 Flash (High)', vision: false },
-  { id: 'gemini-3.5-flash-medium',  name: 'Gemini 3.5 Flash (Medium)', vision: false },
-  { id: 'gemini-3.5-flash-low',     name: 'Gemini 3.5 Flash (Low)', vision: false },
   { id: 'gemini-3.1-pro-high',      name: 'Gemini 3.1 Pro (High)', vision: false },
   { id: 'gemini-3.1-pro-low',       name: 'Gemini 3.1 Pro (Low)', vision: false },
   { id: 'claude-sonnet-4-6',        name: 'Claude Sonnet 4.6 (Thinking)', vision: false },
@@ -92,6 +90,35 @@ const AGY_MODELS: ModelInfo[] = [
 
 function shouldOmitModelFlag(model: string | undefined): boolean {
   return !model || model === AUTO_MODEL;
+}
+
+/**
+ * Default model per routing tier. Explicit effort-suffixed IDs, never
+ * AUTO_MODEL: "auto" resolves server-side to a high thinking budget
+ * (measured: gemini-3.7-flash-high behavior), which is a tail-latency
+ * amplifier on hard prompts (LINC#571). Explicit suffixes bound thinking
+ * per tier; AUTO_MODEL remains user-selectable in AGY_MODELS.
+ *
+ * code and smart share flash-high DELIBERATELY: there is no higher non-pro
+ * rung — the pro models reject --effort and pay pro-grade latency, wrong
+ * for a tier default. Kept honest by the `agy models` tripwire test.
+ */
+export const AGY_TIER_MODELS: Record<ModelTier, string> = {
+  smart: 'gemini-3.7-flash-high',
+  balanced: 'gemini-3.7-flash-medium',
+  fast: 'gemini-3.7-flash-low',
+  code: 'gemini-3.7-flash-high',
+};
+
+/**
+ * Retry delay policy (LINC#571): an empty completion is the model
+ * stochastically abandoning the turn (denied tool, reasoning-only reply) —
+ * not load-shedding — so there is nothing external to wait out and the
+ * fix is an instant resample. Everything else keeps the exponential
+ * backoff it was handed.
+ */
+export function agyRetryDelayMs(err: unknown, _attempt: number, defaultDelayMs: number): number {
+  return err instanceof EmptyCompletionError ? 0 : defaultDelayMs;
 }
 
 /**
@@ -174,9 +201,13 @@ export class AntigravityCliProvider extends BaseLLMProvider {
    * The model a request runs on. Without this override the base class
    * reports 'default' for an unrouted call, which the ledger then files
    * under a model name that exists nowhere and matches no price entry.
+   * Tier-routed calls resolve through AGY_TIER_MODELS (mirroring the
+   * direct Gemini provider) so a tier never silently rides "auto".
    */
   override resolveModel(options?: LLMCompletionOptions): string {
-    return options?.model ?? AUTO_MODEL;
+    if (options?.model) return options.model;
+    if (options?.tier) return AGY_TIER_MODELS[options.tier];
+    return AUTO_MODEL;
   }
 
   async complete(messages: LLMMessage[], options?: LLMCompletionOptions): Promise<LLMCompletionResult> {
@@ -399,7 +430,7 @@ export class AntigravityCliProvider extends BaseLLMProvider {
           + 'Install Antigravity CLI: agy install or https://antigravity.google',
       },
       models: AGY_MODELS,
-      defaultTierModels: { smart: AUTO_MODEL, balanced: AUTO_MODEL, fast: AUTO_MODEL, code: AUTO_MODEL },
+      defaultTierModels: AGY_TIER_MODELS,
     };
   }
 
@@ -430,9 +461,11 @@ export class AntigravityCliProvider extends BaseLLMProvider {
 
     // Effort-suffixed IDs (see AGY_MODELS) are self-contained; a separate
     // --effort flag is rejected by pro/claude models, so never pass one.
-    const model = options?.model;
+    // Resolution matches what the ledger reports: explicit model, then the
+    // tier default, then auto (no flag).
+    const model = this.resolveModel(options);
     if (!shouldOmitModelFlag(model)) {
-      argv.push('--model', model!);
+      argv.push('--model', model);
     }
 
     return { argv, stdin: `${JSON.stringify(buildStreamJsonUserMessage(messages))}\n` };
