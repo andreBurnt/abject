@@ -251,6 +251,14 @@ export interface RetryOptions {
   isRetryable?: (err: unknown) => boolean;
   /** Hook for logging — called once before each retry sleep. */
   onRetry?: (err: unknown, attempt: number, delayMs: number) => void;
+  /**
+   * Per-error delay override. Called with the error, the attempt number,
+   * and the delay the exponential backoff would have used; its return value
+   * is slept instead. Return 0 for an instant retry — right when the
+   * failure is a stochastic model behavior (e.g. EmptyCompletionError)
+   * rather than load-shedding, so there is nothing external to wait out.
+   */
+  delayMs?: (err: unknown, attempt: number, defaultDelayMs: number) => number;
   /** Diagnostic label used by onRetry's default formatter. */
   label?: string;
 }
@@ -331,10 +339,11 @@ export async function withRetries<T>(fn: () => Promise<T>, opts: RetryOptions = 
       if (attempt >= cfg.maxAttempts || !isRetryable(err)) {
         throw err;
       }
-      const delay = Math.min(
+      const backoff = Math.min(
         cfg.initialDelayMs * Math.pow(cfg.backoffFactor, attempt - 1),
         cfg.maxDelayMs,
       );
+      const delay = opts.delayMs ? opts.delayMs(err, attempt, backoff) : backoff;
       if (opts.onRetry) {
         try { opts.onRetry(err, attempt, delay); } catch { /* never let logging crash retry */ }
       } else {
