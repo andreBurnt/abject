@@ -444,11 +444,12 @@ export class AntigravityCliProvider extends BaseLLMProvider {
       models: AGY_MODELS,
       defaultTierModels: AGY_TIER_MODELS,
       // agy sunset the 3.5 flash line (caught live by the models tripwire
-      // test); migrate any saved tier routing to the 3.6 equivalents.
+      // test); migrate any saved tier routing to the current 3.7 line at
+      // the same effort, matching the tier defaults above.
       modelMigrations: {
-        'gemini-3.5-flash-high': 'gemini-3.6-flash-high',
-        'gemini-3.5-flash-medium': 'gemini-3.6-flash-medium',
-        'gemini-3.5-flash-low': 'gemini-3.6-flash-low',
+        'gemini-3.5-flash-high': 'gemini-3.7-flash-high',
+        'gemini-3.5-flash-medium': 'gemini-3.7-flash-medium',
+        'gemini-3.5-flash-low': 'gemini-3.7-flash-low',
       },
     };
   }

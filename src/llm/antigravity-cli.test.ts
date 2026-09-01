@@ -74,13 +74,13 @@ test('empty-completion retries resample instantly on the complete path', async (
   assert.ok(Date.now() - started < 1500, 'complete() backoff not bypassed');
 });
 
-test('sunset gemini-3.5 ids migrate saved routing to live models', async () => {
+test('sunset gemini-3.5 ids migrate saved routing to the current line, same effort', async () => {
   const migrations = provider.describe().modelMigrations ?? {};
   const ids = new Set((await provider.listModels()).map(m => m.id));
   for (const suffix of ['high', 'medium', 'low']) {
     const from = `gemini-3.5-flash-${suffix}`;
     const to = migrations[from];
-    assert.ok(to, `no migration for sunset id ${from}`);
+    assert.equal(to, `gemini-3.7-flash-${suffix}`, `sunset id ${from} should migrate to the 3.7 line`);
     assert.ok(ids.has(to), `migration target ${to} not in AGY_MODELS`);
   }
 });
