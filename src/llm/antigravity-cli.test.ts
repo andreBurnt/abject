@@ -74,6 +74,17 @@ test('empty-completion retries resample instantly on the complete path', async (
   assert.ok(Date.now() - started < 1500, 'complete() backoff not bypassed');
 });
 
+test('sunset gemini-3.5 ids migrate saved routing to live models', async () => {
+  const migrations = provider.describe().modelMigrations ?? {};
+  const ids = new Set((await provider.listModels()).map(m => m.id));
+  for (const suffix of ['high', 'medium', 'low']) {
+    const from = `gemini-3.5-flash-${suffix}`;
+    const to = migrations[from];
+    assert.ok(to, `no migration for sunset id ${from}`);
+    assert.ok(ids.has(to), `migration target ${to} not in AGY_MODELS`);
+  }
+});
+
 // Staleness tripwire (council ask): the hardcoded registry must match the
 // live CLI. Skips when agy is unavailable — it fires only on a successful
 // listing that lacks one of our IDs (e.g. Google sunsets the 3.7 line).
