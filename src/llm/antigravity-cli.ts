@@ -10,26 +10,37 @@
  * stream on stdout. Nothing is scraped off a screen: the reply arrives as
  * data and token usage comes back with it.
  *
- * TOOL ACCESS - unresolved, and a deliberate note rather than an oversight.
- * Unlike `claude` (`--tools ""`) there is no way to run `agy` as a plain
- * text generator: its init event advertises ~56 tools (run_command,
- * write_to_file, call_mcp_tool, the browser suite) and `--mode plan` warns
- * it "has no effect while slash command expansion is disabled". Two
- * consequences callers should know about:
+ * TOOL ACCESS - closed as no-mechanism after investigation (LINC#571,
+ * agy 1.1.23). Unlike `claude` (`--tools ""`) there is no way to run `agy`
+ * as a plain text generator: no `--safe-mode`/`--config-dir`/tool-strip
+ * flag exists, `--sandbox` does not shrink the catalog, and the config
+ * paths (`~/.gemini/config/*`, skills included) are hardcoded in the
+ * binary. Isolating via a HOME override was considered and REJECTED: agy's
+ * OAuth state lives under `~/.gemini/`, and forking it silently forks the
+ * credential store (the classic overnight login-freeze failure mode). A
+ * custom `--agent` may become an isolation surface once agent definitions
+ * are documented. Consequences callers should know about:
  *
- *  1. Every request pays ~15k input tokens for a tool catalog Abjects can
- *     never use, because capabilities are routed through objects on the
- *     message bus rather than the CLI's own tool layer.
- *  2. Headless mode cannot answer a permission prompt, so a tool call is
- *     auto-denied - and the model frequently gives up at that point and
+ *  1. Every request pays ~24.2k input tokens for a 57-tool catalog Abjects
+ *     can never use (measured; capabilities are routed through objects on
+ *     the message bus rather than the CLI's own tool layer). The prefill is
+ *     never cache-hit across requests either - agy assembles the request,
+ *     so the cross-request cache miss is an upstream problem; caching does
+ *     work between turns inside one multi-turn call.
+ *  2. Headless mode cannot answer a permission prompt, so a gated tool call
+ *     is auto-denied - and the model frequently gives up at that point and
  *     returns an empty answer with status SUCCESS. {@link TOOLLESS_NOTE}
  *     tells the model up front not to bother, and an empty result is
- *     surfaced as {@link EmptyCompletionError} rather than as success.
+ *     surfaced as {@link EmptyCompletionError} rather than as success; the
+ *     retry then resamples instantly ({@link agyRetryDelayMs}) since the
+ *     abandonment is stochastic, not load-shedding.
  *
- * Denial is not total either: allow-rules in the user's agy settings.json
- * (e.g. `command(find)`) apply to these sessions too, so treat
- * antigravity-cli as a provider with tool access and run it somewhere
- * harmless. See {@link AntigravityCliProvider.sandbox}.
+ * Denial is not total either - this is confirmed LIVE, not theoretical:
+ * bench probes saw headless sessions EXECUTE `run_command` (listing $HOME)
+ * and `write_to_file` (writes corralled into agy's per-session
+ * `~/.gemini/antigravity-cli/brain/<id>/` scratch) under the user's
+ * allow-rules. Treat antigravity-cli as a provider with tool access and
+ * run it somewhere harmless. See {@link AntigravityCliProvider.sandbox}.
  *
  * Reports under provider name `'antigravity-cli'`.
  */

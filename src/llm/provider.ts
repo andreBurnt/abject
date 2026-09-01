@@ -263,7 +263,7 @@ export interface RetryOptions {
   label?: string;
 }
 
-const DEFAULT_RETRY_OPTS: Required<Omit<RetryOptions, 'isRetryable' | 'onRetry' | 'label'>> = {
+const DEFAULT_RETRY_OPTS: Required<Omit<RetryOptions, 'isRetryable' | 'onRetry' | 'label' | 'delayMs'>> = {
   maxAttempts: 3,
   initialDelayMs: 1000,
   maxDelayMs: 10000,
