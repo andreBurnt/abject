@@ -6,6 +6,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync, chmodSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   AntigravityCliProvider, AGY_TIER_MODELS, agyRetryDelayMs,
 } from './antigravity-cli.js';
@@ -35,6 +38,40 @@ test('agyRetryDelayMs: empty completions resample instantly, transient errors ke
   assert.equal(agyRetryDelayMs(new EmptyCompletionError('empty', 'stop'), 3, 4000), 0);
   assert.equal(agyRetryDelayMs(new Error('idle for 360000ms'), 1, 1000), 1000);
   assert.equal(agyRetryDelayMs(new Error('boom'), 3, 4000), 4000);
+});
+
+/** A fake agy that ends a turn cleanly with an empty response every time. */
+function fakeEmptyAgy(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'fake-agy-'));
+  const bin = join(dir, 'agy');
+  writeFileSync(bin, '#!/bin/sh\n'
+    + 'echo \'{"event":"result","result":{"status":"SUCCESS","response":"","usage":{"input_tokens":1,"output_tokens":0}}}\'\n');
+  chmodSync(bin, 0o755);
+  return bin;
+}
+
+test('empty-completion retries resample instantly on the stream path', async () => {
+  const p = new AntigravityCliProvider({ bin: fakeEmptyAgy() });
+  const started = Date.now();
+  const chunks = [];
+  for await (const c of p.stream([{ role: 'user', content: 'hi' }])) chunks.push(c);
+  const elapsed = Date.now() - started;
+  const last = chunks[chunks.length - 1];
+  assert.equal(last.done, true);
+  assert.equal(last.stopReason, 'stop');
+  // 3 attempts with the old 1s+2s ladder floor at >=3000ms; instant resample
+  // is spawn-bound (~tens of ms per attempt).
+  assert.ok(elapsed < 1500, `3 empty attempts took ${elapsed}ms — backoff not bypassed`);
+});
+
+test('empty-completion retries resample instantly on the complete path', async () => {
+  const p = new AntigravityCliProvider({ bin: fakeEmptyAgy() });
+  const started = Date.now();
+  await assert.rejects(
+    () => p.complete([{ role: 'user', content: 'hi' }]),
+    (e: unknown) => e instanceof EmptyCompletionError,
+  );
+  assert.ok(Date.now() - started < 1500, 'complete() backoff not bypassed');
 });
 
 // Staleness tripwire (council ask): the hardcoded registry must match the

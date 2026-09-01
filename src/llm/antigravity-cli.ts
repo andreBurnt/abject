@@ -253,7 +253,7 @@ export class AntigravityCliProvider extends BaseLLMProvider {
         finishReason: 'stop',
         usage,
       };
-    }, { isRetryable: agyIsRetryable, label: 'antigravity-cli.complete' });
+    }, { isRetryable: agyIsRetryable, delayMs: agyRetryDelayMs, label: 'antigravity-cli.complete' });
   }
 
   async *stream(messages: LLMMessage[], options?: LLMCompletionOptions): AsyncIterable<LLMStreamChunk> {
@@ -286,7 +286,8 @@ export class AntigravityCliProvider extends BaseLLMProvider {
           throw err;
         }
         if (!agyIsRetryable(err)) throw err;
-        const delay = Math.min(initialDelayMs * Math.pow(backoffFactor, attempt - 1), maxDelayMs);
+        const backoff = Math.min(initialDelayMs * Math.pow(backoffFactor, attempt - 1), maxDelayMs);
+        const delay = agyRetryDelayMs(err, attempt, backoff);
         const msg = err instanceof Error ? err.message : String(err);
         // eslint-disable-next-line no-console
         console.warn(`[antigravity-cli.stream] attempt ${attempt}/${maxAttempts} failed: ${msg.slice(0, 200)} — retrying in ${delay}ms`);
