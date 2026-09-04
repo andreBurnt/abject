@@ -534,20 +534,33 @@ export class PeerTransport extends Transport {
     });
     log.info(`[ICE-DIAG] PC for ${this.remotePeerId.slice(0, 12)}: ${this.iceServers.length} iceServers, turn=[${turnUrls.join(',')}], hasUser=${this.iceServers.some(s => !!s.username)}`);
 
-    // Forward ICE candidates to the remote peer via signaling
+    // Forward ICE candidates to the remote peer via signaling.
+    //
+    // node-datachannel fires this from its native gathering thread, so there is
+    // no JS caller above us to catch anything. The relay throws ContractViolation
+    // whenever the signaling socket is down, and gathering does not stop because
+    // signaling did, so a mid-gather WebSocket drop killed the process: a
+    // Napi::Error abort (libc++abi) in the worker, an uncaught exception on the
+    // main thread (issue #14). Fence the frame: a candidate we cannot relay is
+    // dropped, the attempt fails through its own timeout, and PeerRegistry's
+    // reconnect path takes it from there.
     this.peerConnection.onicecandidate = (event) => {
-      if (event.candidate) {
-        // [ICE-DIAG] Log local candidate type (host/srflx/relay).
-        const c = event.candidate.candidate;
-        const typ = /typ (\w+)/.exec(c)?.[1] ?? '?';
-        log.info(`[ICE-DIAG] LOCAL cand to ${this.remotePeerId.slice(0, 12)}: typ=${typ} ${c.slice(0, 80)}`);
-        this.signalingClient.sendIceCandidate(
-          this.localPeerId,
-          this.remotePeerId,
-          event.candidate.toJSON(),
-        );
-      } else {
-        log.info(`[ICE-DIAG] LOCAL gathering complete for ${this.remotePeerId.slice(0, 12)}`);
+      try {
+        if (event.candidate) {
+          // [ICE-DIAG] Log local candidate type (host/srflx/relay).
+          const c = event.candidate.candidate;
+          const typ = /typ (\w+)/.exec(c)?.[1] ?? '?';
+          log.info(`[ICE-DIAG] LOCAL cand to ${this.remotePeerId.slice(0, 12)}: typ=${typ} ${c.slice(0, 80)}`);
+          this.signalingClient.sendIceCandidate(
+            this.localPeerId,
+            this.remotePeerId,
+            event.candidate.toJSON(),
+          );
+        } else {
+          log.info(`[ICE-DIAG] LOCAL gathering complete for ${this.remotePeerId.slice(0, 12)}`);
+        }
+      } catch (err) {
+        log.warn(`Dropped local ICE candidate for ${this.remotePeerId.slice(0, 16)} (signaling unavailable): ${err instanceof Error ? err.message : err}`);
       }
     };
 
