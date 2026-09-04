@@ -251,11 +251,19 @@ export interface RetryOptions {
   isRetryable?: (err: unknown) => boolean;
   /** Hook for logging — called once before each retry sleep. */
   onRetry?: (err: unknown, attempt: number, delayMs: number) => void;
+  /**
+   * Per-error delay override. Called with the error, the attempt number,
+   * and the delay the exponential backoff would have used; its return value
+   * is slept instead. Return 0 for an instant retry — right when the
+   * failure is a stochastic model behavior (e.g. EmptyCompletionError)
+   * rather than load-shedding, so there is nothing external to wait out.
+   */
+  delayMs?: (err: unknown, attempt: number, defaultDelayMs: number) => number;
   /** Diagnostic label used by onRetry's default formatter. */
   label?: string;
 }
 
-const DEFAULT_RETRY_OPTS: Required<Omit<RetryOptions, 'isRetryable' | 'onRetry' | 'label'>> = {
+const DEFAULT_RETRY_OPTS: Required<Omit<RetryOptions, 'isRetryable' | 'onRetry' | 'label' | 'delayMs'>> = {
   maxAttempts: 3,
   initialDelayMs: 1000,
   maxDelayMs: 10000,
@@ -331,10 +339,21 @@ export async function withRetries<T>(fn: () => Promise<T>, opts: RetryOptions = 
       if (attempt >= cfg.maxAttempts || !isRetryable(err)) {
         throw err;
       }
-      const delay = Math.min(
+      const backoff = Math.min(
         cfg.initialDelayMs * Math.pow(cfg.backoffFactor, attempt - 1),
         cfg.maxDelayMs,
       );
+      // The hook gets the same blast-radius discipline as onRetry (never let
+      // a delay policy crash the retry) plus the bound the backoff always
+      // had: a hook cannot sleep past maxDelayMs or return a negative/NaN
+      // delay, no matter what a future caller's policy computes.
+      let delay = backoff;
+      if (opts.delayMs) {
+        try {
+          const v = opts.delayMs(err, attempt, backoff);
+          if (Number.isFinite(v)) delay = Math.max(0, Math.min(v, cfg.maxDelayMs));
+        } catch { /* never let a delay policy crash retry */ }
+      }
       if (opts.onRetry) {
         try { opts.onRetry(err, attempt, delay); } catch { /* never let logging crash retry */ }
       } else {

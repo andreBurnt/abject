@@ -10,26 +10,37 @@
  * stream on stdout. Nothing is scraped off a screen: the reply arrives as
  * data and token usage comes back with it.
  *
- * TOOL ACCESS - unresolved, and a deliberate note rather than an oversight.
- * Unlike `claude` (`--tools ""`) there is no way to run `agy` as a plain
- * text generator: its init event advertises ~56 tools (run_command,
- * write_to_file, call_mcp_tool, the browser suite) and `--mode plan` warns
- * it "has no effect while slash command expansion is disabled". Two
- * consequences callers should know about:
+ * TOOL ACCESS - closed as no-mechanism after investigation (LINC#571,
+ * agy 1.1.23). Unlike `claude` (`--tools ""`) there is no way to run `agy`
+ * as a plain text generator: no `--safe-mode`/`--config-dir`/tool-strip
+ * flag exists, `--sandbox` does not shrink the catalog, and the config
+ * paths (`~/.gemini/config/*`, skills included) are hardcoded in the
+ * binary. Isolating via a HOME override was considered and REJECTED: agy's
+ * OAuth state lives under `~/.gemini/`, and forking it silently forks the
+ * credential store (the classic overnight login-freeze failure mode). A
+ * custom `--agent` may become an isolation surface once agent definitions
+ * are documented. Consequences callers should know about:
  *
- *  1. Every request pays ~15k input tokens for a tool catalog Abjects can
- *     never use, because capabilities are routed through objects on the
- *     message bus rather than the CLI's own tool layer.
- *  2. Headless mode cannot answer a permission prompt, so a tool call is
- *     auto-denied - and the model frequently gives up at that point and
+ *  1. Every request pays ~24.2k input tokens for a 57-tool catalog Abjects
+ *     can never use (measured; capabilities are routed through objects on
+ *     the message bus rather than the CLI's own tool layer). The prefill is
+ *     never cache-hit across requests either - agy assembles the request,
+ *     so the cross-request cache miss is an upstream problem; caching does
+ *     work between turns inside one multi-turn call.
+ *  2. Headless mode cannot answer a permission prompt, so a gated tool call
+ *     is auto-denied - and the model frequently gives up at that point and
  *     returns an empty answer with status SUCCESS. {@link TOOLLESS_NOTE}
  *     tells the model up front not to bother, and an empty result is
- *     surfaced as {@link EmptyCompletionError} rather than as success.
+ *     surfaced as {@link EmptyCompletionError} rather than as success; the
+ *     retry then resamples instantly ({@link agyRetryDelayMs}) since the
+ *     abandonment is stochastic, not load-shedding.
  *
- * Denial is not total either: allow-rules in the user's agy settings.json
- * (e.g. `command(find)`) apply to these sessions too, so treat
- * antigravity-cli as a provider with tool access and run it somewhere
- * harmless. See {@link AntigravityCliProvider.sandbox}.
+ * Denial is not total either - this is confirmed LIVE, not theoretical:
+ * bench probes saw headless sessions EXECUTE `run_command` (listing $HOME)
+ * and `write_to_file` (writes corralled into agy's per-session
+ * `~/.gemini/antigravity-cli/brain/<id>/` scratch) under the user's
+ * allow-rules. Treat antigravity-cli as a provider with tool access and
+ * run it somewhere harmless. See {@link AntigravityCliProvider.sandbox}.
  *
  * Reports under provider name `'antigravity-cli'`.
  */
@@ -52,6 +63,7 @@ import {
   LLMProviderDescription,
   LLMStreamChunk,
   ModelInfo,
+  ModelTier,
   cliIsRetryable,
 } from './provider.js';
 
@@ -72,7 +84,7 @@ const AUTO_MODEL = 'auto';
  * (exit 1, result status ERROR), so image requests must be routed away from
  * this provider rather than degraded.
  */
-const AGY_MODELS: ModelInfo[] = [
+const AGY_MODELS = [
   { id: AUTO_MODEL,                 name: 'Auto (recommended)', vision: false },
   { id: 'gemini-3.7-flash-high',    name: 'Gemini 3.7 Flash (High)', vision: false },
   { id: 'gemini-3.7-flash-medium',  name: 'Gemini 3.7 Flash (Medium)', vision: false },
@@ -80,18 +92,51 @@ const AGY_MODELS: ModelInfo[] = [
   { id: 'gemini-3.6-flash-high',    name: 'Gemini 3.6 Flash (High)', vision: false },
   { id: 'gemini-3.6-flash-medium',  name: 'Gemini 3.6 Flash (Medium)', vision: false },
   { id: 'gemini-3.6-flash-low',     name: 'Gemini 3.6 Flash (Low)', vision: false },
-  { id: 'gemini-3.5-flash-high',    name: 'Gemini 3.5 Flash (High)', vision: false },
-  { id: 'gemini-3.5-flash-medium',  name: 'Gemini 3.5 Flash (Medium)', vision: false },
-  { id: 'gemini-3.5-flash-low',     name: 'Gemini 3.5 Flash (Low)', vision: false },
   { id: 'gemini-3.1-pro-high',      name: 'Gemini 3.1 Pro (High)', vision: false },
   { id: 'gemini-3.1-pro-low',       name: 'Gemini 3.1 Pro (Low)', vision: false },
   { id: 'claude-sonnet-4-6',        name: 'Claude Sonnet 4.6 (Thinking)', vision: false },
   { id: 'claude-opus-4-6-thinking', name: 'Claude Opus 4.6 (Thinking)', vision: false },
   { id: 'gpt-oss-120b-medium',      name: 'GPT-OSS 120B (Medium)', vision: false },
-];
+] as const satisfies readonly ModelInfo[];
+
+/**
+ * Union of the catalog's ids, so a tier default or migration target that
+ * names a model not in AGY_MODELS is a compile error, not a runtime
+ * surprise on the first live call.
+ */
+type AgyModelId = (typeof AGY_MODELS)[number]['id'];
 
 function shouldOmitModelFlag(model: string | undefined): boolean {
   return !model || model === AUTO_MODEL;
+}
+
+/**
+ * Default model per routing tier. Explicit effort-suffixed IDs, never
+ * AUTO_MODEL: "auto" resolves server-side to a high thinking budget
+ * (measured: gemini-3.7-flash-high behavior), which is a tail-latency
+ * amplifier on hard prompts (LINC#571). Explicit suffixes bound thinking
+ * per tier; AUTO_MODEL remains user-selectable in AGY_MODELS.
+ *
+ * code and smart share flash-high DELIBERATELY: there is no higher non-pro
+ * rung — the pro models reject --effort and pay pro-grade latency, wrong
+ * for a tier default. Kept honest by the `agy models` tripwire test.
+ */
+export const AGY_TIER_MODELS: Record<ModelTier, AgyModelId> = {
+  smart: 'gemini-3.7-flash-high',
+  balanced: 'gemini-3.7-flash-medium',
+  fast: 'gemini-3.7-flash-low',
+  code: 'gemini-3.7-flash-high',
+};
+
+/**
+ * Retry delay policy (LINC#571): an empty completion is the model
+ * stochastically abandoning the turn (denied tool, reasoning-only reply) —
+ * not load-shedding — so there is nothing external to wait out and the
+ * fix is an instant resample. Everything else keeps the exponential
+ * backoff it was handed.
+ */
+export function agyRetryDelayMs(err: unknown, _attempt: number, defaultDelayMs: number): number {
+  return err instanceof EmptyCompletionError ? 0 : defaultDelayMs;
 }
 
 /**
@@ -174,9 +219,13 @@ export class AntigravityCliProvider extends BaseLLMProvider {
    * The model a request runs on. Without this override the base class
    * reports 'default' for an unrouted call, which the ledger then files
    * under a model name that exists nowhere and matches no price entry.
+   * Tier-routed calls resolve through AGY_TIER_MODELS (mirroring the
+   * direct Gemini provider) so a tier never silently rides "auto".
    */
   override resolveModel(options?: LLMCompletionOptions): string {
-    return options?.model ?? AUTO_MODEL;
+    if (options?.model) return options.model;
+    if (options?.tier) return AGY_TIER_MODELS[options.tier];
+    return AUTO_MODEL;
   }
 
   async complete(messages: LLMMessage[], options?: LLMCompletionOptions): Promise<LLMCompletionResult> {
@@ -222,7 +271,7 @@ export class AntigravityCliProvider extends BaseLLMProvider {
         finishReason: 'stop',
         usage,
       };
-    }, { isRetryable: agyIsRetryable, label: 'antigravity-cli.complete' });
+    }, { isRetryable: agyIsRetryable, delayMs: agyRetryDelayMs, label: 'antigravity-cli.complete' });
   }
 
   async *stream(messages: LLMMessage[], options?: LLMCompletionOptions): AsyncIterable<LLMStreamChunk> {
@@ -255,7 +304,8 @@ export class AntigravityCliProvider extends BaseLLMProvider {
           throw err;
         }
         if (!agyIsRetryable(err)) throw err;
-        const delay = Math.min(initialDelayMs * Math.pow(backoffFactor, attempt - 1), maxDelayMs);
+        const backoff = Math.min(initialDelayMs * Math.pow(backoffFactor, attempt - 1), maxDelayMs);
+        const delay = agyRetryDelayMs(err, attempt, backoff);
         const msg = err instanceof Error ? err.message : String(err);
         // eslint-disable-next-line no-console
         console.warn(`[antigravity-cli.stream] attempt ${attempt}/${maxAttempts} failed: ${msg.slice(0, 200)} — retrying in ${delay}ms`);
@@ -382,7 +432,7 @@ export class AntigravityCliProvider extends BaseLLMProvider {
   }
 
   async listModels(): Promise<ModelInfo[]> {
-    return AGY_MODELS;
+    return [...AGY_MODELS];
   }
 
   override describe(): LLMProviderDescription {
@@ -398,8 +448,16 @@ export class AntigravityCliProvider extends BaseLLMProvider {
           + 'tools, so a request can read the filesystem and run commands its settings allow. '
           + 'Install Antigravity CLI: agy install or https://antigravity.google',
       },
-      models: AGY_MODELS,
-      defaultTierModels: { smart: AUTO_MODEL, balanced: AUTO_MODEL, fast: AUTO_MODEL, code: AUTO_MODEL },
+      models: [...AGY_MODELS],
+      defaultTierModels: AGY_TIER_MODELS,
+      // agy sunset the 3.5 flash line (caught live by the models tripwire
+      // test); migrate any saved tier routing to the current 3.7 line at
+      // the same effort, matching the tier defaults above.
+      modelMigrations: {
+        'gemini-3.5-flash-high': 'gemini-3.7-flash-high',
+        'gemini-3.5-flash-medium': 'gemini-3.7-flash-medium',
+        'gemini-3.5-flash-low': 'gemini-3.7-flash-low',
+      } satisfies Record<string, AgyModelId>,
     };
   }
 
@@ -430,9 +488,11 @@ export class AntigravityCliProvider extends BaseLLMProvider {
 
     // Effort-suffixed IDs (see AGY_MODELS) are self-contained; a separate
     // --effort flag is rejected by pro/claude models, so never pass one.
-    const model = options?.model;
+    // Resolution matches what the ledger reports: explicit model, then the
+    // tier default, then auto (no flag).
+    const model = this.resolveModel(options);
     if (!shouldOmitModelFlag(model)) {
-      argv.push('--model', model!);
+      argv.push('--model', model);
     }
 
     return { argv, stdin: `${JSON.stringify(buildStreamJsonUserMessage(messages))}\n` };
