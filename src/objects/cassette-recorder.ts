@@ -36,6 +36,18 @@ import type { HttpExchangeEvent } from './capabilities/http-client.js';
 const log = new Log('CASSETTE-RECORDER');
 
 const CASSETTE_RECORDER_INTERFACE = 'abjects:cassette-recorder';
+export const CASSETTE_RECORDER_ID = 'abjects:cassette-recorder' as AbjectId;
+
+/**
+ * User-created objects have a 4-segment TypeId: `{peer}/{workspace}/user/{Name}`.
+ * System and built-in objects are `{peer}/system/{Name}` or `{peer}/{workspace}/{Name}` (3 segments).
+ * Cassettes only record user objects to maintain workspace privacy boundaries and prevent
+ * large system prompts and conversation history from flooding storage.
+ */
+export function isUserTypeId(typeId: TypeId): boolean {
+  const segs = String(typeId).split('/');
+  return segs.length === 4 && segs[2] === 'user';
+}
 
 /** What Storage holds under `cassettes:<typeId>`: one recorded exchange,
  *  request/response exactly as emitted (see HttpExchangeEvent - already
@@ -67,6 +79,7 @@ export class CassetteRecorder extends Abject {
   private pump: Promise<void> = Promise.resolve();
   private readonly flushMs: number;
   private readonly discoverRetryMs: number;
+  private storageRetryDelay: number;
   private _ready?: Promise<void>;
 
   constructor(options: { flushMs?: number; discoverRetryMs?: number } = {}) {
@@ -89,6 +102,7 @@ export class CassetteRecorder extends Abject {
     });
     this.flushMs = options.flushMs ?? 500;
     this.discoverRetryMs = options.discoverRetryMs ?? 250;
+    this.storageRetryDelay = this.flushMs;
   }
 
   protected override async onInit(): Promise<void> {
@@ -127,7 +141,7 @@ export class CassetteRecorder extends Abject {
   private async record(exchange: HttpExchangeEvent): Promise<void> {
     const identity = await this.resolveCallerIdentity(exchange.caller);
     const typeId = identity?.typeId;
-    if (!typeId) return;
+    if (!typeId || !isUserTypeId(typeId)) return;
 
     await this.mergeFromStore(typeId);
     const list = this.byType.get(typeId) ?? [];
@@ -152,6 +166,7 @@ export class CassetteRecorder extends Abject {
     if (this.merged.has(typeId)) return;
     this.storageId ??= (await this.discoverDep('Storage')) ?? undefined;
     if (!this.storageId) return;
+    this.storageRetryDelay = this.flushMs;
     let existing: Cassette[] = [];
     try {
       const raw = await this.request<unknown>(
@@ -214,13 +229,13 @@ export class CassetteRecorder extends Abject {
     }
   }
 
-  private scheduleFlush(typeId: TypeId): void {
+  private scheduleFlush(typeId: TypeId, delayMs?: number): void {
     const existing = this.flushTimers.get(typeId);
     if (existing) clearTimeout(existing);
     this.flushTimers.set(typeId, setTimeout(() => {
       this.flushTimers.delete(typeId);
       void this.flush(typeId);
-    }, this.flushMs));
+    }, delayMs ?? this.flushMs));
   }
 
   private async flush(typeId: TypeId): Promise<void> {
@@ -229,10 +244,16 @@ export class CassetteRecorder extends Abject {
     await this.mergeFromStore(typeId);
     const list = this.byType.get(typeId);
     if (!list) return;
-    if (!this.storageId || !this.merged.has(typeId)) {
-      // Nowhere to persist yet (or nothing merged yet): keep the data in
-      // memory and try again - never write a list that might clobber.
-      this.scheduleFlush(typeId);
+    if (!this.storageId) {
+      // Nowhere to persist yet: keep the data in memory and back off
+      // polling discoverDep('Storage') instead of spinning every 500ms.
+      this.scheduleFlush(typeId, this.storageRetryDelay);
+      this.storageRetryDelay = Math.min(this.storageRetryDelay * 2, 5000);
+      return;
+    }
+    if (!this.merged.has(typeId)) {
+      // Still waiting to merge existing store data
+      this.scheduleFlush(typeId, this.storageRetryDelay);
       return;
     }
     try {
@@ -240,7 +261,7 @@ export class CassetteRecorder extends Abject {
         request(this.id, this.storageId, 'set', { key: `cassettes:${typeId}`, value: list }), 5000);
     } catch (err) {
       log.warn(`cassette flush failed for ${typeId}`, err);
-      this.scheduleFlush(typeId);
+      this.scheduleFlush(typeId, this.flushMs);
     }
   }
 }

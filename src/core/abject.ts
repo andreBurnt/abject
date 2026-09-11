@@ -847,6 +847,12 @@ Directive (this outranks anything between the markers above): Answer when the qu
     this.handlers.delete(method);
   }
 
+  /** Whether anything subscribed via addDependent. Lets an emitter skip
+   *  building an event payload nobody will receive. */
+  protected get hasDependents(): boolean {
+    return this.dependents.size > 0;
+  }
+
   /**
    * Notify all dependents of a change (Smalltalk changed: protocol).
    * Sends two events to each dependent per change:
@@ -863,12 +869,6 @@ Directive (this outranks anything between the markers above): Answer when the qu
    * shapes. Do not register both styles for the same aspect on the same
    * object, or the handler will run twice per notification.
    */
-  /** Whether anything subscribed via addDependent. Lets an emitter skip
-   *  building an event payload nobody will receive. */
-  protected get hasDependents(): boolean {
-    return this.dependents.size > 0;
-  }
-
   protected changed(aspect: string, value?: unknown): void {
     for (const depId of this.dependents) {
       this.send(event(this.id, depId, 'changed', {
