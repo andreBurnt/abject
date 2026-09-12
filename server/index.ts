@@ -1001,8 +1001,8 @@ async function main(): Promise<void> {
   const negotiatorId = await supervisedSpawn('Negotiator', 'permanent', systemTypeId('Negotiator'));
   const healthMonitorId = await supervisedSpawn('HealthMonitor', 'permanent', systemTypeId('HealthMonitor'));
   // Records objects' HTTP traffic as typeId-keyed cassettes (evidence for
-  // judging generated objects — mempko/abject#11 series). Subscribes to
-  // HttpClient's httpExchange events at init; recording is on from boot.
+  // judging generated objects — mempko/abject#11 series). HttpClient finds
+  // it through the registry and sends exchanges to it directly.
   const cassetteRecorderId = await supervisedSpawn('CassetteRecorder', 'permanent', systemTypeId('CassetteRecorder'));
 
   // Sidebar owns the dock window the rails populate; WorkspaceSwitcher is a

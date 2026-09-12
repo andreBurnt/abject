@@ -1,13 +1,17 @@
 /**
  * CassetteRecorder - accumulates objects' HTTP traffic as replayable evidence.
  *
- * Subscribes to HttpClient's `httpExchange` events (Smalltalk dependents
- * protocol) and persists each exchange as a cassette under the caller's
- * durable typeId (`cassettes:<typeId>` in Storage). A live AbjectId dies with
- * its object; the typeId survives restarts, so the evidence does too.
+ * Receives HttpClient's `httpExchange` events and persists each exchange as
+ * a cassette under the caller's durable typeId (`cassettes:<typeId>` in
+ * Storage). A live AbjectId dies with its object; the typeId survives
+ * restarts, so the evidence does too.
  *
- * Everything crosses the bus as messages: the subscription (addDependent),
- * the exchanges (events), the persistence (Storage requests). HttpClient and
+ * The link is HttpClient's to make, not this object's: HttpClient discovers
+ * the recorder through the registry and sends each exchange to that one id
+ * (re-resolving on recipientGone), so exchanges are never broadcast to
+ * whoever asks via addDependent - a generated object cannot subscribe to
+ * other objects' traffic. Everything still crosses the bus as messages
+ * (exchanges as events, persistence as Storage requests): HttpClient and
  * this recorder may be hosted on different worker threads, so no in-process
  * seam would work - see mempko/abject#11.
  *
@@ -17,11 +21,10 @@
  * anonymous callers) are not recorded: a cassette that cannot be tied to a
  * type is evidence about nothing.
  *
- * Failure independence: HttpClient discovery retries for as long as this
- * object lives (a permanent recorder that silently gives up has failed its
- * one job), and recording proceeds in memory while Storage is missing, with
- * persistence catching up - and merging what the store already held - once
- * Storage appears.
+ * Failure independence: recording proceeds in memory while Storage is
+ * missing, with persistence catching up - and merging what the store already
+ * held - once Storage appears. A recorder restart is HttpClient's problem to
+ * notice (recipientGone) and it does.
  *
  * This object only records. Judging the evidence is a separate concern (and a
  * separate PR in the #11 series).
@@ -68,7 +71,6 @@ const PER_BUCKET_CAP = 5;
 const PER_TYPE_CAP = 50;
 
 export class CassetteRecorder extends Abject {
-  private httpClientId?: AbjectId;
   private storageId?: AbjectId;
   private byType = new Map<TypeId, Cassette[]>();
   /** typeIds whose in-memory list has been merged with what Storage held. */
@@ -78,16 +80,14 @@ export class CassetteRecorder extends Abject {
    *  long identity resolution or the initial Storage load takes. */
   private pump: Promise<void> = Promise.resolve();
   private readonly flushMs: number;
-  private readonly discoverRetryMs: number;
   private storageRetryDelay: number;
-  private _ready?: Promise<void>;
 
-  constructor(options: { flushMs?: number; discoverRetryMs?: number } = {}) {
+  constructor(options: { flushMs?: number } = {}) {
     super({
       manifest: {
         name: 'CassetteRecorder',
         description:
-          'Records objects\' HTTP traffic as cassettes in Storage, keyed by the caller\'s durable typeId. Subscribes to HttpClient httpExchange events; evidence for judging generated objects accumulates here.',
+          'Records objects\' HTTP traffic as cassettes in Storage, keyed by the caller\'s durable typeId. Receives HttpClient httpExchange events; evidence for judging generated objects accumulates here.',
         version: '1.0.0',
         interface: {
           id: CASSETTE_RECORDER_INTERFACE,
@@ -101,7 +101,6 @@ export class CassetteRecorder extends Abject {
       },
     });
     this.flushMs = options.flushMs ?? 500;
-    this.discoverRetryMs = options.discoverRetryMs ?? 250;
     this.storageRetryDelay = this.flushMs;
   }
 
@@ -113,29 +112,6 @@ export class CassetteRecorder extends Abject {
         .catch((err) => log.error('record failed', err));
       return true;
     });
-    this._ready = this.subscribe();
-  }
-
-  /** Resolved once the recorder is subscribed to HttpClient. */
-  async ready(): Promise<void> {
-    await this._ready;
-  }
-
-  /** Subscribe to HttpClient the moment it is discoverable, waiting on
-   *  nothing else - Storage being slow must not delay the subscription, and
-   *  a slow boot must not turn into a permanent silent no-record. Retries
-   *  with capped backoff for as long as this object lives. */
-  private async subscribe(): Promise<void> {
-    let delay = this.discoverRetryMs;
-    while (!this.httpClientId && (this._status as string) !== 'stopped') {
-      this.httpClientId = (await this.discoverDep('HttpClient')) ?? undefined;
-      if (this.httpClientId) break;
-      await new Promise(r => setTimeout(r, delay));
-      delay = Math.min(delay * 2, 5000);
-    }
-    if (!this.httpClientId) return; // stopped before HttpClient ever appeared
-    await this.request(request(this.id, this.httpClientId, 'addDependent', {}));
-    log.info('subscribed to HttpClient exchanges');
   }
 
   private async record(exchange: HttpExchangeEvent): Promise<void> {
