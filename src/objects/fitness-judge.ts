@@ -12,8 +12,8 @@
  * one. The verdict is computed from Storage and the draft's replayed
  * behaviour, and that behaviour is the candidate's own returned value,
  * produced by candidate code on a worker that is a deadline and a heap cap,
- * not a confidentiality boundary (see protocol/sandbox-invoker.ts). A draft
- * that escapes the vm can answer for itself.
+ * not a confidentiality boundary (see protocol/sandbox-invoker.ts). It is not
+ * built to contain a hostile draft.
  *
  * `judge` answers any caller on the bus; it does not gate on the caller's
  * typeId (the recordings it reads already sit in global Storage, readable by

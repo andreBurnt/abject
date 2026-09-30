@@ -194,8 +194,8 @@ class WorkerInvoker {
     const { port1, port2 } = new MessageChannel();
     const worker = new Worker(WORKER_SOURCE, {
       eval: true,
-      // Empty environment and own stdio: the candidate realm cannot read the
-      // host's process.env, and the worker carries no secrets to leak.
+      // Empty environment and own stdio: the worker starts without a copy of
+      // the host's environment variables. Hygiene, not isolation (see above).
       env: {},
       stdout: true,
       stderr: true,
