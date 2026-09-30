@@ -252,6 +252,7 @@ Per-workspace UI.
 | `proxy-generator.ts` | ProxyGenerator | global, worker | LLM-generated protocol-translation proxies (JavaScript handler maps spawned as ScriptableAbjects) for the Negotiator |
 | `object-catalog.ts` | ObjectCatalog | global, worker | Cached snapshot of every registry source (system, local and remote workspaces), refreshed on timers, for browsers and agents |
 | `cassette-recorder.ts` | CassetteRecorder | global, worker | Records HttpClient exchanges and ScriptableAbject handler invocations per caller typeId as replayable evidence |
+| `fitness-judge.ts` | FitnessJudge | global, worker | Replays an object's recorded invocations against a candidate source on a worker thread; asked by ObjectCreator inside `deploy_update` |
 | `instance-info.ts` | InstanceInfo | global, main | Version, readiness, uptime, platform, edition and `display` for abjects; the same report backs `GET /healthz` |
 | `heap-monitor.ts` | HeapMonitor | global, main | Watches every isolate's heap (pool workers report samples) and logs regime changes |
 | `worker-recovery.ts` | WorkerRecovery | global, main | Told when a pool worker dies; has WorkspaceManager, SkillRegistry and the Supervisor rebuild what it hosted |
