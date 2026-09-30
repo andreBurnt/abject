@@ -30,6 +30,18 @@ export const SANDBOX_BUILTINS: Record<string, unknown> = {
 export const SANDBOX_BUILTIN_NAMES = Object.keys(SANDBOX_BUILTINS).filter(k => k !== 'console');
 
 /**
+ * Members of the `this`-proxy a ScriptableAbject hands its handlers, which
+ * user source must never shadow. One list, read by the live runtime
+ * (ScriptableAbject.buildHandlerProxy) and by anything that has to reproduce
+ * that proxy elsewhere (the fitness judge's worker), so both name the same
+ * members.
+ */
+export const HANDLER_PROXY_BUILTINS: ReadonlyArray<string> = [
+  'call', 'dep', 'find', 'changed', 'emit', 'observe', 'id',
+  'data', 'saveData', 'ensure', 'invariant',
+];
+
+/**
  * Patterns that must never appear in sandboxed code. Defence-in-depth:
  * the vm context also shadows these globals, but rejecting early gives
  * clear error messages and prevents creative workarounds.

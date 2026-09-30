@@ -27,7 +27,7 @@ import { Abject, MessageHandlerFn } from '../core/abject.js';
 import { require as contractRequire } from '../core/contracts.js';
 import { request, event } from '../core/message.js';
 import { INTROSPECT_METHODS, INTROSPECT_EVENTS } from '../core/introspect.js';
-import { validateCode, compileSandboxed } from '../core/sandbox.js';
+import { validateCode, compileSandboxed, HANDLER_PROXY_BUILTINS } from '../core/sandbox.js';
 import { isPackageOwner, packageNameOf } from '../core/packages.js';
 import { Log } from '../core/timed-log.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -876,11 +876,9 @@ export class ScriptableAbject extends Abject {
     'recipientGone',
   ]);
 
-  /** Keys on the this-proxy that must not be overwritten by user handler code. */
-  private static readonly PROXY_BUILTINS = new Set([
-    'call', 'dep', 'find', 'changed', 'emit', 'observe', 'id',
-    'data', 'saveData', 'ensure', 'invariant',
-  ]);
+  /** Keys on the this-proxy that must not be overwritten by user handler code.
+   *  The list lives in core/sandbox.ts so the judge's worker builds the same proxy. */
+  private static readonly PROXY_BUILTINS = new Set(HANDLER_PROXY_BUILTINS);
 
   /**
    * Build the `this`-proxy object that handler code sees as `this`.

@@ -109,6 +109,14 @@ worker.
 Regression tests for the rolling window (old traffic cannot hide a broken
 connection). Runs under `pnpm test`.
 
+### fitness.ts, sandbox-invoker.ts, canonical.ts
+
+The replay judge. `evaluate(candidate, evidence, invoker)` replays the object's recorded invocations (handler + arguments + every outbound `call()` and its reply + result) against a candidate source and fails only on a VERIFIED contradiction; no evidence is an honestly labelled unverified pass, never a failure. Recordings the live source itself cannot reproduce are excluded (`liveSource`), so time, randomness and unrecorded state are not blamed on the draft.
+
+- **Invoker**: `sandbox-invoker.ts` runs each invocation on a worker thread the deadline can terminate (`worker.terminate()` preempts a synchronous spin, a post-await spin, `Atomics.wait`); heap bounded by `resourceLimits`. The builtin and `this`-proxy member NAMES come from `SANDBOX_BUILTIN_NAMES` / `HANDLER_PROXY_BUILTINS` in `core/sandbox.ts`; the builtins are rebuilt in the worker, and the proxy member bodies are the harness's own stand-ins. The worker is a deadline and a heap cap, not a security boundary.
+- **No object is special**: every outbound `call(target, method, payload)` is answered from the recording by registered name + method + canonical payload, or refused. The judge knows nothing about HTTP. A call to an id the handler got from a reply or its arguments (a window, a widget, a spawned child) is not judged yet: the recorder cannot name it, so such an invocation is not recorded.
+- **Consumers**: `FitnessJudge` (`objects/fitness-judge.ts`) wraps this as an abject; `ObjectCreator` asks it inside `deploy_update`.
+
 ## Using it
 
 From any Abject:
