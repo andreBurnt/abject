@@ -98,7 +98,9 @@ function harness(source) {
     };
     // Names stand for themselves: the recording keys outbound calls by the
     // registered name, and dep()/find() at runtime resolve a name to an id
-    // that would mean nothing here.
+    // that would mean nothing here. An id the handler got from a stubbed
+    // reply or its arguments is the recorded id, and the recording keeps
+    // that id as the target, so it matches as it is.
     const dep = async (name) => name;
     const find = async (name) => name;
     // The stand-in for ScriptableAbject's handler proxy. Handlers are bound
