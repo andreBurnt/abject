@@ -225,6 +225,9 @@ behind JobManager or AgentAbject); `retainTaskResult()` / `takeTaskResult()`.
   `summary()` for step profiling.
 - **format.ts**: `safeStringify(value, maxLen?)`, which never throws and never
   returns `undefined`.
+- **redaction.ts**: `redactUrl()`, `redactHeaders()`, `redactBodyText()`:
+  scrubs secret query parameters, headers and JSON fields before recorded
+  traffic or invocations leave the emitting object.
 
 ### Host files, shell and sandboxed code
 
