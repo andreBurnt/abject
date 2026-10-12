@@ -6,6 +6,12 @@ the `abject` binary (Node with the command line built in) and its `lib/`. It
 needs nothing installed. node-datachannel and node-pty are native, so the
 archive is built per platform and architecture.
 
+The server archive (`pnpm incarnate:server`, or the release archives
+`abject-server-<version>-linux-<arch>.tar.gz`) has the same layout and
+command, with the desktop edition's backend instead: the whole desktop, on a
+machine with no screen, opened from browsers by pairing. See
+[The desktop on a server](#the-desktop-on-a-server).
+
 For one person on their own machine, `abject service install` is all there is:
 it registers a systemd user unit, a macOS LaunchAgent, or a Windows scheduled
 task that runs the backend at login. This directory is for running it
@@ -137,17 +143,39 @@ docker exec -it abject abject setup
   the service before running `abject serve` or `abject start` by hand against
   `/var/lib/abject`.
 
+## The desktop on a server
+
+The server archive installs and runs exactly as above (the same
+`abject.service`, `/opt/abject/abject serve`), and `abject serve` runs the
+desktop edition it carries. Nobody sits at this desktop: browsers open it
+through RemoteUIAccess, which pairs a browser over the peer network
+(`WHISPER.md`). Two more variables in `abject.env` point it at the browser
+client and a signaling server:
+
+```
+REMOTE_UI_CLIENT_BASE_URL=https://app.example.com      # where the browser client is served
+REMOTE_UI_SIGNALING_URL=wss://signal.example.com       # defaults to the first of ABJECTS_SIGNALING_URLS
+```
+
+A pairing link is made on the desktop (Settings → Auth) or by an abject
+asking RemoteUIAccess for one (`generatePairingToken`), and works once.
+Nothing listens publicly: the browser and the server meet through signaling,
+and the UI WebSocket stays on loopback. `abject status`, `stop`, `restart` and
+`update` treat this backend as their own (`abject doctor` says "server
+edition"), and `abject update` fetches the server archive again.
+
 ## Not included
 
 - **TLS.** The HTTP gateway serves plain HTTP. To expose it, bind it to
   loopback and put a TLS proxy (Caddy, nginx) in front.
 - **A display.** The headless edition has no windows. The desktop app (or
-  `pnpm awaken` from source) is the edition with a UI; the `abject` command
-  talks to either.
+  `pnpm awaken` from source) is the edition with a UI, and the server archive
+  is that edition for a machine with no screen; the `abject` command talks to
+  any of them.
 
 ## Related
 
 - [server/README.md](../server/README.md): ports, health, auth, environment variables
 - [cli/README.md](../cli/README.md): the `abject` command
 - [packaging/README.md](../packaging/README.md): package-manager installs
-- [scripts/README.md](../scripts/README.md): `package-headless.mjs`
+- [scripts/README.md](../scripts/README.md): `package-headless.mjs` (both archives)

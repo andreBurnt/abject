@@ -1,5 +1,5 @@
 /**
- * Running the headless backend: in the foreground (`abject serve`), in the
+ * Running the backend: in the foreground (`abject serve`), in the
  * background (`abject start`, and plain `abject` when nothing is running),
  * stopping it (`abject stop`), and its log (`abject logs`).
  *
@@ -26,14 +26,38 @@ export function logFilePath(dataDir: string): string {
 }
 
 /**
- * Where an installed headless edition lives: the directory holding the
- * `abject` binary and its lib/. Undefined in a source checkout.
+ * The backend an install runs: the headless edition's (the release archive
+ * `abject-<version>-…`), or the desktop edition's (the server archive
+ * `abject-server-<version>-…`, a desktop with no window of its own that
+ * browsers open by pairing). Undefined when the directory holds neither.
+ */
+export function installEntry(home: string): string | undefined {
+  for (const file of ['headless.js', 'index.js']) {
+    const entry = path.join(home, 'lib', 'dist-server', 'server', file);
+    if (fs.existsSync(entry)) return entry;
+  }
+  return undefined;
+}
+
+/**
+ * Where an installed edition lives: the directory holding the `abject` binary
+ * and its lib/. Undefined in a source checkout.
  */
 export function installHome(): string | undefined {
   if (process.env.ABJECT_HOME) return process.env.ABJECT_HOME;
   // A bundled CLI sits at <home>/lib/cli/abject.mjs.
   const home = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-  return fs.existsSync(path.join(home, 'lib', 'dist-server', 'server', 'headless.js')) ? home : undefined;
+  return installEntry(home) ? home : undefined;
+}
+
+/**
+ * Whether this install serves the desktop edition (the server archive). Its
+ * backend reports itself as the desktop edition, but this command started it,
+ * so this command may stop, restart and update it like a headless one.
+ */
+export function servesDesktop(): boolean {
+  const home = installHome();
+  return !!home && installEntry(home)?.endsWith(`${path.sep}index.js`) === true;
 }
 
 /** Whether this command can run a backend itself (the headless edition, or a checkout). */
@@ -58,16 +82,19 @@ function serveEnv(dataDir: string): NodeJS.ProcessEnv {
 }
 
 /**
- * Run the headless backend in this process, until it is stopped. For service
- * managers (systemd, launchd, Docker) and for the background launch below.
+ * Run the backend in this process, until it is stopped: the one the install
+ * carries (the headless edition, or the server archive's desktop edition), or
+ * the headless edition in a checkout. For service managers (systemd, launchd,
+ * Docker) and for the background launch below.
  */
 export async function serve(dataDir: string): Promise<void> {
   contractRequire(canServe(), 'The desktop app runs its own backend: start the Abject app instead of `abject serve`.');
   Object.assign(process.env, serveEnv(dataDir));
   fs.mkdirSync(dataDir, { recursive: true });
   const home = installHome();
-  const entry = home
-    ? pathToFileURL(path.join(home, 'lib', 'dist-server', 'server', 'headless.js')).href
+  const installed = home ? installEntry(home) : undefined;
+  const entry = installed
+    ? pathToFileURL(installed).href
     : new URL('../server/headless.ts', import.meta.url).href;
   await import(entry);
 }
@@ -164,8 +191,9 @@ export async function waitForBackend(
 export async function restartOwner(dataDir: string): Promise<{ running: false } | { running: true; ours: boolean; record: InstanceRecord; hint: string }> {
   const record = await liveInstance(dataDir);
   if (!record) return { running: false };
-  const ours = record.edition === 'headless' && record.detached === true;
-  const hint = record.edition === 'desktop'
+  const desktopApp = record.edition === 'desktop' && !servesDesktop();
+  const ours = !desktopApp && record.detached === true;
+  const hint = desktopApp
     ? 'restart the Abject app'
     : 'restart it where it runs: `systemctl restart abject` for a system service, `systemctl --user restart abject` '
       + 'for `abject service install`, `docker restart <container>`, or Ctrl+C and rerun `abject serve` in its terminal';

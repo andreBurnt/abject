@@ -23,8 +23,11 @@ pipeline.
 
 ## Files
 
-- **package-headless.mjs** (`pnpm incarnate:headless`): packages the headless
-  edition for the platform it runs on, as
+- **package-headless.mjs** (`pnpm incarnate:headless`; `--server`, as
+  `pnpm incarnate:server`, packages the desktop edition for a server instead:
+  `release/abject-server-<version>-<os>-<arch>.tar.gz`, the same layout with
+  the desktop server and its three workers in `lib/dist-server/`): packages
+  the headless edition for the platform it runs on, as
   `release/abject-<version>-<os>-<arch>.tar.gz` (`.zip` on Windows; `os` is
   `linux`, `mac` or `win`) plus a `.sha256`. Builds the server and the CLI,
   stages one directory (`abject` binary, `lib/launch.cjs`,

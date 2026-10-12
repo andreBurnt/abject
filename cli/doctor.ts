@@ -8,7 +8,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { liveInstance, readInstance, processAlive } from '../server/instance-file.js';
 import { cliEdition, portOpen } from './locate.js';
-import { installHome, logFilePath } from './backend.js';
+import { installHome, logFilePath, servesDesktop } from './backend.js';
 import { serviceStatus } from './service.js';
 import { connectClient } from './connect.js';
 import { cliVersion } from './update.js';
@@ -34,7 +34,7 @@ function onPath(program: string): boolean {
 
 export async function runDoctor(dataDir: string): Promise<void> {
   const edition = cliEdition();
-  line('ok', `abject ${cliVersion()} (${edition} edition)${installHome() ? `, installed in ${installHome()}` : ''}`);
+  line('ok', `abject ${cliVersion()} (${servesDesktop() ? 'server' : edition} edition)${installHome() ? `, installed in ${installHome()}` : ''}`);
   const [major, minor] = process.versions.node.split('.').map(Number);
   line(major > 22 || (major === 22 && minor >= 5) ? 'ok' : 'fail', `runtime Node ${process.versions.node}`,
     major > 22 || (major === 22 && minor >= 5) ? undefined : 'Abject needs Node 22.5 or newer (node:sqlite).');

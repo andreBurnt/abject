@@ -102,6 +102,12 @@ jobs:
       - name: Package headless edition
         run: pnpm incarnate:headless
 
+      # The desktop edition for a server: the same command and layout, with the
+      # desktop backend, opened from browsers by pairing. Servers run Linux.
+      - name: Package server edition
+        if: startsWith(matrix.target, 'linux')
+        run: pnpm incarnate:server
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:

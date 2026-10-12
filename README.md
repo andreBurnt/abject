@@ -162,6 +162,7 @@ pnpm awaken:headless            # then pnpm abject in another terminal
 | `pnpm abject` | The `abject` command: chat with your Abjects from a tabbed TUI, answer their questions, change settings |
 | `pnpm awaken:headless` | Start the headless edition: the same backend with no display |
 | `pnpm incarnate:headless` | Package the headless edition (the `abject` binary and its backend, nothing to install); see [deploy/README.md](deploy/README.md) |
+| `pnpm incarnate:server` | Package the desktop edition for a server: the same command and layout, with the whole desktop, opened from browsers by pairing; see [deploy/README.md](deploy/README.md) |
 
 Three processes. One living system.
 

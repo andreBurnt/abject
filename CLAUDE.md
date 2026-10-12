@@ -19,6 +19,7 @@ pnpm whisper                      # Start P2P signaling server (:7720)
 pnpm abject                       # The `abject` command line: chat TUI, setup, start/stop, questions
 pnpm incarnate                    # Build the desktop app's bundles (then incarnate:linux|win|mac)
 pnpm incarnate:headless           # Package the headless edition: one dir, `abject` binary + lib/
+pnpm incarnate:server             # Package the desktop edition for a server (opened from browsers by pairing)
 pnpm forge <dir>                  # Build, check and install a package (WASM or script) into .abjects/extensions
 pnpm smelt                        # Rebuild the bundled native KnowledgeBase (native/knowledge-base)
 pnpm typecheck                    # tsc --noEmit

@@ -1,18 +1,25 @@
 #!/usr/bin/env node
 /**
- * Package the headless edition: `pnpm incarnate:headless`.
+ * Package the headless edition: `pnpm incarnate:headless`; or, with
+ * `--server` (`pnpm incarnate:server`), the desktop edition for a server.
  *
  * Produces, for the platform it runs on,
  *
- *   release/abject-<version>-<os>-<arch>.tar.gz   (.zip on Windows)
- *   release/abject-<version>-<os>-<arch>.tar.gz.sha256
+ *   release/abject-<version>-<os>-<arch>.tar.gz          (.zip on Windows)
+ *   release/abject-server-<version>-<os>-<arch>.tar.gz   (with --server)
+ *   and a .sha256 beside each
  *
  * an archive of one directory that needs nothing installed:
  *
  *   abject[.exe]            the command: Node with scripts/sea-bootstrap.cjs inside
  *   lib/launch.cjs          loads the CLI bundle (the binary cannot import ESM itself)
  *   lib/cli/abject.mjs      the `abject` command (pnpm distill)
- *   lib/dist-server/        the headless backend and its workers (pnpm bind): no display code
+ *   lib/dist-server/        the backend and its workers (pnpm bind): the headless
+ *                           edition's, with no display code; or, for the server
+ *                           archive, the desktop edition's, whose desktop has no
+ *                           window of its own and is opened from browsers by
+ *                           pairing (RemoteUIAccess). `abject serve` runs whichever
+ *                           the install carries.
  *   lib/native/             the bundled packages (the knowledge base)
  *   lib/node_modules/       native and external modules, for this platform
  *   lib/package.json, VERSION, README.txt, LICENSE
@@ -31,7 +38,9 @@ import { fileURLToPath } from 'node:url';
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 const os = process.platform === 'win32' ? 'win' : process.platform === 'darwin' ? 'mac' : process.platform;
-const name = `abject-${pkg.version}-${os}-${process.arch}`;
+const server = process.argv.includes('--server');
+const edition = server ? 'server' : 'headless';
+const name = `abject-${server ? 'server-' : ''}${pkg.version}-${os}-${process.arch}`;
 const releaseDir = path.join(root, 'release');
 const stage = path.join(releaseDir, name);
 const lib = path.join(stage, 'lib');
@@ -39,22 +48,29 @@ const exe = process.platform === 'win32' ? 'abject.exe' : 'abject';
 
 const [major, minor] = process.versions.node.split('.').map(Number);
 if (major < 22 || (major === 22 && minor < 5)) {
-  throw new Error(`package-headless: the binary is a copy of this Node (${process.versions.node}); build with Node 22.5 or newer (24 for releases).`);
+  throw new Error(`package-${edition}: the binary is a copy of this Node (${process.versions.node}); build with Node 22.5 or newer (24 for releases).`);
 }
 
 const run = (cmd, args, cwd = root, extra = {}) =>
   execFileSync(cmd, args, { cwd, stdio: 'inherit', shell: process.platform === 'win32', ...extra });
 
-console.log(`package-headless: building ${name}`);
+console.log(`package-${edition}: building ${name}`);
 run(process.execPath, ['build-server.mjs']);
 run(process.execPath, ['build-cli.mjs']);
 
 fs.rmSync(stage, { recursive: true, force: true });
 fs.mkdirSync(path.join(lib, 'cli'), { recursive: true });
 
-// The headless bundles only: the desktop's server, UI worker and its pool
-// worker stay out, so nothing that draws ships here.
-const serverFiles = [
+// One edition's bundles. The headless archive leaves the desktop's server,
+// UI worker and pool worker out, so nothing that draws ships there; the server
+// archive carries those and none of the headless ones, so `abject serve` has
+// one backend to run.
+const serverFiles = server ? [
+  'server/index.js',
+  'workers/abject-worker-node.js',
+  'workers/ui-worker-node.js',
+  'workers/p2p-worker-node.js',
+] : [
   'server/headless.js',
   'workers/abject-worker-headless.js',
   'workers/p2p-worker-headless.js',
@@ -99,7 +115,7 @@ const dependencies = Object.fromEntries(runtimeDeps.map((d) => {
   return [d, v];
 }));
 fs.writeFileSync(path.join(lib, 'package.json'), JSON.stringify({
-  name: 'abject-headless',
+  name: `abject-${edition}`,
   version: pkg.version,
   private: true,
   type: 'module',
@@ -107,13 +123,13 @@ fs.writeFileSync(path.join(lib, 'package.json'), JSON.stringify({
   // node-datachannel's install script fetches its native binary.
   allowScripts: { 'node-datachannel': true },
 }, null, 2) + '\n');
-console.log('package-headless: installing runtime dependencies');
+console.log(`package-${edition}: installing runtime dependencies`);
 run('npm', ['install', '--omit=dev', '--no-audit', '--no-fund', '--no-package-lock'], lib,
   // Playwright's own browser download is skipped: setup fetches Chromium on request.
   { env: { ...process.env, PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1' } });
 
 // The binary: this Node with the bootstrap injected (Node single executable).
-console.log('package-headless: building the abject binary');
+console.log(`package-${edition}: building the abject binary`);
 const seaDir = path.join(releaseDir, `${name}-sea`);
 fs.rmSync(seaDir, { recursive: true, force: true });
 fs.mkdirSync(seaDir, { recursive: true });
@@ -138,7 +154,23 @@ fs.rmSync(seaDir, { recursive: true, force: true });
 
 fs.writeFileSync(path.join(stage, 'VERSION'), `${pkg.version}\n`);
 fs.copyFileSync(path.join(root, 'LICENSE'), path.join(stage, 'LICENSE'));
-fs.writeFileSync(path.join(stage, 'README.txt'), `Abject ${pkg.version}, headless edition (${os}-${process.arch})
+fs.writeFileSync(path.join(stage, 'README.txt'), server ? `Abject ${pkg.version}, desktop edition for a server (${os}-${process.arch})
+
+The whole Abject desktop, running on a machine with no screen. Browsers open
+it by pairing: set REMOTE_UI_CLIENT_BASE_URL (where the browser client is
+served) and REMOTE_UI_SIGNALING_URL, then make a pairing from a terminal or
+from an abject on the desktop and open its link in a browser.
+
+  ./${exe} serve        run the backend in the foreground (systemd, Docker)
+  ./${exe} start        start it in the background
+  ./${exe} status       what is running, and what is waiting on you
+  ./${exe} stop         stop the background backend
+  ./${exe}              open the chat in this terminal
+  ./${exe} help         every command
+
+Data lives in the OS's per-user location (~/.config/abject on Linux), or in
+ABJECTS_DATA_DIR. deploy/README.md in the source tree has a systemd unit.
+` : `Abject ${pkg.version}, headless edition (${os}-${process.arch})
 
 Run ./${exe} to talk to the agents. The first run walks you through setup and
 starts the backend in the background; it keeps running when you quit.
@@ -160,7 +192,7 @@ your PATH and \`abject update\`.
 
 // Smoke test: the binary runs its own command line.
 const smoke = execFileSync(binary, ['version'], { encoding: 'utf8' }).trim();
-if (smoke !== pkg.version) throw new Error(`package-headless: the binary reported '${smoke}', expected ${pkg.version}`);
+if (smoke !== pkg.version) throw new Error(`package-${edition}: the binary reported '${smoke}', expected ${pkg.version}`);
 
 const archive = path.join(releaseDir, `${name}.${process.platform === 'win32' ? 'zip' : 'tar.gz'}`);
 fs.rmSync(archive, { force: true });
@@ -171,5 +203,5 @@ if (process.platform === 'win32') {
 }
 const digest = createHash('sha256').update(fs.readFileSync(archive)).digest('hex');
 fs.writeFileSync(`${archive}.sha256`, `${digest}  ${path.basename(archive)}\n`);
-console.log(`package-headless: ${archive}`);
-console.log(`package-headless: sha256 ${digest}`);
+console.log(`package-${edition}: ${archive}`);
+console.log(`package-${edition}: sha256 ${digest}`);

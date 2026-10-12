@@ -27,7 +27,7 @@ import { cliDataDir, cliEdition, dataDirInUse, findBackend, type BackendTarget }
 import { confirmLine, connectClient } from './connect.js';
 import { runTui, runPlain } from './chat-ui.js';
 import {
-  canServe, logFilePath, restartOwner, serve, showLogs, startInBackground, stopBackend, waitForBackend,
+  canServe, logFilePath, restartOwner, serve, showLogs, startInBackground, stopBackend, waitForBackend, servesDesktop,
 } from './backend.js';
 import { runLocalSetup, runRemoteSetup } from './setup.js';
 import { installService, serviceStatus, uninstallService } from './service.js';
@@ -330,7 +330,8 @@ async function main(): Promise<void> {
     }
     case 'stop': {
       // The desktop app's backend ends with the app; quitting it is the app's own act.
-      if (readInstance(dataDir)?.edition === 'desktop' && await liveInstance(dataDir)) {
+      // (The server archive's desktop backend is this command's own.)
+      if (readInstance(dataDir)?.edition === 'desktop' && !servesDesktop() && await liveInstance(dataDir)) {
         throw new Error('The desktop app is running this backend: quit the app to stop it.');
       }
       const result = await stopBackend(dataDir);

@@ -23,7 +23,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { liveInstance } from '../server/instance-file.js';
 import { cliEdition } from './locate.js';
-import { restartOwner, startInBackground, stopBackend, waitForBackend } from './backend.js';
+import { restartOwner, servesDesktop, startInBackground, stopBackend, waitForBackend } from './backend.js';
 import { require as contractRequire } from '../src/core/contracts.js';
 
 const REPO = 'mempko/abject';
@@ -141,7 +141,8 @@ export async function runUpdate(opts: { checkOnly: boolean; dataDir: string }): 
   if (opts.checkOnly) return;
 
   const ext = process.platform === 'win32' ? 'zip' : 'tar.gz';
-  const name = `abject-${latest}-${platformTag()}.${ext}`;
+  // The server archive updates to the server archive, the headless one to the headless one.
+  const name = `abject-${servesDesktop() ? 'server-' : ''}${latest}-${platformTag()}.${ext}`;
   const asset = release.assets.find(a => a.name === name);
   const sum = release.assets.find(a => a.name === `${name}.sha256`);
   if (!asset || !sum) throw new Error(`The release has no ${name} (with its .sha256) for this platform.`);
