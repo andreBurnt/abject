@@ -1,5 +1,21 @@
 [
   {
+    "version": "0.15.3",
+    "date": "2026-10-12",
+    "title": "The whole desktop, on a machine with no screen",
+    "summary": "Abject now ships a server edition: the full desktop backend packaged to run on a headless Linux machine, which you open from any browser by pairing. Nothing listens publicly; the browser and the server meet through the peer network.",
+    "highlights": [
+      "New server edition: Linux release archives (abject-server-<version>-linux-<arch>.tar.gz) carry the complete desktop backend, so a machine with no screen can run the same desktop you would use locally.",
+      "Open the server's desktop from a browser with a one-use pairing link, made in Settings (Auth) or by an abject that asks RemoteUIAccess for one; the UI WebSocket stays on loopback, and the browser reaches the server through signaling.",
+      "The server archive installs and runs the same way as the headless edition (same layout, same abject.service, same `abject serve`); two settings in abject.env point it at your browser client and signaling server.",
+      "The `abject` command recognizes a server install: serve, stop, restart, status and doctor all work with it, and `abject doctor` reports it as the server edition.",
+      "`abject update` keeps each install on its own edition: a server install updates from the server archive and a headless install from the headless one.",
+      "The deployment guide has a new section, The desktop on a server, that covers setup, the two environment variables and how pairing works.",
+      "Building from source: `pnpm incarnate:server` packages the server edition."
+    ],
+    "fixes": []
+  },
+  {
     "version": "0.15.2",
     "date": "2026-10-10",
     "title": "A Headless Edition and the abject Command",
