@@ -606,8 +606,14 @@ export class TaskReviewer extends Abject {
    *   gates recovery on finding TaskReviewer there, so an attempt during init
    *   is rejected. The 30 s poll runs after registration and recovers then.
    */
-  private async drainDurableReviews(recoverLegacy = true): Promise<void> {
-    if (!this.goalManagerId || this.inFlight || this.preparingReview || !this.underDailyCap()) return;
+  private async drainDurableReviews(recoverLegacy = true, startModels = true): Promise<void> {
+    if (!this.goalManagerId || this.inFlight || this.preparingReview) return;
+    // At boot the workspace is still registering, and a model call made now
+    // fails the LLM's spend accounting (it finds the caller's GoalManager
+    // through WorkspaceManager). So the first pass only settles and delivers;
+    // repairs and reviews start with the 30 s poll.
+    if (!startModels) { await this.drainLearningDecisions(false); return; }
+    if (!this.underDailyCap()) { await this.drainLearningDecisions(false); return; }
     if (recoverLegacy && !this.recoveredLegacyReviews) await this.recoverLegacyReviews().catch(err => log.warn(`Legacy learning recovery deferred: ${String(err)}`));
     await this.drainLearningDecisions();
     if (this.inFlight) return;
@@ -704,7 +710,7 @@ export class TaskReviewer extends Abject {
 
     this.reviewPoll = setInterval(() => { void this.drainDurableReviews().catch(err => log.warn(String(err))); }, 30000);
     this.reviewPoll.unref?.();
-    void this.drainDurableReviews(false).catch(err => log.warn(String(err)));
+    void this.drainDurableReviews(false, false).catch(err => log.warn(String(err)));
     log.info('TaskReviewer registered; reviewing on goal completion + standalone-task cadence');
   }
 
@@ -907,7 +913,7 @@ My work is internal maintenance of this workspace's memory. When invited to cont
         // pattern: it lands as an observation beside the recorded uses.
         decision = await this.changeEffect(decision, effect, { prepare: bound
           ? { ...bound, verdict: app.verdict, evidence: app.evidence }
-          : { action: 'observe_pattern', verdict: app.verdict, evidence: app.evidence ?? effect.input.evidence, relevance: 'shown' } });
+          : { action: 'observe_pattern', verdict: TaskReviewer.usefulnessVerdict(app.verdict), evidence: app.evidence ?? effect.input.evidence, relevance: 'shown' } });
       }
       const ref = extra.knowledgeRefs?.[String(effect.input.id)];
       if (!effect.attempts && !effect.input.knowledgeRef && ref) decision = await this.changeEffect(decision, effect, { prepare: { knowledgeRef: ref } });
@@ -1030,7 +1036,10 @@ My work is internal maintenance of this workspace's memory. When invited to cont
    * repair queue:
    * - a pattern verdict with no recorded use to bind to becomes an
    *   observation about the pattern (it can never bind, and no repair could
-   *   invent the provenance it lacks);
+   *   invent the provenance it lacks), and so does one that disagrees with a
+   *   verdict already recorded for that use;
+   * - a pattern verdict that is not a usefulness verdict ("applied") maps to
+   *   inconclusive;
    * - an effect whose one repair is spent, or a repair that never reported
    *   back within REPAIR_SETTLE_MS, is abandoned with its last error as the
    *   reason (kept in the journal);
@@ -1055,10 +1064,24 @@ My work is internal maintenance of this workspace's memory. When invited to cont
           && /Unresolved application/.test(error)) {
           const app = (effect.input.application ?? {}) as Record<string, unknown>;
           decision = await this.changeEffect(decision, effect, { repair: {
-            action: 'observe_pattern', id: effect.input.id, verdict: effect.input.verdict ?? app.verdict,
+            action: 'observe_pattern', id: effect.input.id, verdict: TaskReviewer.usefulnessVerdict(effect.input.verdict ?? app.verdict),
             evidence: effect.input.evidence ?? app.evidence, relevance: 'shown',
             ...(Array.isArray(effect.input.evidenceRefs) ? { evidenceRefs: effect.input.evidenceRefs } : {}),
-          } });
+          }, error: 'Converted to an observation of the pattern; awaiting delivery' });
+        } else if (effect.state === 'needs_repair' && ['observe_pattern', 'record_pattern_application'].includes(String(effect.input.action))
+          && /Invalid pattern usefulness verdict/.test(error)) {
+          decision = await this.changeEffect(decision, effect, { repair: { ...effect.input, verdict: TaskReviewer.usefulnessVerdict(effect.input.verdict) },
+            error: 'Verdict mapped to a usefulness verdict; awaiting delivery' });
+        } else if (effect.state === 'needs_repair' && effect.input.action === 'record_pattern_application' && /Conflicting application feedback/.test(error)) {
+          // This use already carries another review's verdict. A second
+          // reading that disagrees is still evidence about the pattern, so it
+          // is kept beside the uses as an observation rather than lost.
+          const app = (effect.input.application ?? {}) as Record<string, unknown>;
+          decision = await this.changeEffect(decision, effect, { repair: {
+            action: 'observe_pattern', id: effect.input.id, verdict: TaskReviewer.usefulnessVerdict(effect.input.verdict ?? app.verdict),
+            evidence: effect.input.evidence ?? app.evidence, relevance: 'reassessed',
+            ...(Array.isArray(effect.input.evidenceRefs) ? { evidenceRefs: effect.input.evidenceRefs } : {}),
+          }, error: 'Another verdict is already recorded for this use; kept as an observation; awaiting delivery' });
         } else if (effect.state === 'needs_repair' && decision.repairAttempts >= 1) {
           decision = await this.changeEffect(decision, effect, { state: 'abandoned', error: `Repair spent without resolving: ${error || 'no reason recorded'}` });
         } else if (effect.state === 'waiting' && effect.repairClaimed && quiet > TaskReviewer.REPAIR_SETTLE_MS) {
@@ -1084,6 +1107,15 @@ My work is internal maintenance of this workspace's memory. When invited to cont
       if (decision !== before) budget.changes--;
     }
     return decision;
+  }
+
+  /**
+   * A pattern verdict the KnowledgeBase accepts. "applied" (and a missing
+   * verdict) says the pattern was used and its effect never judged, which is
+   * what inconclusive means; mapping it here saves a model repair per decision.
+   */
+  private static usefulnessVerdict(raw: unknown): string {
+    return typeof raw === 'string' && ['helpful', 'no_effect', 'harmful', 'inconclusive'].includes(raw) ? raw : 'inconclusive';
   }
 
   /** Goals whose runtime faults were already reported (bounded). */
@@ -1123,8 +1155,9 @@ My work is internal maintenance of this workspace's memory. When invited to cont
   private static readonly MAX_DELIVERY_RESUMES = 3;
   private static readonly PAUSED_SETTLE_MS = 14 * 24 * 60 * 60 * 1000;
   private static readonly SETTLE_CHANGES_PER_PASS = 20;
+  private static readonly DECISIONS_PER_PASS = 20;
 
-  private async drainLearningDecisions(): Promise<void> {
+  private async drainLearningDecisions(allowRepair = true): Promise<void> {
     if (this.drainingLearning || !this.goalManagerId || this.inFlight) return;
     this.drainingLearning = true;
     try {
@@ -1140,8 +1173,12 @@ My work is internal maintenance of this workspace's memory. When invited to cont
         const settled = budget.changes > 0 ? await this.settleLearningDecision(pending, budget) : pending;
         if (this.learningCanProgress(settled)) decisions.push(settled);
       }
-      for (const pending of decisions.slice(0, 5)) {
+      // Delivery is mechanical, so a pass delivers many decisions; a model
+      // repair is costly, so a pass starts at most one.
+      let repairStarted = false;
+      for (const pending of decisions.slice(0, TaskReviewer.DECISIONS_PER_PASS)) {
         const decision = await this.applyDecision(pending);
+        if (!allowRepair || repairStarted || this.inFlight) continue;
         if (decision.paused || !decision.effects.some(e => e.state === 'needs_repair') || decision.repairAttempts || !this.underDailyCap()) continue;
         const claim = await this.request<{ success: boolean; decision: LearningDecision }>(request(this.id, this.goalManagerId, 'claimLearningRepair', { goalId: decision.goalId, decisionId: decision.id }));
         if (!claim.success) continue;
@@ -1170,7 +1207,7 @@ My work is internal maintenance of this workspace's memory. When invited to cont
           }), 15000);
           this.reviewsToday++;
         } catch (err) { this.inFlight = undefined; this.taskExtras.delete(taskId); log.warn(`Focused learning repair could not start: ${String(err)}`); }
-        break;
+        repairStarted = true;
       }
     } finally { this.drainingLearning = false; }
   }
@@ -1214,7 +1251,7 @@ My work is internal maintenance of this workspace's memory. When invited to cont
         // it lands instead of becoming pending work no repair can finish.
         const app = action.application as Record<string, unknown>;
         extra.observedWithoutRecordedUse = (extra.observedWithoutRecordedUse ?? 0) + 1;
-        action = { action: 'observe_pattern', id: action.id, verdict: app.verdict, evidence: app.evidence ?? action.evidence, relevance: 'shown',
+        action = { action: 'observe_pattern', id: action.id, verdict: TaskReviewer.usefulnessVerdict(app.verdict), evidence: app.evidence ?? action.evidence, relevance: 'shown',
           ...(action.evidenceRefs ? { evidenceRefs: action.evidenceRefs } : {}) } as AgentAction;
       }
       if (extra?.goalId && this.goalManagerId && (action.action === 'learn' || ['save_entry','update_entry','archive_entry','supersede_entry','dispute_entry','narrow_entry','confirm_entry','no_change','save_pattern','update_pattern','record_pattern_application','observe_pattern'].includes(action.action))) {
