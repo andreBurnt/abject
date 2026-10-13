@@ -101,8 +101,8 @@ export class OpenRouterProvider extends OpenAIProvider implements DecisionProvid
 
   constructor(config: OpenRouterConfig) {
     const attributionHeaders = {
-      'HTTP-Referer': config.siteUrl ?? 'https://abjects.local',
-      'X-Title': config.appTitle ?? 'Abjects',
+      'HTTP-Referer': config.siteUrl ?? 'https://abject.world',
+      'X-Title': config.appTitle ?? 'Abject',
     };
     super({
       apiKey: config.apiKey,
