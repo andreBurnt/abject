@@ -3189,7 +3189,9 @@ The registered object must implement these handlers to participate in the agent 
     const task = entry.state;
     if (task.phase === 'error' || entry.finished) return;
     const agentName = this.registeredAgents.get(entry.agentId)?.name ?? 'Unknown';
-    log.info(`[${agentName}] Task started: "${task.task.slice(0, 80)}" (${task.id}, max ${task.maxSteps} steps)`);
+    log.info(task.step > 0
+      ? `[${agentName}] Task resumed at step ${task.step + 1}: "${task.task.slice(0, 80)}" (${task.id})`
+      : `[${agentName}] Task started: "${task.task.slice(0, 80)}" (${task.id}, max ${task.maxSteps} steps)`);
 
     let phase = 'observing' as AgentPhase;
     task.phase = phase;

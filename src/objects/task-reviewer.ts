@@ -1367,7 +1367,19 @@ My work is internal maintenance of this workspace's memory. When invited to cont
       if (items.length > 100) extra.completionIssues.push(`${items.length - 100} ${field} entries exceed the batch limit and remain unprocessed`);
     }
     // Keep even malformed corrections as addressable work, never generic strings.
-    const corrections = batch.knowledgeUpdates === undefined ? [] : Array.isArray(batch.knowledgeUpdates) ? batch.knowledgeUpdates : [batch.knowledgeUpdates];
+    let corrections = batch.knowledgeUpdates === undefined ? [] : Array.isArray(batch.knowledgeUpdates) ? batch.knowledgeUpdates : [batch.knowledgeUpdates];
+    // The correction round asks only for what was missing; a model that
+    // re-sends its earlier knowledge updates would write them twice.
+    if (extra.completionCorrectionSent && extra.decisions?.length) {
+      const target = (u: unknown) => {
+        const a = u && typeof u === 'object' ? u as Record<string, unknown> : {};
+        return typeof a.id === 'string' ? `${a.action}:${a.id}` : typeof a.title === 'string' ? `${a.action}:${a.title}` : undefined;
+      };
+      const written = new Set(extra.decisions.flatMap(d => d.effects.map(e => target(e.input))).filter(Boolean));
+      const fresh = corrections.filter(u => { const t = target(u); return !t || !written.has(t); });
+      if (fresh.length < corrections.length) log.info(`Review ${taskId.slice(0, 20)}: ${corrections.length - fresh.length} knowledge update(s) repeated in the correction were already on record`);
+      corrections = fresh;
+    }
     // One completion can record a whole modest review, without an LLM turn
     // per assessment. Stop below the completion RPC deadline; never loop on a
     // receiver failure or require invented certainty to finish.
@@ -1454,7 +1466,7 @@ My work is internal maintenance of this workspace's memory. When invited to cont
       if (fidelityMissing) {
         parts.push('The result has no summaryFidelity verdict. Include summaryFidelity: { verdict: "consistent" | "misreported" | "unverifiable", explanation } in your next done result, comparing the user-facing result with the newest verification record.');
       }
-      return { accepted: false, reason: `${parts.join('\n\n')}\nThis correction is requested once; remaining gaps settle as partial.` };
+      return { accepted: false, reason: `${parts.join('\n\n')}\nEverything your previous done recorded is kept; your next done carries only what this note asks for. This correction is requested once; remaining gaps settle as partial.` };
     }
     // Still no verdict after the correction: a confident decision-model
     // verdict is recorded with its provenance. The reviewer's own field,
@@ -2838,7 +2850,7 @@ My work is internal maintenance of this workspace's memory. When invited to cont
               goalId: extra.goalId, messageId: action.messageId, sourceGoalId: action.sourceGoalId, key: action.key,
             }))) ?? 'null';
           } else if (typeof action.key === 'string') {
-            if (!extra.goalId || !this.goalManagerId || !(action.key === 'learning/plans' || action.key === 'learning/reviewOutcome' || action.key === 'scrum/plan' || action.key.startsWith('learning/observation/') || action.key.startsWith('learning/assessment/'))) throw new Error('Key is outside the review learning evidence');
+            if (!extra.goalId || !this.goalManagerId || !(action.key === 'learning/plans' || action.key === 'learning/reviewOutcome' || action.key === 'scrum/plan' || action.key.startsWith('learning/observation/') || action.key.startsWith('learning/assessment/') || action.key.startsWith('verification/'))) throw new Error('Key is outside the review learning evidence; readable keys are learning/plans, learning/reviewOutcome, scrum/plan, learning/observation/*, learning/assessment/* and verification/*');
             text = JSON.stringify(await this.request(request(this.id, this.goalManagerId, 'readGoalData', { goalId: extra.goalId, key: action.key }))) ?? 'null';
           }
           if (typeof action.taskId === 'string') {
