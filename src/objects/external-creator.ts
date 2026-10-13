@@ -2517,6 +2517,9 @@ clean result I did not observe.`;
       // A runtime keep-alive only feeds the watchdog; the goal's progress
       // already shows the phase and action it accompanies.
       if ((msg.payload as { keepAlive?: boolean } | undefined)?.keepAlive) return;
+      // A beat with nothing to say (a permission dialog's heartbeat bubbling
+      // up through the command it holds) is a sign of life, not progress.
+      if (!(msg.payload as { message?: string } | undefined)?.message) return;
       // AgentAbject tags progress with the task's id, so only that task's
       // watchdog resets. The goal line quotes the message only when it can
       // be attributed to one task.
@@ -3103,7 +3106,7 @@ Live project configuration and observed results take precedence over historical 
 - {"action":"read","path":"src/x.ts","offset":1,"limit":200} — read a file. Paths are relative to the project root. A truncated read tells you the offset to continue from.
 - {"action":"write","path":"src/x.ts","content":"..."} — create a file or replace one wholesale.
 - {"action":"edit","path":"src/x.ts","edits":[{"oldText":"...","newText":"..."}],"more":false} — the normal way to change a file. Every oldText is matched against the file as it is now, must be unique, and must not overlap another edit in the same call. If any fails, NOTHING is written and you get every failure at once.
-- {"action":"bash","command":"pnpm build","timeout":120000} — run a command in the project. A non-zero exit is information, not an error.
+- {"action":"bash","command":"pnpm build","timeout":120000} — run a command in the project. A non-zero exit is information, not an error. Write each command so its words can be read as they stand: plain commands joined by && or ; are checked against the permissions already granted, while a command that builds its own arguments ($(...) or backticks, eval, a pipe into a shell) cannot be checked and waits for a person to approve it. To check something before acting, run the check as its own command, read the output, then act.
 - {"action":"grep","pattern":"foo","glob":"*.ts","context":2} — search contents; returns file:line.
 - {"action":"find","pattern":"**/*.ts"} — find files by glob.
 - {"action":"ls","path":"src"} — list a directory.

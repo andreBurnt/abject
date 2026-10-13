@@ -1332,6 +1332,9 @@ My work is internal maintenance of this workspace's memory. When invited to cont
    * was the thing they read.
    */
   private async recordSummaryFidelity(extra: ReviewTaskExtra, value: unknown): Promise<void> {
+    // Only a goal review has the user-facing result in front of it; a repair
+    // or curation pass that offers a verdict would overwrite the review's.
+    if (extra.kind !== 'review') return;
     if (!value || typeof value !== 'object' || Array.isArray(value)) return;
     const { verdict, explanation } = value as { verdict?: unknown; explanation?: unknown };
     if (verdict !== 'consistent' && verdict !== 'misreported' && verdict !== 'unverifiable') {

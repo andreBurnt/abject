@@ -910,7 +910,11 @@ export class AgentAbject extends Abject {
 
   /** Last time we forwarded a low-level progress signal as GoalManager.updateProgress per goal. */
   private lastGoalProgressTs = new Map<string, number>();
+  /** The last reasoning echoed to each goal, so a repeat is not echoed every beat. */
+  private lastGoalProgressMessage = new Map<string, string>();
   private static readonly GOAL_PROGRESS_THROTTLE_MS = 1000;
+  /** The same reasoning is echoed to a goal again only after this long. */
+  private static readonly GOAL_PROGRESS_REPEAT_MS = 60_000;
 
   /**
    * Always-injected profile block: total char budget and per-entry slice.
@@ -6882,16 +6886,25 @@ This task belongs to a goal whose id is \`${entry.goalId}\` — you never need t
       if (!goalId) continue;
       const last = this.lastGoalProgressTs.get(goalId) ?? 0;
       if (now - last < AgentAbject.GOAL_PROGRESS_THROTTLE_MS) continue;
+      // Echo the current action's reasoning when there is one. A bare
+      // "working", or the same reasoning again, says nothing the goal's
+      // phase line does not; a step that waits on a person or a long command
+      // would otherwise add a line every beat. A repeat is echoed only after
+      // GOAL_PROGRESS_REPEAT_MS, as a sign the step is still alive.
+      const reasoning = typeof entry.state.action?.reasoning === 'string'
+        ? entry.state.action.reasoning.trim().slice(0, 140)
+        : '';
+      if (!reasoning) continue;
+      if (this.lastGoalProgressMessage.get(goalId) === reasoning && now - last < AgentAbject.GOAL_PROGRESS_REPEAT_MS) continue;
       this.lastGoalProgressTs.set(goalId, now);
+      this.lastGoalProgressMessage.delete(goalId);
+      this.lastGoalProgressMessage.set(goalId, reasoning);
+      // Most recently echoed last; finished goals fall off the front.
+      if (this.lastGoalProgressMessage.size > 200) this.lastGoalProgressMessage.delete(this.lastGoalProgressMessage.keys().next().value!);
       try {
-        // Echo the current action's reasoning when there is one — a bare
-        // "working" carries no information across a minutes-long step.
-        const reasoning = typeof entry.state.action?.reasoning === 'string'
-          ? entry.state.action.reasoning.trim().slice(0, 140)
-          : '';
         this.send(event(this.id, this.goalManagerId, 'updateProgress', {
           goalId,
-          message: reasoning || 'working',
+          message: reasoning,
           phase: entry.state.phase ?? 'acting',
           agentName: this.registeredAgents.get(entry.agentId)?.name ?? 'agent',
         }));
