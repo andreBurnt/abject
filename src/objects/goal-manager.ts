@@ -572,8 +572,22 @@ export class GoalManager extends Abject {
     if (key.startsWith('progress:')) {
       const reg = value as { peerId?: string; entries?: ProgressEntry[] } | undefined;
       if (!reg || !Array.isArray(reg.entries)) return;
-      this.mergeRemoteProgress(goal, reg.peerId ?? key.slice('progress:'.length), reg.entries);
-      this.changed('goalUpdated', { goalId, message: 'Collaborator progress', progress: goal.progress });
+      const peerId = reg.peerId ?? key.slice('progress:'.length);
+      // SharedState reports our own writes back to us. Our register holds
+      // nothing we lack, and announcing it put "Collaborator progress" over
+      // the real line in every chat watching a local goal. The object id is
+      // the peer id a register carried before Identity resolved.
+      if (peerId === this.selfPeerId || peerId === this.id) return;
+      this.mergeRemoteProgress(goal, peerId, reg.entries);
+      // A collaborator's progress reads like our own: its latest line.
+      const latest = reg.entries.filter(e => e && typeof e.timestamp === 'number').at(-1);
+      this.changed('goalUpdated', {
+        goalId, parentId: goal.parentId,
+        message: latest?.message ?? 'Collaborator progress',
+        ...(latest?.phase ? { phase: latest.phase } : {}),
+        ...(latest?.agentName ? { agentName: latest.agentName } : {}),
+        progress: goal.progress,
+      });
       return;
     }
 

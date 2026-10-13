@@ -173,6 +173,8 @@ interface ConversationEntry {
   sourceGoalId?: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
+  /** When the message joined the conversation (absent on entries saved before this was kept). */
+  at?: number;
   /**
    * Display-only entry. Persisted so a reopened window replays it, but
    * skipped when assembling the LLM context: the markdown typically carries a
@@ -619,7 +621,7 @@ export class Chat extends Abject {
       // every subsequent LLM call while still letting a reopened window replay
       // the image.
       const id = uuidv4();
-      this.conversationHistory.push({ id, role: 'assistant', content: trimmed, media: true, sender: displaySender });
+      this.recordEntry({ id, role: 'assistant', content: trimmed, media: true, sender: displaySender });
       this.appendMessage('assistant', displaySender, trimmed, true, id);
       this.schedulePersist();
       return true;
@@ -640,7 +642,7 @@ export class Chat extends Abject {
       if (!message?.trim()) return false;
       log.info(`[Chat] addNotification from "${sender}": "${message.trim().slice(0, 80)}"`);
       const id = uuidv4();
-      this.conversationHistory.push({ id, role: 'assistant', content: `[${sender}]: ${message.trim()}` });
+      this.recordEntry({ id, role: 'assistant', content: `[${sender}]: ${message.trim()}` });
       this.appendMessage('system', sender || 'System', message.trim(), true, id);
       this.schedulePersist();
       return true;
@@ -896,7 +898,7 @@ export class Chat extends Abject {
         if (text) {
           this._streamBuffer = '';
           const id = uuidv4();
-          this.conversationHistory.push({ id, role: 'assistant', content: text });
+          this.recordEntry({ id, role: 'assistant', content: text });
           this.appendMessage('assistant', 'Agent', text, true, id);
           this.schedulePersist();
           this.stepStreamChars = 0;
@@ -1046,6 +1048,11 @@ export class Chat extends Abject {
     });
   }
 
+  /** Add a message to the saved conversation, stamped with when it joined. */
+  private recordEntry(entry: ConversationEntry): void {
+    this.conversationHistory.push({ ...entry, at: entry.at ?? Date.now() });
+  }
+
   /** The saved conversation as listeners render it. */
   private transcriptViews(): ChatMessageView[] {
     return this.conversationHistory.map((entry) => {
@@ -1058,7 +1065,8 @@ export class Chat extends Abject {
         text: entry.content,
         // Attachment chips use markdown (bold filename) even though they're user-role.
         markdown: entry.role !== 'user' || !!entry.attachment,
-        at: 0,
+        // 0: saved before message times were kept, so no time is shown.
+        at: entry.at ?? 0,
       };
     });
   }
@@ -1312,7 +1320,7 @@ export class Chat extends Abject {
       : `The goal did not complete: ${outcome.error ?? 'unknown error'}`;
     if (!text?.trim()) return;
     const id = uuidv4();
-    this.conversationHistory.push({ id, role: 'assistant', content: text.trim(), sourceGoalId: outcome.goalId });
+    this.recordEntry({ id, role: 'assistant', content: text.trim(), sourceGoalId: outcome.goalId });
     this.appendMessage('assistant', 'Agent', text.trim(), true, id);
     this.schedulePersist();
   }
@@ -1474,7 +1482,7 @@ export class Chat extends Abject {
     const goalId = this._currentGoalId;
     if (!goalId || !this.goalManagerId) return;
     const id = uuidv4();
-    this.conversationHistory.push({ id, role: 'user', content: `[Note to the running goal] ${note}` });
+    this.recordEntry({ id, role: 'user', content: `[Note to the running goal] ${note}` });
     this.appendMessage('user', 'You', note, false, id);
     this.schedulePersist();
     const ok = await this.request<boolean>(
@@ -1877,7 +1885,7 @@ A single successful creation goal is a complete turn. End it with **done**.
       mimeType === 'application/pdf' ? 'document' : 'text';
 
     const id = uuidv4();
-    this.conversationHistory.push({
+    this.recordEntry({
       id,
       role: 'user',
       content: `${ATTACH_GLYPH} Attached ${safeName}`,
@@ -1919,7 +1927,7 @@ A single successful creation goal is a complete turn. End it with **done**.
       }
 
       const id = uuidv4();
-      this.conversationHistory.push({
+      this.recordEntry({
         id,
         role: 'user',
         content: `![${safeName}](${dataUri})`,
@@ -2158,7 +2166,7 @@ A single successful creation goal is a complete turn. End it with **done**.
     // image-only send, where the image messages were already committed).
     if (userText) {
       const id = uuidv4();
-      this.conversationHistory.push({ id, role: 'user', content: userText });
+      this.recordEntry({ id, role: 'user', content: userText });
       this.appendMessage('user', 'You', userText, false, id);
       this.schedulePersist();
       this.maybeAutoTitle(userText);
@@ -2230,7 +2238,7 @@ A single successful creation goal is a complete turn. End it with **done**.
         const text = (result.result as string) ?? '';
         if (text) {
           const id = uuidv4();
-          this.conversationHistory.push({ id, role: 'assistant', content: text });
+          this.recordEntry({ id, role: 'assistant', content: text });
           this.appendMessage('assistant', 'Agent', text, true, id);
           this.schedulePersist();
         }

@@ -38,6 +38,8 @@ const SENDER_LABEL_HEIGHT = 18;
 // height estimate never diverges between the two paths.
 const WELCOME_BODY_TEXT = 'Abjects is a distributed object system where everything is an Abject: autonomous objects that communicate via messages, discover each other through a Registry, and coordinate work through goals and agents.\n\nAsk me to explore what objects exist, create new ones, fetch your email, or anything else \u2014 specialized agents pick up the work automatically.';
 const GROUP_WINDOW_MS = 3 * 60_000;
+/** A message reads "now" for this long after it was sent, then shows its time. */
+const NOW_WINDOW_MS = 60_000;
 
 // ── Composer ───────────────────────────────────────────────────────────
 const SEND_GLYPH = '\u27A4';       // ➤
@@ -720,7 +722,8 @@ export class ChatWindow extends Abject {
       this.shownMessageIds.add(m.id);
     }
     await this.removeWelcomeState();
-    await this.appendBubble(m.role, m.sender, m.text, m.markdown);
+    // The message's own time; 0 means it was saved before times were kept.
+    await this.appendBubble(m.role, m.sender, m.text, m.markdown, m.at > 0 ? m.at : undefined);
   }
 
   /** Chat started or stopped working: status strip, eye, title dot. */
@@ -936,7 +939,7 @@ export class ChatWindow extends Abject {
   private async showActivityBubble(): Promise<void> {
     if (this.activityBubbleLabelId) return;
     this.activityGoalHeight = 0;
-    this.activityBubbleLabelId = await this.appendBubble('activity', 'Agent', this.activity?.header ?? THINKING_TEXT, false);
+    this.activityBubbleLabelId = await this.appendBubble('activity', 'Agent', this.activity?.header ?? THINKING_TEXT, false, Date.now());
 
     // Embed the shared goal-progress widget directly beneath the header so the
     // running goal tree renders identically to the Goals window (word-wrapped,
@@ -1254,18 +1257,20 @@ export class ChatWindow extends Abject {
    * Sender line above a bubble: chrome-cased name and time. The user's line
    * carries a red mark, the agent's a sigil ring; others stay muted.
    */
-  private senderHeader(role: BubbleRole, sender: string, ts: number): { text: string; color: string; bold: boolean } {
-    const time = this.formatTimestamp(ts);
+  private senderHeader(role: BubbleRole, sender: string, ts?: number): { text: string; color: string; bold: boolean } {
+    // A message saved before times were kept shows its sender alone.
+    const time = ts === undefined ? '' : this.formatTimestamp(ts);
     const name = chromeCase(this.theme, sender);
+    const after = time ? `  \u00B7  ${time}` : '';
     switch (role) {
       case 'user':
-        return { text: `${time}  \u00B7  ${name}  \u25A0`, color: this.theme.accent, bold: true };
+        return { text: `${time ? `${time}  \u00B7  ` : ''}${name}  \u25A0`, color: this.theme.accent, bold: true };
       case 'assistant':
-        return { text: `\u25C9  ${name}  \u00B7  ${time}`, color: this.theme.textSecondary, bold: true };
+        return { text: `\u25C9  ${name}${after}`, color: this.theme.textSecondary, bold: true };
       case 'error':
-        return { text: `${name}  \u00B7  ${time}`, color: this.theme.statusError, bold: true };
+        return { text: `${name}${after}`, color: this.theme.statusError, bold: true };
       default:
-        return { text: `${name}  \u00B7  ${time}`, color: this.theme.textMeta, bold: false };
+        return { text: `${name}${after}`, color: this.theme.textMeta, bold: false };
     }
   }
 
@@ -1279,20 +1284,36 @@ export class ChatWindow extends Abject {
     return Math.min(available, Math.max(BUBBLE_MIN_WIDTH, Math.floor(available * BUBBLE_MAX_FRACTION)));
   }
 
+  /**
+   * When a message was sent: "now" for its first minute (refreshHeaderTime
+   * replaces it after), the clock time today, and the date with it on any
+   * earlier day.
+   */
   private formatTimestamp(ts: number): string {
     const delta = Date.now() - ts;
-    if (delta < 60_000) return 'now';
+    if (delta < NOW_WINDOW_MS) return 'now';
     try {
-      return new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+      const when = new Date(ts), today = new Date();
+      const time = when.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+      if (when.toDateString() === today.toDateString()) return time;
+      const date = when.toLocaleDateString([], when.getFullYear() === today.getFullYear()
+        ? { month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric', year: 'numeric' });
+      return `${date}, ${time}`;
     } catch {
       return '';
     }
   }
 
-  private shouldGroupWithPrevious(role: BubbleRole, sender: string): boolean {
+  /** A header that said "now" shows the clock time once the minute has passed. */
+  private refreshHeaderTime(headerId: AbjectId, role: BubbleRole, sender: string, ts: number): void {
+    if (!this.messageLabelIds.includes(headerId)) return;
+    try { this.send(event(this.id, headerId, 'update', { text: this.senderHeader(role, sender, ts).text })); } catch { /* widget gone */ }
+  }
+
+  private shouldGroupWithPrevious(role: BubbleRole, sender: string, ts: number): boolean {
     const last = this.lastContentMeta();
     if (!last) return false;
-    return last.role === role && last.sender === sender && (Date.now() - last.ts) < GROUP_WINDOW_MS;
+    return last.role === role && last.sender === sender && ts >= last.ts && (ts - last.ts) < GROUP_WINDOW_MS;
   }
 
   /** Returns the metadata for the most recent content label (skipping sender labels). */
@@ -1324,6 +1345,7 @@ export class ChatWindow extends Abject {
     sender: string,
     text: string,
     markdown = false,
+    at?: number,
   ): Promise<AbjectId> {
     if (!this.messageLogId || !this.windowId) return '' as AbjectId;
 
@@ -1333,10 +1355,12 @@ export class ChatWindow extends Abject {
     const bubbleHeight = this.estimateBubbleHeight(text, innerWidth, markdown);
 
     // Sender/timestamp mini-label (skipped when grouping).
-    const shouldEmitSender = !!sender && !this.shouldGroupWithPrevious(role, sender);
+    // Grouping compares message times; one without a time groups as if sent now.
+    const ts = at ?? Date.now();
+    const shouldEmitSender = !!sender && !this.shouldGroupWithPrevious(role, sender, ts);
     let senderLabelId: AbjectId | undefined;
     if (shouldEmitSender) {
-      const header = this.senderHeader(role, sender, Date.now());
+      const header = this.senderHeader(role, sender, at);
       const { widgetIds: [headerId] } = await this.request<{ widgetIds: AbjectId[] }>(
         request(this.id, this.widgetManagerId!, 'create', {
           specs: [
@@ -1364,6 +1388,9 @@ export class ChatWindow extends Abject {
       this.messageLabelIds.push(headerId);
       senderLabelId = headerId;
       // Sender labels have no metadata entry — they are chrome, not content.
+      if (at !== undefined && Date.now() - at < NOW_WINDOW_MS) {
+        this.setTimer(() => this.refreshHeaderTime(headerId, role, sender, at), NOW_WINDOW_MS - (Date.now() - at) + 500);
+      }
     }
 
     // contentBlock self-measures and reports its real height via a
@@ -1397,7 +1424,7 @@ export class ChatWindow extends Abject {
     }));
     this.send(request(this.id, labelId, 'addDependent', {}));
     this.messageLabelIds.push(labelId);
-    this.messageMetadata.set(labelId, { role, sender, ts: Date.now(), text, markdown, align });
+    this.messageMetadata.set(labelId, { role, sender, ts, text, markdown, align });
     if (senderLabelId) {
       this.bubbleSenderLabels.set(labelId, senderLabelId);
     }
