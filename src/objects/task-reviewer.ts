@@ -2843,7 +2843,12 @@ My work is internal maintenance of this workspace's memory. When invited to cont
           }
           if (typeof action.taskId === 'string') {
             const record = extra.records?.find(r => r.taskId === action.taskId);
-            if (!record) throw new Error('Task is outside this review evidence');
+            if (!record) {
+              const held = extra.records?.map(r => r.taskId) ?? [];
+              throw new Error(held.length > 0
+                ? `Task ${action.taskId} is outside this ${extra.kind === 'repair' ? 'repair' : 'review'}'s evidence; it holds transcripts for ${held.join(', ')}`
+                : `This ${extra.kind === 'repair' ? 'repair' : 'review'} holds no task transcripts; judge from the evidence already in your messages (read_evidence without taskId reads all of it)`);
+            }
             if (typeof action.step === 'number') {
               const prediction = record.predictions?.find(p => p.step === action.step);
               let observed: unknown;

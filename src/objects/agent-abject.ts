@@ -558,6 +558,8 @@ interface TaskEntry {
   emptyResponses?: number;
   /** Consecutive truncated terminal responses (cut off mid-generation). Reset on every complete response. */
   truncationRetries?: number;
+  /** A reading of the last prediction the model sent with no action; it rides on the next action. */
+  carriedReading?: AgentAction['lastPrediction'];
   /** Prompt-length rejections recovered by recompacting and retrying, for
    *  this task's lifetime. Not reset: a task needing this twice has an
    *  oversized part that compaction cannot reach. */
@@ -595,6 +597,21 @@ interface TaskEntry {
  * Duplicates and anything past the cap are dropped, so a model repeating
  * itself does not repeat the work.
  */
+/**
+ * A model sometimes sends its reading of the last prediction as an action of
+ * its own (`{"action":"lastPrediction","verdict":...}`) instead of as the
+ * `lastPrediction` field of its next action. It is not an action; this pulls
+ * the reading out so it can ride on the action it belongs to.
+ */
+export function predictionReadingOf(a: AgentAction): AgentAction['lastPrediction'] | undefined {
+  if (!a || a.action !== 'lastPrediction') return undefined;
+  const src = (a.lastPrediction && typeof a.lastPrediction === 'object' ? a.lastPrediction : a) as { verdict?: unknown; learned?: unknown };
+  const reading: { verdict?: string; learned?: string } = {};
+  if (typeof src.verdict === 'string') reading.verdict = src.verdict;
+  if (typeof src.learned === 'string') reading.learned = src.learned;
+  return reading.verdict || reading.learned ? reading : undefined;
+}
+
 export function planActionBatch(
   first: AgentAction,
   extras: ReadonlyArray<AgentAction | undefined>,
@@ -607,9 +624,13 @@ export function planActionBatch(
   let terminalTail: AgentAction | undefined;
 
   const lastIndex = extras.length - 1;
+  // A reading sent as its own block rides on the next action instead.
+  let carried: AgentAction['lastPrediction'] | undefined;
   extras.forEach((a, i) => {
     if (!a || typeof a.action !== 'string') return;
     if (a.action.startsWith('_')) return;
+    if (a.action === 'lastPrediction') { carried = predictionReadingOf(a) ?? carried; return; }
+    if (carried && !a.lastPrediction) { a = { ...a, lastPrediction: carried }; carried = undefined; }
 
     if (RUNTIME_VERBS.has(a.action)) { dropped.push(a.action); return; }
 
@@ -4914,7 +4935,7 @@ When an observation or a result is too big to sit in the conversation, you get a
 **The reader is for locating and inspecting**, when you want a specific thing rather than all of them: \`grep\` to jump to it, \`outline\` to see the structure when you are unsure what to search for, \`offset\`/\`length\` to read a region in order. A grep that reports further matches it did not show is telling you the question was an all-of-them question; switch to code rather than paging on.
 
 The preview often answers the question on its own — when it does, just act.`, true);
-    add('prediction', '\n\n## Prediction\nEvery action carries an `"expect"` field: one line naming the observable outcome you expect, written before the action runs. Comparing what you expected with what happened is how this system learns, so predict routine steps too. State what you actually believe will happen, in terms the result can contradict ("the list comes back with the three saved items", "the window shows the chart"). The expectation comes from what you know: your own understanding, the knowledge and patterns in this prompt, and what earlier steps showed.\n\nThe real result comes back beside your expectation. On your next action, add `"lastPrediction": {"verdict": "held" | "missed" | "unclear", "learned": "one line"}`: your honest reading of the previous expectation against that result, and on a miss, what you now believe instead. Operation success alone does not make a free-text prediction hold, and an expected rejection can. Optionally add `"expectOutcome": "success" | "failure"` for the operation outcome itself.\n\nWhen an expectation rests on a knowledge entry shown in this prompt, cite it in the same action: `"basis": [{"id": "<entry id>", "why": "what it told you"}]`, for example `{"action": "...", "expect": "the call lists the three saved items", "basis": [{"id": "<id from Relevant Knowledge>", "why": "it says saved items are listed newest first"}]}`. A citation is how a wrong entry gets corrected: when a cited expectation misses, the reviewer fixes the entry that misled you; an uncited miss can only be put down to your own judgment, and the entry stays as it was. When you apply a pattern, declare it: `"patterns": [{"id": "<pattern id>", "why": "how its Therefore shapes this action"}]`; seeing a pattern is different from using it. The runtime tracks versions, so leave revision numbers out. Predictions, your readings of them and their citations are kept for Scrum replanning and retrospective learning. Use replan to explain material discoveries and ask relevant collaborators what should change.', true);
+    add('prediction', '\n\n## Prediction\nEvery action carries an `"expect"` field: one line naming the observable outcome you expect, written before the action runs. Comparing what you expected with what happened is how this system learns, so predict routine steps too. State what you actually believe will happen, in terms the result can contradict ("the list comes back with the three saved items", "the window shows the chart"). The expectation comes from what you know: your own understanding, the knowledge and patterns in this prompt, and what earlier steps showed.\n\nThe real result comes back beside your expectation. Your next action carries your reading of it as one more field, `"lastPrediction": {"verdict": "held" | "missed" | "unclear", "learned": "one line"}`, in the same JSON object as its `action` and `expect`: your honest reading of the previous expectation against that result, and on a miss, what you now believe instead. One action, one object, for example `{"action": "<your next action>", "expect": "<what it will show>", "lastPrediction": {"verdict": "held", "learned": "<one line>"}}`. Operation success alone does not make a free-text prediction hold, and an expected rejection can. Optionally add `"expectOutcome": "success" | "failure"` for the operation outcome itself.\n\nWhen an expectation rests on a knowledge entry shown in this prompt, cite it in the same action: `"basis": [{"id": "<entry id>", "why": "what it told you"}]`, for example `{"action": "...", "expect": "the call lists the three saved items", "basis": [{"id": "<id from Relevant Knowledge>", "why": "it says saved items are listed newest first"}]}`. A citation is how a wrong entry gets corrected: when a cited expectation misses, the reviewer fixes the entry that misled you; an uncited miss can only be put down to your own judgment, and the entry stays as it was. When you apply a pattern, declare it: `"patterns": [{"id": "<pattern id>", "why": "how its Therefore shapes this action"}]`; seeing a pattern is different from using it. The runtime tracks versions, so leave revision numbers out. Predictions, your readings of them and their citations are kept for Scrum replanning and retrospective learning. Use replan to explain material discoveries and ask relevant collaborators what should change.', true);
 
     // Per-task addendum from the caller (task hints, the browsing goal): the
     // reason `systemPrompt` can stay identical across an agent's tasks.
@@ -6459,6 +6480,33 @@ This task belongs to a goal whose id is \`${entry.goalId}\` — you never need t
         entry.truncationRetries = 0;
       }
 
+      // The reading of the last prediction sent as an action of its own:
+      // fold it into the next action in the same response and run that one,
+      // so the misplaced field costs no step.
+      let extraRaw: string[] = primaryFromBalancedScan ? balancedObjects.slice(1) : toolCalls.slice(1).map(a => JSON.stringify(a));
+      const firstAction = parsed as unknown as AgentAction;
+      if (firstAction.action === 'lastPrediction' && !streamTruncated && !repaired) {
+        const nextIndex = extraRaw.findIndex(raw => { const r = this.tryParseActionJson(raw); return !!r && !r.repaired && r.action.action !== 'lastPrediction'; });
+        if (nextIndex >= 0) {
+          const next = this.tryParseActionJson(extraRaw[nextIndex])!.action;
+          parsed = { ...next, lastPrediction: next.lastPrediction ?? predictionReadingOf(firstAction) };
+          extraRaw = extraRaw.slice(nextIndex + 1);
+        } else {
+          // Only the reading: keep it for the next action and ask for that action.
+          entry.parseFailures = (entry.parseFailures ?? 0) + 1;
+          if (entry.parseFailures <= AgentAbject.MAX_PARSE_FAILURES) {
+            entry.carriedReading = predictionReadingOf(firstAction) ?? entry.carriedReading;
+            entry.state.llmMessages.push({ role: 'user', content: '[Note] Your reading of the last prediction is kept. It travels as the "lastPrediction" field of an action, in the same JSON object: {"action": "<your next action>", "expect": "<what it will show>", "lastPrediction": {"verdict": "...", "learned": "..."}}. Send your next action now.' });
+            return { action: '_reparse', reasoning: 'Reading of the last prediction arrived without an action; asking for the action' };
+          }
+        }
+      }
+      const chosen = parsed as unknown as AgentAction;
+      if (entry.carriedReading && chosen.action !== 'lastPrediction') {
+        if (!chosen.lastPrediction) parsed = { ...chosen, lastPrediction: entry.carriedReading };
+        entry.carriedReading = undefined;
+      }
+
       // Smaller models commonly put successful terminal content in a clear
       // alias instead of the canonical `result` field. Normalize that shape
       // before validation so accepted terminals also have the field consumed
@@ -6477,10 +6525,10 @@ This task belongs to a goal whose id is \`${entry.goalId}\` — you never need t
       // Queue any additional batched actions for the drain path. Only a
       // clean, complete first parse qualifies — a truncated or repaired
       // response means the tail is untrustworthy.
-      if (!streamTruncated && !repaired && primaryFromBalancedScan && balancedObjects.length > 1) {
-        this.queueBatchedActions(entry, parsed, balancedObjects.slice(1));
-      } else if (!streamTruncated && toolCalls.length > 1) {
-        this.queueBatchedActions(entry, parsed, toolCalls.slice(1).map(a => JSON.stringify(a)));
+      if (!streamTruncated && !repaired && primaryFromBalancedScan && extraRaw.length > 0) {
+        this.queueBatchedActions(entry, parsed, extraRaw);
+      } else if (!streamTruncated && !primaryFromBalancedScan && toolCalls.length > 1 && extraRaw.length > 0) {
+        this.queueBatchedActions(entry, parsed, extraRaw);
       }
       return parsed;
     }
