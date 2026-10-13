@@ -1,5 +1,20 @@
 [
   {
+    "version": "0.15.7",
+    "date": "2026-10-13",
+    "title": "Fewer Ghost Messages, Windows You Can Close",
+    "summary": "A small maintenance release: objects that have stopped no longer keep receiving events, and the planning agents now follow your requests about how results should appear more faithfully, including keeping a close button on new windows.",
+    "highlights": [
+      "When you ask for something like a diagram, Chat passes along only the constraints you actually stated; it no longer adds its own choices about how or where the result appears, so it stops turning a plain request into a borderless desktop object you can't close",
+      "Planning agents read your follow-up notes the way you see your screen: if you say \"put it in a window\", you get a real window with a title bar you can move and close, and the team re-plans when a delivered result doesn't look the way you asked",
+      "Fewer wasted messages in long sessions: closed chats and stopped objects stop receiving updates, which keeps logs quieter and frees up work for the rest of the system"
+    ],
+    "fixes": [
+      "Objects that stopped without unsubscribing (for example, a closed chat still getting goal updates) are now dropped from their subscriptions the first time a message to them can't be delivered, which ends the flood of undeliverable-message warnings",
+      "The window manager forgets widgets that were stopped without being explicitly removed (layout children, released widgets), so theme changes are no longer broadcast to widgets that no longer exist"
+    ]
+  },
+  {
     "version": "0.15.6",
     "date": "2026-10-13",
     "title": "The desktop trusts a healthy GPU again",
