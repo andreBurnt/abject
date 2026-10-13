@@ -240,9 +240,9 @@ export class WidgetManager extends Abject {
                   { name: 'title', type: { kind: 'primitive', primitive: 'string' }, description: 'Window title' },
                   { name: 'rect', type: { kind: 'reference', reference: 'Rect' }, description: '{ x, y, width, height } — position and size' },
                   { name: 'zIndex', type: { kind: 'primitive', primitive: 'number' }, description: 'Z-index for stacking order', optional: true },
-                  { name: 'chromeless', type: { kind: 'primitive', primitive: 'boolean' }, description: 'If true, no title bar (the window\'s 3D scene may then use the whole rect, top edge included)', optional: true },
+                  { name: 'chromeless', type: { kind: 'primitive', primitive: 'boolean' }, description: 'If true, no title bar (the window\'s 3D scene may then use the whole rect, top edge included). That also means no close button on the desktop, so it suits HUDs, toasts and overlays the owner removes; a window the user opens to look at or use (an app, a diagram, a document) keeps its title bar', optional: true },
                   { name: 'resizable', type: { kind: 'primitive', primitive: 'boolean' }, description: 'If true, window is resizable', optional: true },
-                  { name: 'closable', type: { kind: 'primitive', primitive: 'boolean' }, description: 'If false, the mobile card overview cannot close this window (default true)', optional: true },
+                  { name: 'closable', type: { kind: 'primitive', primitive: 'boolean' }, description: 'If false, the mobile card overview cannot close this window (default true). Keep the default for any window the user opened', optional: true },
                   { name: 'focusOnCreate', type: { kind: 'primitive', primitive: 'boolean' }, description: 'If false, the new window does not take keyboard focus (default true). Use for docks and chrome that rebuild in the background.', optional: true },
                   { name: 'screenAnchor', type: { kind: 'primitive', primitive: 'string' }, description: 'Pin the window to a spot of the SCREEN on a zoomable camera (the phone): "top-left" | "top" | "top-right" | "left" | "center" | "right" | "bottom-left" | "bottom" | "bottom-right". There it stays on screen at a readable scale while the camera pans and zooms (toasts, HUDs, status bars); windows sharing an anchor keep their layout relative to each other. The desktop at zoom 1 shows the window at its rect as usual.', optional: true },
                 ],
@@ -1970,6 +1970,7 @@ export class WidgetManager extends Abject {
 
   /** Send `updateTheme` to every widget and window tagged to a workspace. */
   private propagateWorkspaceTheme(workspaceId: string, theme: ThemeData): void {
+    this.forgetStoppedWidgets();
     for (const id of this.spawnedWidgets) {
       if (this.getWorkspaceForWidgetOrWindow(id) === workspaceId) {
         try { this.send(event(this.id, id, 'updateTheme', theme)); } catch { /* gone */ }
@@ -1989,6 +1990,7 @@ export class WidgetManager extends Abject {
    * so system chrome flips colour with the workspace content.
    */
   private broadcastThemeToSystemWidgets(theme: ThemeData): void {
+    this.forgetStoppedWidgets();
     for (const id of this.spawnedWidgets) {
       if (this.getWorkspaceForWidgetOrWindow(id) === undefined) {
         try { this.send(event(this.id, id, 'updateTheme', theme)); } catch { /* gone */ }
@@ -2276,6 +2278,9 @@ All operations use this.call(). There are no shorthand methods.
 Window:   this.call(this.dep('WidgetManager'), 'createWindowAbject', { title, rect, resizable })
           More options: chromeless (no title bar; the window's 3D may then use the whole rect, top
           edge included), transparent, zIndex, focusOnCreate, closable, screenAnchor.
+          A chromeless window has no close button on the desktop: use it for HUDs, toasts and
+          overlays the owner removes. Anything the user opens to look at or use (an app, a
+          diagram, a document) gets a titled window, which they can move and close.
           screenAnchor: 'top-left' | 'top' | 'top-right' | 'left' | 'center' | 'right' | 'bottom-left'
           | 'bottom' | 'bottom-right' pins a HUD-like window (score bar, status strip, toast) to that
           spot of the SCREEN on a zoomable camera (the phone): it stays on screen at a readable scale
@@ -3214,6 +3219,7 @@ async timerFired(msg) {
    * Destroy all windows owned by a specific object.
    */
   private async sweepOrphanedWindows(): Promise<void> {
+    this.forgetStoppedWidgets();
     const deadOwners = new Set<AbjectId>();
     for (const [_windowId, ownerId] of this.windowOwners) {
       if (!this.bus.isRegistered(ownerId)) {
@@ -3229,6 +3235,29 @@ async timerFired(msg) {
     }
     for (const sub of this.activeThemeSubscribers) {
       if (!this.bus.isRegistered(sub)) this.activeThemeSubscribers.delete(sub);
+    }
+  }
+
+  /**
+   * Drop widgets that stopped without going through removeWidget or
+   * destroyWindow: a layout destroys its children when cleared or stopped,
+   * and a released widget stops itself. Their ids would otherwise pile up
+   * (thousands in a long session with a busy window) and every theme change
+   * would send updateTheme to each of them.
+   */
+  private forgetStoppedWidgets(): void {
+    for (const id of this.spawnedWidgets) {
+      if (this.bus.isRegistered(id)) continue;
+      this.spawnedWidgets.delete(id);
+      this.widgetToWindow.delete(id);
+      this.widgetToWindowShimId.delete(id);
+      this.layoutOverflows.delete(id);
+      this.layoutOwners.delete(id);
+      const shimId = this.widgetIdToShimId.get(id);
+      if (shimId !== undefined) {
+        this.widgetIdToShimId.delete(id);
+        if (this.shimWidgetMap.get(shimId) === id) this.shimWidgetMap.delete(shimId);
+      }
     }
   }
 

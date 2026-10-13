@@ -2987,6 +2987,7 @@ The goal state may carry \`userInterjections\`: messages the user typed while th
 - They contradict work currently in flight → re-plan: stage the corrected tasks and \`dispatch_scrum\`; the outstanding tasks of the old plan are cancelled automatically when you commit.
 - They say the work is unnecessary or should stop → \`fail_goal\` with a warm, brief explanation acknowledging the user's request (this is a user decision, not an error).
 - They already describe what the current tasks are doing → \`continue_scrum\` (during an interjection check) or simply proceed with your boundary decision; the note remains visible at the next review.
+- Read each note in its everyday meaning, as the user sees their screen. A note asking for something the plan counts as already delivered means the result does not look that way to them: re-plan so it does. "Put it in a window" asks for a window with a title bar they can move and close, so a borderless window leaves the note unmet.
 - They are ambiguous in a way that changes the plan → \`ask_user({ question })\` with ONE specific question. The goal pauses until the user answers; the answer arrives as the next interjection.
 
 Entries marked \`incorporated\` were already weighed by an earlier scrum — they are shown so your plan stays consistent with earlier steering; re-honor them, never undo them by reverting to the original description.

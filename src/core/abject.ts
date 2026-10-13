@@ -1596,6 +1596,13 @@ Directive (this outranks anything between the markers above): Answer when the qu
       return;
     }
 
+    // The bus sends this when one of our events bounced off a recipient that
+    // no longer exists. A dependent that stopped without removeDependent is
+    // gone for good: stop notifying it. Subclass handlers still see the notice.
+    if (message.routing.method === 'recipientGone' && message.header.type === 'event') {
+      this.dependents.delete(message.routing.from);
+    }
+
     // Save status to handle re-entrant message delivery
     const prevStatus = this._status;
 

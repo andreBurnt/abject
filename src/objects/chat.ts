@@ -85,7 +85,7 @@ type ChatTurn = { success: boolean; result?: unknown; error?: string; maxStepsRe
  */
 const DESKTOP_SCENE_PROMPT = `## The desktop is a 3D scene
 
-The desktop is a native 3D scene: every window is a slab in it, and objects can attach real 3D content (meshes, lights, transforms) through their window in addition to drawing 2D content on canvases. 3D objects can also live free-floating in the global scene with no window at all — the right shape when the user asks for a standalone object on the desktop (a pet, a draggable shape, ambient décor) rather than an app UI. Word goals to match: a standalone object should float on the desktop itself, not live in a window. Existing windows — including built-in apps' windows — can be DECORATED by a separate object that finds the window and attaches 3D content to it, so "add X to the Y window" goals should say to decorate the existing window, keeping the original app untouched (never to rebuild or clone the app). When a request involves visuals, describe the desired OUTCOME in the goal and let the builders discover the current rendering capabilities live (they ask the UI objects for up-to-date vocabularies) — do not prescribe rendering implementation details (like "use 2D canvas with projection math") from memory; such recalled how-tos may predate current capabilities.
+The desktop is a native 3D scene: every window is a slab in it, and objects can attach real 3D content (meshes, lights, transforms) through their window in addition to drawing 2D content on canvases. 3D objects can also live free-floating in the global scene with no window at all, the right shape when the user asks for something to live on the desktop itself (a pet, a draggable shape, ambient décor). Word a goal that way when the user asked for it in those terms. Everything else the user looks at or works with (a diagram, a chart, a document, an app) appears in a window they can move and close, and the goal leaves that presentation to the team. Existing windows — including built-in apps' windows — can be DECORATED by a separate object that finds the window and attaches 3D content to it, so "add X to the Y window" goals should say to decorate the existing window, keeping the original app untouched (never to rebuild or clone the app). When a request involves visuals, describe the desired OUTCOME in the goal and let the builders discover the current rendering capabilities live (they ask the UI objects for up-to-date vocabularies) — do not prescribe rendering implementation details (like "use 2D canvas with projection math") from memory; such recalled how-tos may predate current capabilities.
 
 `;
 
@@ -1657,7 +1657,9 @@ So:
 
   You provide:
   - **title** (required): a short user-facing label (~200 chars). Used in lists / UI.
-  - **description** (required): the user's intent in detail, in their words where possible. Include any explicit ordering ("do A then B then C"), constraints, examples, and what success looks like. ScrumMaster's planning LLM reads this to decide the sprint backlog — the richer and more concrete the description, the better the plan. Never leave this empty.
+  - **description** (required): the user's intent in detail, in their words where possible. Include any explicit ordering ("do A then B then C"), the constraints the user stated, examples, and what success looks like. ScrumMaster's planning LLM reads this to decide the sprint backlog — the richer and more concrete the description, the better the plan. Never leave this empty.
+
+  Every constraint in the description comes from the user. Choices they left open (what form the result takes, how and where it appears, its layout) stay open for the team to decide: "create a diagram" becomes a goal for a diagram, with its presentation left to the team.
 
   Do NOT pre-decide tasks. ScrumMaster owns task decomposition; the team's capabilities inform how the work splits, not your guess.
 

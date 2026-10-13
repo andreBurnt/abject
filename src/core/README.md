@@ -95,7 +95,8 @@ handler runs after the built-in one; the others are overwritten, so customize
   bookkeeping when someone else will answer.
 - `changed(aspect, value)` notifies dependents twice: a generic `changed`
   event `{ aspect, value }` and an event named after the aspect. Subscribe to
-  one shape, not both.
+  one shape, not both. A dependent that stops without `removeDependent` is
+  dropped when the bus answers with `recipientGone`.
 - `onDelivery(method, handler)` makes a method idempotent per
   `(sender, payload.deliveryId)`: retries join the same work.
 - `rejectPendingRequestsTo()`, `rejectPendingRequest()`, `resetRequestTimeout()`
