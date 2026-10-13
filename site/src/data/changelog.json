@@ -1,5 +1,21 @@
 [
   {
+    "version": "0.15.5",
+    "date": "2026-10-13",
+    "title": "Sharp windows on high-resolution screens",
+    "summary": "Text and graphics inside windows now render crisply on HiDPI and Retina displays instead of looking soft, and stay sharp when you zoom, switch displays or open Exposé. A small fix also lets the backend shut down cleanly.",
+    "highlights": [
+      "Windows now draw at your screen's pixel density (up to 2x), so text and widgets are crisp on HiDPI and Retina displays; nothing changes on a standard 1x screen",
+      "Windows redraw at the right resolution when the pixel ratio changes (browser zoom, moving to another display, or entering and leaving mobile mode), so they stay sharp rather than showing scaled-up old pixels",
+      "Text no longer shimmers in windows shown smaller than full size (Exposé, windows pushed back or tilted in the 3D desktop)",
+      "Phones keep window surfaces at 1x so memory stays in check, since a phone holds every window while showing one at a time"
+    ],
+    "fixes": [
+      "Fixed soft, blurry text in windows on HiDPI screens; click targets and shadows are scaled to match the sharper surfaces",
+      "Fixed the HTTP exchange recorder (CassetteRecorder) retrying a flush forever after it was stopped, which could keep the process from exiting on shutdown"
+    ]
+  },
+  {
     "version": "0.15.4",
     "date": "2026-10-13",
     "title": "Asks Before Acting, Learns Within Budget",
