@@ -381,7 +381,7 @@ export class ClaudeCliProvider extends BaseLLMProvider {
       }
       const { code, stdout, stderr } = run;
 
-      if (code !== 0) {
+      if (code !== 0 || cliError) {
         throw new Error(formatCliError(this.bin, code, stderr, stdout, argv, cliError));
       }
       // Deltas are authoritative when present; the terminal result event is
@@ -447,6 +447,7 @@ export class ClaudeCliProvider extends BaseLLMProvider {
       credentialMode: 'cli',
       cli: {
         binary: 'claude',
+        authArgs: ['auth', 'status'],
         installHint: terminal
           ? 'Reuses one warm `claude` session per model: saves process startup on every '
             + 'request, reports no token usage, and reads replies off the rendered screen. '
@@ -572,7 +573,7 @@ function extractStreamDelta(line: string): string | undefined {
 function extractStreamResultText(line: string): string | undefined {
   try {
     const obj = JSON.parse(line) as Record<string, unknown>;
-    if (obj.type === 'result') {
+    if (obj.type === 'result' && obj.is_error !== true) {
       const r = (obj as { result?: unknown }).result;
       if (typeof r === 'string' && r.length > 0) return r;
     }
@@ -600,10 +601,17 @@ function extractStreamUsage(line: string): LLMCompletionResult['usage'] | undefi
   return undefined;
 }
 
-/** A failure reported as an `error` event on stdout rather than via exit code. */
+/**
+ * A failure reported on stdout — either an `error` event or a terminal
+ * `result` event with `is_error: true` (how `claude -p --output-format
+ * stream-json` reports a logged-out binary).
+ */
 function extractStreamError(line: string): string | undefined {
   try {
     const obj = JSON.parse(line) as Record<string, unknown>;
+    if (obj.type === 'result' && obj.is_error === true && typeof obj.result === 'string' && obj.result.length > 0) {
+      return obj.result;
+    }
     if (obj.type !== 'error') return undefined;
     const inner = obj.error as { message?: string } | string | undefined;
     if (typeof inner === 'string') return inner;

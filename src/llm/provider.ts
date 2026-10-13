@@ -241,10 +241,12 @@ export interface LLMProviderDescription {
   /** Placeholder for the credential input. */
   credentialPlaceholder?: string;
   /**
-   * For `cli` providers: the binary name to detect on PATH and the
-   * one-line install hint shown when it isn't found.
+   * For `cli` providers: the binary name to detect on PATH, the
+   * one-line install hint shown when it isn't found, and an optional
+   * zero-cost argv (`['auth', 'status']`) that exits 0 only when the
+   * binary has a working login.
    */
-  cli?: { binary: string; installHint: string };
+  cli?: { binary: string; installHint: string; authArgs?: string[] };
   /**
    * Static fallback model list shown in tier dropdowns before any live
    * fetch completes. Live `listModels()` results override this.
@@ -403,6 +405,7 @@ const PERMANENT_PATTERNS: RegExp[] = [
   /\bAPI[- ]?key\b/i,
   /\bunauthor/i,
   /\bauth(entication)?\s+(failed|required)/i,
+  /\bnot\s+logged\s+in\b/i,
   /\binvalid_request/i,
   /\bmodel\s+not\s+found/i,
   /\bunsupported\s+model/i,
