@@ -63,10 +63,10 @@ import {
 const AUTO_MODEL = 'auto';
 
 /**
- * Mirrors `agy models`. IDs carry the reasoning effort suffix where the CLI
- * requires one (bare names like `gemini-3.7-flash` are rejected without a
- * separate `--effort`, and pro/claude models reject `--effort` outright), so
- * passing the suffixed ID alone is the only form that works for every model.
+ * Mirrors `agy models` (agy 1.3.4; every ID below was probed with a live
+ * `--model <id>` call). IDs carry the reasoning effort suffix exactly as the
+ * CLI lists them, so the suffixed ID alone selects both model and effort and
+ * no separate `--effort` flag is ever needed.
  *
  * vision is false throughout: agy rejects an image content block outright
  * (exit 1, result status ERROR), so image requests must be routed away from
@@ -74,19 +74,18 @@ const AUTO_MODEL = 'auto';
  */
 const AGY_MODELS: ModelInfo[] = [
   { id: AUTO_MODEL,                 name: 'Auto (recommended)', vision: false },
-  { id: 'gemini-3.7-flash-high',    name: 'Gemini 3.7 Flash (High)', vision: false },
-  { id: 'gemini-3.7-flash-medium',  name: 'Gemini 3.7 Flash (Medium)', vision: false },
-  { id: 'gemini-3.7-flash-low',     name: 'Gemini 3.7 Flash (Low)', vision: false },
-  { id: 'gemini-3.6-flash-high',    name: 'Gemini 3.6 Flash (High)', vision: false },
-  { id: 'gemini-3.6-flash-medium',  name: 'Gemini 3.6 Flash (Medium)', vision: false },
-  { id: 'gemini-3.6-flash-low',     name: 'Gemini 3.6 Flash (Low)', vision: false },
-  { id: 'gemini-3.5-flash-high',    name: 'Gemini 3.5 Flash (High)', vision: false },
-  { id: 'gemini-3.5-flash-medium',  name: 'Gemini 3.5 Flash (Medium)', vision: false },
-  { id: 'gemini-3.5-flash-low',     name: 'Gemini 3.5 Flash (Low)', vision: false },
-  { id: 'gemini-3.1-pro-high',      name: 'Gemini 3.1 Pro (High)', vision: false },
-  { id: 'gemini-3.1-pro-low',       name: 'Gemini 3.1 Pro (Low)', vision: false },
-  { id: 'claude-sonnet-4-6',        name: 'Claude Sonnet 4.6 (Thinking)', vision: false },
-  { id: 'claude-opus-4-6-thinking', name: 'Claude Opus 4.6 (Thinking)', vision: false },
+  { id: 'gemini-4-argon-high',      name: 'Gemini 4 Argon (High)', vision: false },
+  { id: 'gemini-4-argon-medium',    name: 'Gemini 4 Argon (Medium)', vision: false },
+  { id: 'gemini-4-argon-low',       name: 'Gemini 4 Argon (Low)', vision: false },
+  { id: 'gemini-3.8-flash-high',    name: 'Gemini 3.8 Flash (High)', vision: false },
+  { id: 'gemini-3.8-flash-medium',  name: 'Gemini 3.8 Flash (Medium)', vision: false },
+  { id: 'gemini-3.8-flash-low',     name: 'Gemini 3.8 Flash (Low)', vision: false },
+  { id: 'claude-opus-5-5-high',     name: 'Claude Opus 5.5 (High)', vision: false },
+  { id: 'claude-opus-5-5-medium',   name: 'Claude Opus 5.5 (Medium)', vision: false },
+  { id: 'claude-opus-5-5-low',      name: 'Claude Opus 5.5 (Low)', vision: false },
+  { id: 'claude-sonnet-5-5-high',   name: 'Claude Sonnet 5.5 (High)', vision: false },
+  { id: 'claude-sonnet-5-5-medium', name: 'Claude Sonnet 5.5 (Medium)', vision: false },
+  { id: 'claude-sonnet-5-5-low',    name: 'Claude Sonnet 5.5 (Low)', vision: false },
   { id: 'gpt-oss-120b-medium',      name: 'GPT-OSS 120B (Medium)', vision: false },
 ];
 
