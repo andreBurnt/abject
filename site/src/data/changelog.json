@@ -1,5 +1,17 @@
 [
   {
+    "version": "0.15.6",
+    "date": "2026-10-13",
+    "title": "The desktop trusts a healthy GPU again",
+    "summary": "This is a small fix to v0.15.5. On some machines with a working graphics card, the desktop app switched to software rendering when it didn't need to. Now it only does that when WebGL is really turned off or unavailable.",
+    "highlights": [
+      "The safety net from v0.15.5 still works: if the graphics card gives the desktop no WebGL (blocklisted, acceleration turned off, or a driver mismatch), the app falls back to software rendering instead of sitting on the splash screen."
+    ],
+    "fixes": [
+      "Fixed the desktop app switching to software rendering on a healthy graphics card. It used to check WebGL right at startup, before the graphics process had reported in, and at that moment Chromium says every feature is off. It now waits for the graphics card's real status and falls back only when WebGL actually turns off; WebGL already running in software no longer counts as off."
+    ]
+  },
+  {
     "version": "0.15.5",
     "date": "2026-10-13",
     "title": "Sharp windows on high-resolution screens",
