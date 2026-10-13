@@ -158,10 +158,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all artifacts
+      # Only the build and headless artifacts: docker/build-push-action also
+      # uploads a *.dockerbuild build record, which is not a release asset
+      # and fails to download.
+      - name: Download release artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: '{release,headless}-*'
           merge-multiple: true
 
       - name: List artifacts

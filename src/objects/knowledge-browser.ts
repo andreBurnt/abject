@@ -21,13 +21,21 @@
  * map opens the pattern in the detail pane and the list, and choosing a
  * pattern in the list or through a link chip selects it on the map. A
  * newly woven pattern arrives as a flow of living light along its links.
+ *
+ * The Learning tab is a read-only report over GoalManager's learning funnel
+ * (`getLearningFunnel`): how many actions stated a prediction and named the
+ * belief behind it, how the reviewer judged them and what it blamed for the
+ * misses, and how many of the resulting updates reached the world model. It
+ * replaces the list and detail panes while active, loads when first shown,
+ * and re-reads on Refresh.
  */
 
 import { AbjectId, AbjectMessage, InterfaceId } from '../core/types.js';
 import { Abject } from '../core/abject.js';
 import { request, event } from '../core/message.js';
 import { Log } from '../core/timed-log.js';
-import { emptyStateMarkdown, emptyStateStyle } from './ui-kit.js';
+import { require as precondition, ensure } from '../core/contracts.js';
+import { emptyStateMarkdown, emptyStateStyle, hintStyle, sectionHeaderStyle, sectionHeaderText } from './ui-kit.js';
 import { readPattern, readStructured, renderPatternText } from '../core/pattern.js';
 import type { KnowledgeEntry, KnowledgeType } from '../core/knowledge.js';
 import type { ListItem } from './widgets/list-widget.js';
@@ -48,8 +56,155 @@ const GHOST_PREFIX = 'unwritten:';
  * Vector icon names for knowledge types. ListWidget renders these at the
  * row leading edge (via ListItem.iconName); colors come from the theme.
  */
-const TAB_LABELS = ['All', 'Patterns', 'Learned', 'Facts', 'Insights', 'References'];
+const TAB_LABELS = ['All', 'Patterns', 'Learned', 'Facts', 'Insights', 'References', 'Learning'];
 const TAB_TYPES: (KnowledgeType | undefined)[] = [undefined, 'pattern', 'learned', 'fact', 'insight', 'reference'];
+/** The Learning tab: a report over GoalManager's learning funnel, not a type filter. */
+const LEARNING_TAB = TAB_LABELS.indexOf('Learning');
+
+/** Height of one Learning report row (fixed: a scrolling pane culls rows with no height). */
+const REPORT_ROW_H = 22;
+const REPORT_BAR_W = 160;
+const REPORT_VALUE_W = 140;
+const LEARNING_INTRO =
+  'Agents predict before they act. The reviewer judges each prediction, finds the belief that failed, and updates what this workspace knows.';
+const LEARNING_UNAVAILABLE = 'The learning report is unavailable: the goal manager for this workspace did not answer.';
+
+/** GoalManager's `getLearningFunnel` reply, normalized. */
+interface LearningFunnel {
+  scope: string;
+  predictions: { observed: number; withExpectation: number; namingBelief: number; declaringPattern: number };
+  judgments: { total: number; byVerdict: Record<string, number>; missesByBlame: Record<string, number> };
+  updates: { byState: Record<string, number>; openReasons: Array<{ reason: string; n: number }> };
+  lifetime: { applied: number; abandoned: number };
+}
+
+/** One row of the Learning report, top to bottom. */
+type ReportRow =
+  | { kind: 'heading'; text: string }
+  | { kind: 'note'; text: string }
+  | { kind: 'stat'; label: string; value: string; ratio?: number };
+
+/** Plain names for the reviewer's verdicts, blame sources and update states (in display order). */
+const VERDICT_LABELS: Record<string, string> = {
+  supported: 'Held up',
+  contradicted: 'Proved wrong',
+  unresolved: 'Could not tell',
+};
+const BLAME_LABELS: Record<string, string> = {
+  prior: "The agent's own assumption",
+  entry: 'A knowledge entry',
+  pattern: 'A pattern',
+  link: 'A link between patterns',
+  world: 'The world changed',
+  runtime: 'A system fault, not a belief',
+  none: 'Nothing named',
+};
+const STATE_LABELS: Record<string, string> = {
+  applied: 'Applied to the world model',
+  proposed: 'Proposed, not applied yet',
+  needs_repair: 'Need repair first',
+  waiting: 'Waiting',
+  abandoned: 'Abandoned',
+};
+
+function count(v: unknown): number {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
+}
+
+function counts(v: unknown): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (v && typeof v === 'object') for (const [k, n] of Object.entries(v)) if (count(n) > 0) out[k] = count(n);
+  return out;
+}
+
+/** Validate and normalize a `getLearningFunnel` reply; throws on a shape it does not recognize. */
+function readFunnel(raw: unknown): LearningFunnel {
+  type Part = Record<string, unknown> | undefined;
+  const r = (raw ?? {}) as { scope?: unknown; predictions?: Part; judgments?: Part; updates?: Part; lifetime?: Part };
+  if (!r.predictions || !r.judgments || !r.updates) throw new Error('Unexpected learning funnel reply');
+  const reasons = Array.isArray(r.updates.openReasons) ? r.updates.openReasons as Array<{ reason?: unknown; n?: unknown }> : [];
+  return {
+    scope: typeof r.scope === 'string' && r.scope ? r.scope : 'goals in memory',
+    predictions: {
+      observed: count(r.predictions.observed),
+      withExpectation: count(r.predictions.withExpectation),
+      namingBelief: count(r.predictions.namingBelief),
+      declaringPattern: count(r.predictions.declaringPattern),
+    },
+    judgments: {
+      total: count(r.judgments.total),
+      byVerdict: counts(r.judgments.byVerdict),
+      missesByBlame: counts(r.judgments.missesByBlame),
+    },
+    updates: {
+      byState: counts(r.updates.byState),
+      openReasons: reasons.map(x => ({ reason: String(x?.reason ?? ''), n: count(x?.n) })).filter(x => x.n > 0),
+    },
+    lifetime: { applied: count(r.lifetime?.applied), abandoned: count(r.lifetime?.abandoned) },
+  };
+}
+
+/** Keys of a count map in the order of its label table, unknown keys last. */
+function ordered(map: Record<string, number>, labels: Record<string, string>): string[] {
+  return [...Object.keys(labels).filter(k => k in map), ...Object.keys(map).filter(k => !(k in labels))];
+}
+
+/** "n of total (pct%)" with a bar ratio, or the bare count when there is nothing to divide by. */
+function share(n: number, of: number): { value: string; ratio?: number } {
+  precondition(n >= 0 && of >= 0, 'share takes non-negative counts');
+  if (of === 0) return { value: String(n) };
+  return { value: `${n} of ${of}  (${Math.round((n / of) * 100)}%)`, ratio: Math.min(1, n / of) };
+}
+
+/** The funnel as report rows: predictions, judgments, updates, all-time totals. */
+function funnelRows(f: LearningFunnel): ReportRow[] {
+  const p = f.predictions, j = f.judgments, u = f.updates;
+  const stat = (label: string, s: { value: string; ratio?: number }): ReportRow => ({ kind: 'stat', label, ...s });
+  const rows: ReportRow[] = [];
+  const effects = Object.values(u.byState).reduce((a, b) => a + b, 0);
+  if (p.observed === 0 && j.total === 0 && effects === 0) {
+    rows.push({ kind: 'note', text: 'Nothing to measure yet. These counts fill in as agents work on goals.' });
+  }
+
+  rows.push({ kind: 'heading', text: 'Predictions' });
+  rows.push(stat('Actions agents recorded', { value: String(p.observed) }));
+  rows.push(stat('Said what they expected to happen', share(p.withExpectation, p.observed)));
+  rows.push(stat('Named the knowledge they relied on', share(p.namingBelief, p.withExpectation)));
+  rows.push(stat('Named a pattern they followed', share(p.declaringPattern, p.withExpectation)));
+
+  rows.push({ kind: 'heading', text: 'Judgments' });
+  rows.push(stat('Actions the reviewer judged', share(j.total, p.observed)));
+  for (const v of ordered(j.byVerdict, VERDICT_LABELS)) {
+    rows.push(stat(VERDICT_LABELS[v] ?? v, share(j.byVerdict[v], j.total)));
+  }
+  const misses = Object.values(j.missesByBlame).reduce((a, b) => a + b, 0);
+  if (misses > 0) {
+    rows.push({ kind: 'note', text: 'When a prediction proved wrong, the reviewer blamed:' });
+    for (const b of ordered(j.missesByBlame, BLAME_LABELS)) {
+      rows.push(stat(BLAME_LABELS[b] ?? b, share(j.missesByBlame[b], misses)));
+    }
+  }
+
+  rows.push({ kind: 'heading', text: 'Updates to the world model' });
+  if (effects === 0) rows.push({ kind: 'note', text: 'No updates proposed yet.' });
+  for (const s of ordered(u.byState, STATE_LABELS)) {
+    rows.push(stat(STATE_LABELS[s] ?? s, share(u.byState[s], effects)));
+  }
+  if (u.openReasons.length > 0) {
+    rows.push({ kind: 'note', text: 'Why open updates have not landed:' });
+    for (const r of u.openReasons.slice(0, 5)) {
+      // GoalManager reports an open update with no error yet as '(none)'.
+      const text = !r.reason || r.reason === '(none)' ? 'No problem recorded yet' : r.reason;
+      rows.push(stat(text.length > 90 ? `${text.slice(0, 87)}...` : text, { value: String(r.n) }));
+    }
+  }
+
+  rows.push({ kind: 'heading', text: 'All time' });
+  rows.push(stat('Updates applied', { value: String(f.lifetime.applied) }));
+  rows.push(stat('Updates abandoned', { value: String(f.lifetime.abandoned) }));
+  ensure(rows.length > 0, 'the funnel report has rows');
+  return rows;
+}
 
 export class KnowledgeBrowser extends Abject {
   private knowledgeBaseId?: AbjectId;
@@ -77,6 +232,20 @@ export class KnowledgeBrowser extends Abject {
   private listEmptyShown?: boolean;
   private archivedToggleId?: AbjectId;
   private curateBtnId?: AbjectId;
+  private toolbarRowId?: AbjectId;
+
+  // Learning tab: built on first show, rows rebuilt on every load.
+  private goalManagerId?: AbjectId;
+  private learningPaneId?: AbjectId;
+  private learningRefreshId?: AbjectId;
+  private learningStatusId?: AbjectId;
+  /** The pane's dynamic rows (headings, notes, stat rows), removed and destroyed on reload. */
+  private learningRowIds: AbjectId[] = [];
+  /** Building the pane, shared so a doubled tab event builds it once. */
+  private learningPaneReady?: Promise<void>;
+  private learningShown = false;
+  private learningLoaded = false;
+  private learningLoading = false;
 
   /** This peer's id, for telling locally authored entries from synced ones. */
   private localPeerId = '';
@@ -226,6 +395,7 @@ export class KnowledgeBrowser extends Abject {
       })
     );
 
+    this.toolbarRowId = toolbarRowId;
     await this.request(request(this.id, this.rootLayoutId, 'updateLayoutChild', {
       widgetId: toolbarRowId,
       sizePolicy: { vertical: 'fixed', horizontal: 'expanding' },
@@ -514,6 +684,15 @@ export class KnowledgeBrowser extends Abject {
     this.listEmptyShown = undefined;
     this.archivedToggleId = undefined;
     this.curateBtnId = undefined;
+    this.toolbarRowId = undefined;
+    this.learningPaneId = undefined;
+    this.learningRefreshId = undefined;
+    this.learningStatusId = undefined;
+    this.learningRowIds = [];
+    this.learningPaneReady = undefined;
+    this.learningShown = false;
+    this.learningLoaded = false;
+    this.learningLoading = false;
     this.innerSplitId = undefined;
     this.graphId = undefined;
     this.graphLinks.clear();
@@ -537,7 +716,8 @@ export class KnowledgeBrowser extends Abject {
   // ═══════════════════════════════════════════════════════════════════
 
   private async loadEntries(): Promise<void> {
-    if (!this.knowledgeBaseId) return;
+    // The Learning tab shows no entries (its list is hidden); the next tab change reloads.
+    if (!this.knowledgeBaseId || this.activeTab === LEARNING_TAB) return;
 
     try {
       const typeFilter = TAB_TYPES[this.activeTab];
@@ -999,6 +1179,205 @@ export class KnowledgeBrowser extends Abject {
   }
 
   // ═══════════════════════════════════════════════════════════════════
+  // Learning tab (a view over GoalManager's learning funnel)
+  // ═══════════════════════════════════════════════════════════════════
+
+  /**
+   * Show the Learning pane in place of the toolbar and the list/detail split
+   * when the Learning tab is active, and the reverse otherwise. Reads the
+   * active tab after building, so the last of several quick tab changes wins.
+   */
+  private async syncLearningPane(): Promise<void> {
+    if (this.activeTab === LEARNING_TAB) await this.ensureLearningPane();
+    const show = this.activeTab === LEARNING_TAB && !!this.learningPaneId;
+    if (this.learningShown !== show) {
+      this.learningShown = show;
+      const setVisible = (id: AbjectId | undefined, visible: boolean) => id
+        ? this.request(request(this.id, id, 'update', { style: { visible } })).catch(() => { /* window torn down */ })
+        : Promise.resolve();
+      await Promise.all([
+        setVisible(this.toolbarRowId, !show),
+        setVisible(this.splitPaneId, !show),
+        setVisible(this.learningPaneId, show),
+      ]);
+    }
+    if (show && !this.learningLoaded) await this.loadLearning();
+  }
+
+  private ensureLearningPane(): Promise<void> {
+    this.learningPaneReady ??= this.buildLearningPane().catch((err) => {
+      this.learningPaneReady = undefined;
+      log.warn('Learning pane build failed:', err instanceof Error ? err.message : String(err));
+    });
+    return this.learningPaneReady;
+  }
+
+  /** The pane's fixed part: heading with Refresh, one line of explanation, a status line. Rows follow. */
+  private async buildLearningPane(): Promise<void> {
+    const windowId = this.windowId, rootId = this.rootLayoutId, wm = this.widgetManagerId;
+    if (!windowId || !rootId || !wm) return;
+    const noMargins = { top: 0, right: 0, bottom: 0, left: 0 };
+
+    const paneId = await this.request<AbjectId>(request(this.id, wm, 'createDetachedScrollableVBox', {
+      windowId, margins: { top: 8, right: 12, bottom: 8, left: 12 }, spacing: 6,
+    }));
+    const headerRowId = await this.request<AbjectId>(request(this.id, wm, 'createDetachedHBox', {
+      windowId, margins: noMargins, spacing: 8,
+    }));
+    const { widgetIds: [titleId, refreshId, introId, statusId] } = await this.request<{ widgetIds: AbjectId[] }>(
+      request(this.id, wm, 'create', {
+        specs: [
+          { type: 'label', windowId, text: sectionHeaderText(this.theme, 'From prediction to knowledge'),
+            style: { ...sectionHeaderStyle(this.theme), wordWrap: false } },
+          { type: 'button', windowId, text: 'Refresh' },
+          { type: 'label', windowId, text: LEARNING_INTRO, style: hintStyle(this.theme) },
+          { type: 'label', windowId, text: 'Loading...', style: { fontSize: 11, color: this.theme.textMeta } },
+        ],
+      }),
+    );
+    await this.request(request(this.id, headerRowId, 'addLayoutChildren', {
+      children: [
+        { widgetId: titleId, sizePolicy: { vertical: 'fixed', horizontal: 'expanding' }, preferredSize: { height: 24 } },
+        { widgetId: refreshId, sizePolicy: { vertical: 'fixed', horizontal: 'fixed' }, preferredSize: { width: 80, height: 26 } },
+      ],
+    }));
+    await this.request(request(this.id, paneId, 'addLayoutChildren', {
+      children: [
+        { widgetId: headerRowId, sizePolicy: { vertical: 'fixed', horizontal: 'expanding' }, preferredSize: { height: 30 } },
+        { widgetId: introId, sizePolicy: { vertical: 'fixed', horizontal: 'expanding' }, preferredSize: { height: 34 } },
+        { widgetId: statusId, sizePolicy: { vertical: 'fixed', horizontal: 'expanding' }, preferredSize: { height: 18 } },
+      ],
+    }));
+    // Hidden until syncLearningPane swaps it in, so it never shares the window with the list.
+    await this.request(request(this.id, paneId, 'update', { style: { visible: false } }));
+    if (this.windowId !== windowId) return; // closed while building
+    await this.request(request(this.id, rootId, 'addLayoutChild', {
+      widgetId: paneId,
+      sizePolicy: { vertical: 'expanding', horizontal: 'expanding' },
+    }));
+
+    this.learningPaneId = paneId;
+    this.learningRefreshId = refreshId;
+    this.learningStatusId = statusId;
+    this.send(request(this.id, refreshId, 'addDependent', {}));
+  }
+
+  /**
+   * Read the funnel from GoalManager and rebuild the report rows. One load at
+   * a time: a Refresh click delivered twice, or pressed during a load, is
+   * answered by the load already running.
+   */
+  private async loadLearning(): Promise<void> {
+    const paneId = this.learningPaneId;
+    if (!paneId || this.learningLoading) return;
+    this.learningLoading = true;
+    const refreshId = this.learningRefreshId;
+    if (refreshId) this.send(event(this.id, refreshId, 'update', { busy: true }));
+    try {
+      let funnel: LearningFunnel | null = null;
+      try {
+        this.goalManagerId = await this.resolveDep('GoalManager', this.goalManagerId);
+        if (this.goalManagerId) {
+          funnel = readFunnel(await this.request<unknown>(
+            request(this.id, this.goalManagerId, 'getLearningFunnel', {}),
+          ));
+        }
+      } catch (err) {
+        this.goalManagerId = undefined; // rediscover next time: it may have been respawned
+        log.warn('Learning funnel unavailable:', err instanceof Error ? err.message : String(err));
+      }
+      if (this.learningPaneId !== paneId) return; // window closed meanwhile
+
+      await this.clearLearningRows();
+      const status = funnel
+        ? `Counts cover the ${funnel.scope}. All time counts every update since tracking began.`
+        : LEARNING_UNAVAILABLE;
+      await this.request(request(this.id, this.learningStatusId!, 'update', { text: status })).catch(() => {});
+      if (funnel) await this.addLearningRows(funnelRows(funnel));
+      this.learningLoaded = true;
+      log.info(`Learning report: ${funnel ? `${this.learningRowIds.length} rows` : 'unavailable'}`);
+    } finally {
+      if (this.learningPaneId === paneId) this.learningLoading = false;
+      if (refreshId && this.learningRefreshId === refreshId) this.send(event(this.id, refreshId, 'update', { busy: false }));
+    }
+  }
+
+  /** Remove every dynamic row from the pane and destroy it (a row box takes its widgets with it). */
+  private async clearLearningRows(): Promise<void> {
+    const paneId = this.learningPaneId;
+    const rowIds = this.learningRowIds;
+    this.learningRowIds = [];
+    await Promise.all(rowIds.map(async (widgetId) => {
+      if (paneId) {
+        await this.request(request(this.id, paneId, 'removeLayoutChild', { widgetId })).catch(() => { /* pane gone */ });
+      }
+      await this.request(request(this.id, widgetId, 'destroy', {})).catch(() => { /* already gone */ });
+    }));
+    ensure(this.learningRowIds.length === 0, 'no report rows remain after clearing');
+  }
+
+  /**
+   * Append report rows to the pane: a heading or note is one label; a stat is
+   * a row box of label, optional share bar, and right-aligned value. Every
+   * widget is created in one batch.
+   */
+  private async addLearningRows(rows: ReportRow[]): Promise<void> {
+    const paneId = this.learningPaneId, windowId = this.windowId, wm = this.widgetManagerId;
+    if (!paneId || !windowId || !wm || rows.length === 0) return;
+
+    const specs: Array<Record<string, unknown>> = [];
+    for (const row of rows) {
+      if (row.kind === 'heading') {
+        specs.push({ type: 'label', windowId, text: sectionHeaderText(this.theme, row.text),
+          style: { ...sectionHeaderStyle(this.theme, 12), wordWrap: false } });
+      } else if (row.kind === 'note') {
+        specs.push({ type: 'label', windowId, text: row.text, style: { fontSize: 11, color: this.theme.textSecondary } });
+      } else {
+        specs.push({ type: 'label', windowId, text: row.label, style: { fontSize: 12, color: this.theme.textPrimary } });
+        if (row.ratio !== undefined) specs.push({ type: 'progress', windowId, value: row.ratio });
+        specs.push({ type: 'label', windowId, text: row.value,
+          style: { fontSize: 12, fontWeight: 'bold', color: this.theme.textHeading, align: 'right' } });
+      }
+    }
+    const { widgetIds } = await this.request<{ widgetIds: AbjectId[] }>(request(this.id, wm, 'create', { specs }));
+
+    // Hand each row its widgets, in creation order.
+    const placed: Array<{ row: ReportRow; ids: AbjectId[] }> = [];
+    let next = 0;
+    for (const row of rows) {
+      const n = row.kind === 'stat' ? (row.ratio !== undefined ? 3 : 2) : 1;
+      placed.push({ row, ids: widgetIds.slice(next, next + n) });
+      next += n;
+    }
+    ensure(next === widgetIds.length, 'every created widget belongs to one report row');
+
+    const fixedRow = (widgetId: AbjectId, height: number) => ({
+      widgetId, sizePolicy: { vertical: 'fixed', horizontal: 'expanding' }, preferredSize: { height },
+    });
+    const children = await Promise.all(placed.map(async ({ row, ids }) => {
+      if (row.kind !== 'stat') return fixedRow(ids[0], row.kind === 'heading' ? 28 : REPORT_ROW_H);
+      const rowId = await this.request<AbjectId>(request(this.id, wm, 'createDetachedHBox', {
+        windowId, margins: { top: 0, right: 0, bottom: 0, left: 0 }, spacing: 12,
+      }));
+      const [labelId, ...rest] = ids;
+      const barId = row.ratio !== undefined ? rest[0] : undefined;
+      const valueId = rest[rest.length - 1];
+      await this.request(request(this.id, rowId, 'addLayoutChildren', {
+        children: [
+          { widgetId: labelId, sizePolicy: { vertical: 'fixed', horizontal: 'expanding' }, preferredSize: { height: REPORT_ROW_H } },
+          ...(barId ? [{ widgetId: barId, sizePolicy: { vertical: 'fixed', horizontal: 'fixed' }, preferredSize: { width: REPORT_BAR_W, height: 8 } }] : []),
+          { widgetId: valueId, sizePolicy: { vertical: 'fixed', horizontal: 'fixed' }, preferredSize: { width: REPORT_VALUE_W, height: REPORT_ROW_H } },
+        ],
+      }));
+      return fixedRow(rowId, REPORT_ROW_H);
+    }));
+
+    // Recorded before attaching, so a failure part way still clears them next time.
+    this.learningRowIds.push(...children.map(c => c.widgetId));
+    await this.request(request(this.id, paneId, 'addLayoutChildren', { children }));
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
   // Event handling
   // ═══════════════════════════════════════════════════════════════════
 
@@ -1012,7 +1391,14 @@ export class KnowledgeBrowser extends Abject {
         await this.showEmptyState(true);
         await this.loadEntries();
         await this.updateGraphPane();
+        await this.syncLearningPane();
       }
+      return;
+    }
+
+    // Learning tab: re-read the funnel
+    if (fromId === this.learningRefreshId && aspect === 'click') {
+      await this.loadLearning();
       return;
     }
 

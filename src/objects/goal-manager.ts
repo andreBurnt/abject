@@ -17,6 +17,8 @@ import { require as precondition, requireNonEmpty } from '../core/contracts.js';
 import { runBounded } from '../core/bounded.js';
 import { canonical, validateLearningEffect, type LearningDecision, type LearningEffect } from '../core/learning.js';
 import { Log } from '../core/timed-log.js';
+import { evidenceReference, evidenceKey, isEvidenceReference, EVIDENCE_KEY_PREFIX, OBSERVATION_INLINE_CAP, type EvidenceReference } from '../core/evidence.js';
+import { runtimeFault } from '../core/runtime-fault.js';
 import { failureQuestions, producesQuestions, FAILURE_KINDS, type FailureKind } from '../core/decision-questions.js';
 import { choiceOf, noulOf } from '../llm/decision.js';
 import { CONVERSATION_CONTEXT_KEY, conversationBriefing, type ConversationContext } from '../core/conversation-context.js';
@@ -187,15 +189,17 @@ function fingerprint(value: unknown): string {
 /**
  * Which belief a missed prediction traced back to, as the reviewer read it:
  * the model's own prior, a knowledge entry or a pattern it rested on, the
- * link between two patterns, or a world that changed under it. Kept with the
- * assessment so the learning it drives can be followed back to its cause.
+ * link between two patterns, a world that changed under it, or the runtime
+ * itself (a watchdog, a superseded plan, a dead worker), which teaches the
+ * world model nothing. Kept with the assessment so the learning it drives can
+ * be followed back to its cause.
  */
-export type PredictionAttribution = { source: 'prior' | 'entry' | 'pattern' | 'link' | 'world'; id?: string; note?: string };
+export type PredictionAttribution = { source: 'prior' | 'entry' | 'pattern' | 'link' | 'world' | 'runtime'; id?: string; note?: string };
 
 function attributionOf(raw: unknown): PredictionAttribution | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
   const { source, id, note } = raw as { source?: unknown; id?: unknown; note?: unknown };
-  if (source !== 'prior' && source !== 'entry' && source !== 'pattern' && source !== 'link' && source !== 'world') return undefined;
+  if (source !== 'prior' && source !== 'entry' && source !== 'pattern' && source !== 'link' && source !== 'world' && source !== 'runtime') return undefined;
   return { source, ...(typeof id === 'string' && id ? { id: id.slice(0, 300) } : {}), ...(typeof note === 'string' && note.trim() ? { note: note.trim().slice(0, 500) } : {}) };
 }
 
@@ -1269,6 +1273,119 @@ export class GoalManager extends Abject {
     return goal;
   }
 
+  // ── Evidence store ─────────────────────────────────────────────────
+  //
+  // Records a learning decision cites (task records, observations,
+  // assessments) are stored once by content hash under `evidence:<sha256>`;
+  // decisions and knowledge receipts carry a reference (hash + digest, see
+  // core/evidence.ts). A body outlives the goal that produced it for as long
+  // as a receipt or a live decision cites it; the maintenance sweep removes
+  // the rest.
+
+  /** Bodies stored recently, by hash: the sweep spares them for an hour. */
+  private recentEvidence: Map<string, number> = new Map();
+  private static readonly EVIDENCE_GRACE_MS = 60 * 60 * 1000;
+
+  /** Store a record once by content hash and return its reference. */
+  private async storeEvidence(record: unknown): Promise<EvidenceReference> {
+    const reference = await evidenceReference(record);
+    if (this.storageId) {
+      const key = evidenceKey(reference.hash);
+      const present = await this.request<boolean>(request(this.id, this.storageId, 'has', { key })).catch(() => false);
+      if (!present) await this.request(request(this.id, this.storageId, 'set', { key, value: record }));
+      this.recentEvidence.set(reference.hash, Date.now());
+    }
+    return reference;
+  }
+
+  private async readEvidenceBody(hash: string): Promise<unknown> {
+    if (!this.storageId || !/^[0-9a-f]{64}$/.test(hash)) return undefined;
+    return this.request(request(this.id, this.storageId, 'get', { key: evidenceKey(hash) })).catch(() => undefined);
+  }
+
+  /**
+   * The whole record behind a cited reference: the stored body, else the
+   * goal's live copy, else the digest. A record cited before references
+   * existed is already whole.
+   */
+  private async resolveEvidence(goal: Goal | undefined, ref: string, value: unknown): Promise<unknown> {
+    if (!isEvidenceReference(value)) return value;
+    return (await this.readEvidenceBody(value.hash)) ?? goal?.scratchpad[ref] ?? value.digest;
+  }
+
+  /** Hashes a goal's live records cite: decision evidence and stored observation results. */
+  private static evidenceHashesOf(goal: Goal): string[] {
+    const hashes: string[] = [];
+    for (const [key, value] of Object.entries(goal.scratchpad)) {
+      if (key.startsWith('learning/decision/')) {
+        for (const ref of Object.values((value as LearningDecision).evidence ?? {})) if (isEvidenceReference(ref)) hashes.push(ref.hash);
+      } else if (key.startsWith('learning/observation/')) {
+        const hash = (value as { actualHash?: unknown })?.actualHash;
+        if (typeof hash === 'string') hashes.push(hash);
+      }
+    }
+    return hashes;
+  }
+
+  /**
+   * Remove evidence bodies nothing cites: no knowledge receipt, no decision
+   * or observation of a goal in memory, and none stored in the last hour.
+   * Skipped entirely when the KnowledgeBase cannot say what its receipts
+   * cite, since a body it still needs cannot be told apart from an orphan.
+   */
+  private async removeUnreferencedEvidence(): Promise<void> {
+    if (!this.storageId) return;
+    const keys = await this.request<string[]>(request(this.id, this.storageId, 'keys', {})).catch(() => [] as string[]);
+    const stored = keys.filter(k => typeof k === 'string' && k.startsWith(EVIDENCE_KEY_PREFIX));
+    if (stored.length === 0) return;
+    const kbId = await this.discoverDep('KnowledgeBase');
+    if (!kbId) return;
+    const cited = await this.request<string[]>(request(this.id, kbId, 'evidenceHashes', {}), 15000).catch(() => null);
+    if (!Array.isArray(cited)) return;
+    const keep = new Set<string>(cited);
+    for (const goal of this.goals.values()) for (const hash of GoalManager.evidenceHashesOf(goal)) keep.add(hash);
+    const now = Date.now();
+    for (const [hash, at] of this.recentEvidence) {
+      if (now - at < GoalManager.EVIDENCE_GRACE_MS) keep.add(hash); else this.recentEvidence.delete(hash);
+    }
+    let removed = 0;
+    for (const key of stored) {
+      if (keep.has(key.slice(EVIDENCE_KEY_PREFIX.length))) continue;
+      await this.request(request(this.id, this.storageId, 'delete', { key })).catch(() => undefined);
+      removed++;
+    }
+    if (removed > 0) log.info(`evidence store: removed ${removed} of ${stored.length} bodies no receipt or live goal cites`);
+  }
+
+  // ── Learning totals ────────────────────────────────────────────────
+  //
+  // getLearningStatus counts the goals in memory, and a goal whose learning
+  // is all applied is not loaded at boot, so lifetime figures are kept here.
+
+  private learningTotals = { applied: 0, abandoned: 0 };
+  private learningTotalsLoaded = false;
+  private learningTotalsTimer?: ReturnType<typeof setTimeout>;
+  private static readonly LEARNING_TOTALS_KEY = 'goals:learning-totals';
+
+  private async loadLearningTotals(): Promise<void> {
+    if (this.learningTotalsLoaded || !this.storageId) return;
+    const stored = await this.request<{ applied?: number; abandoned?: number } | null>(
+      request(this.id, this.storageId, 'get', { key: GoalManager.LEARNING_TOTALS_KEY })).catch(() => null);
+    this.learningTotals.applied += Number(stored?.applied) || 0;
+    this.learningTotals.abandoned += Number(stored?.abandoned) || 0;
+    this.learningTotalsLoaded = true;
+  }
+
+  private countLearningOutcome(state: 'applied' | 'abandoned'): void {
+    this.learningTotals[state]++;
+    if (this.learningTotalsTimer || !this.storageId) return;
+    this.learningTotalsTimer = this.setTimer(async () => {
+      this.learningTotalsTimer = undefined;
+      await this.loadLearningTotals();
+      await this.request(request(this.id, this.storageId!, 'set', { key: GoalManager.LEARNING_TOTALS_KEY, value: { ...this.learningTotals } })).catch(() => undefined);
+    }, 5000);
+  }
+
   // ── Cold archive ───────────────────────────────────────────────────
 
   /** Archived goals by id, from Storage: listed and readable, never loaded at boot. */
@@ -1284,13 +1401,14 @@ export class GoalManager extends Abject {
 
   private maintaining = false;
 
-  /** Archive due goals, then drop namespaces no goal owns. One run at a time. */
+  /** Archive due goals, then drop namespaces and evidence nothing owns. One run at a time. */
   private async maintainGoalStore(): Promise<void> {
     if (this.maintaining) return;
     this.maintaining = true;
     try {
       await this.archiveColdGoals();
       await this.removeOrphanNamespaces();
+      await this.removeUnreferencedEvidence();
     } catch (err) {
       log.warn(`goal store maintenance failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -1823,15 +1941,62 @@ reviews results and either plans another round or completes/fails the goal.
       { name: 'recordLearningDecision', description: 'Journal a proposed interpretation and every original effect before mutation validation.', parameters: { goalId: protocolText, operationId: protocolText, reviewTaskId: protocolText, context: protocolObject, effects: { kind: 'array', elementType: protocolObject } } },
       { name: 'getLearningEffect', description: 'KnowledgeBase resolves an authenticated effect and validates its evidence contract.', parameters: { goalId: protocolText, decisionId: protocolText, effectId: protocolText, requester: protocolText } },
       { name: 'getLearningDecision', description: 'Read a durable decision, evidence snapshots, proposed effects and receipts.', parameters: { goalId: protocolText, decisionId: protocolText } },
-      { name: 'getLearningStatus', description: 'Learning receipts, unresolved targets and ages, delivery and repair costs. Semantic accuracy requires subsequent-task evaluation.', parameters: {} },
+      { name: 'getLearningStatus', description: 'Learning decisions and their effects by state (separate units), lifetime applied/abandoned totals, ages, delivery and repair costs. Semantic accuracy requires subsequent-task evaluation.', parameters: {} },
+      { name: 'getLearningEvidence', description: 'TaskReviewer reads the whole records a decision cites (stored once by hash).', parameters: { goalId: protocolText, decisionId: protocolText } },
+      { name: 'getLearningFunnel', description: 'How much of the predict, judge, blame, update loop reaches the world model, over the goals in memory.', parameters: {} },
       { name: 'pendingLearningDecisions', description: 'Unfinished corrections, independent of retrospective completion.', parameters: {} },
       { name: 'changeLearningEffect', description: 'Reviewer records preparation, attempts, acknowledgments or a bounded repair.', parameters: { goalId: protocolText, decisionId: protocolText, effectId: protocolText, change: protocolObject } },
       { name: 'claimLearningRepair', description: 'Claim one focused semantic repair; persisted before starting a model.', parameters: { goalId: protocolText, decisionId: protocolText } },
-      { name: 'resumeLearningDecision', description: 'Explicitly resume learning after new evidence or a state change.', parameters: { goalId: protocolText, decisionId: protocolText } },
+      { name: 'resumeLearningDecision', description: 'Explicitly resume learning after new evidence or a state change. deliveryOnly retries only deliveries that ran out of attempts.', parameters: { goalId: protocolText, decisionId: protocolText, deliveryOnly: protocolObject } },
     ]);
     this.on('getLearningDecision', async msg => {
       const p = msg.payload as { goalId: string; decisionId: string };
       return withKeyedLock(`${this.id}:decisions:${p.goalId}`, async () => structuredClone(this.goals.get(p.goalId)?.scratchpad[`learning/decision/${p.decisionId}`] ?? null));
+    });
+    this.on('getLearningEvidence', async msg => {
+      const p = msg.payload as { goalId: string; decisionId: string };
+      if (!await this.isBuiltInCaller(msg.routing.from, ['TaskReviewer'])) throw new Error('Learning evidence is read by TaskReviewer');
+      const goal = this.goals.get(p.goalId);
+      const decision = goal?.scratchpad[`learning/decision/${p.decisionId}`] as LearningDecision | undefined;
+      if (!decision) return null;
+      const out: Record<string, unknown> = {};
+      for (const [ref, value] of Object.entries(decision.evidence ?? {})) out[ref] = await this.resolveEvidence(goal, ref, value);
+      return out;
+    });
+    this.on('getLearningFunnel', async () => {
+      const observations: Array<Record<string, unknown>> = [], assessments: Array<Record<string, unknown>> = [];
+      const effects: LearningEffect[] = [];
+      for (const goal of this.goals.values()) for (const [key, value] of Object.entries(goal.scratchpad)) {
+        if (key.startsWith('learning/observation/') && !key.endsWith(':self')) observations.push(value as Record<string, unknown>);
+        else if (key.startsWith('learning/assessment/')) assessments.push(value as Record<string, unknown>);
+        else if (key.startsWith('learning/decision/')) effects.push(...(value as LearningDecision).effects);
+      }
+      const verdicts: Record<string, number> = {}, blame: Record<string, number> = {}, missBlame: Record<string, number> = {}, states: Record<string, number> = {}, reasons: Record<string, number> = {};
+      for (const a of assessments) {
+        const verdict = String(a.verdict ?? 'unknown'), source = String((a.attribution as { source?: string } | undefined)?.source ?? 'none');
+        verdicts[verdict] = (verdicts[verdict] ?? 0) + 1;
+        blame[source] = (blame[source] ?? 0) + 1;
+        if (verdict === 'contradicted') missBlame[source] = (missBlame[source] ?? 0) + 1;
+      }
+      for (const e of effects) {
+        states[e.state] = (states[e.state] ?? 0) + 1;
+        if (e.state !== 'applied' && e.state !== 'abandoned') {
+          const reason = (e.error ?? '(none)').replace(/[0-9a-f]{8}-[0-9a-f-]{27}/g, '<id>').slice(0, 80);
+          reasons[reason] = (reasons[reason] ?? 0) + 1;
+        }
+      }
+      return {
+        scope: 'goals in memory',
+        predictions: {
+          observed: observations.length,
+          withExpectation: observations.filter(o => typeof o.expect === 'string' && o.expect.trim()).length,
+          namingBelief: observations.filter(o => Array.isArray(o.basis) && o.basis.length > 0).length,
+          declaringPattern: observations.filter(o => Array.isArray(o.patterns) && o.patterns.length > 0).length,
+        },
+        judgments: { total: assessments.length, byVerdict: verdicts, byBlame: blame, missesByBlame: missBlame },
+        updates: { byState: states, openReasons: Object.entries(reasons).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([reason, n]) => ({ reason, n })) },
+        lifetime: { ...this.learningTotals },
+      };
     });
     this.on('getLearningEffect', async msg => {
       const p = msg.payload as { goalId: string; decisionId: string; effectId: string; requester: string };
@@ -1844,12 +2009,27 @@ reviews results and either plans another round or completes/fails the goal.
       });
     });
     this.on('getLearningStatus', async () => {
+      await this.loadLearningTotals();
       const decisions = [...this.goals.values()].flatMap(g => Object.entries(g.scratchpad).filter(([k]) => k.startsWith('learning/decision/')).map(([,d]) => d as LearningDecision));
       const effects = decisions.flatMap(d => d.effects);
-      return { decisions: decisions.length, applied: effects.filter(e => e.state === 'applied').length,
-        pending: effects.filter(e => !['applied','abandoned'].includes(e.state)).length,
-        deliveryAttempts: effects.reduce((n,e) => n + e.attempts,0), repairModelAttempts: decisions.reduce((n,d) => n + d.repairAttempts,0),
-        oldestPendingAgeMs: Math.max(0,...decisions.filter(d => d.effects.some(e => !['applied','abandoned'].includes(e.state))).map(d => Date.now()-d.createdAt)),
+      const count = (state: string) => effects.filter(e => e.state === state).length;
+      const open = (e: LearningEffect) => !['applied','abandoned'].includes(e.state);
+      return {
+        // Decisions and effects are different units: one decision proposes
+        // 0-100 effects, each applied or abandoned on its own. These figures
+        // cover the goals in memory (any goal with unfinished learning is
+        // loaded); `lifetime` counts every effect resolved since it was kept.
+        scope: 'goals in memory',
+        decisions: decisions.length,
+        effects: { total: effects.length, proposed: count('proposed'), applied: count('applied'), needsRepair: count('needs_repair'), waiting: count('waiting'), abandoned: count('abandoned') },
+        lifetime: { ...this.learningTotals },
+        applied: count('applied'),
+        pending: effects.filter(open).length,
+        deliveryAttempts: effects.reduce((n,e) => n + e.attempts,0),
+        // Decisions whose one focused repair has been used (a repair claim counts
+        // once per decision; a resume resets it).
+        repairModelAttempts: decisions.reduce((n,d) => n + d.repairAttempts,0),
+        oldestPendingAgeMs: Math.max(0,...decisions.filter(d => d.effects.some(open)).map(d => Date.now()-d.createdAt)),
         items: decisions.map(d => ({ decisionId:d.id,goalId:d.goalId,effects:d.effects.map(e => ({id:e.id,target:e.input.id,state:e.state,error:e.error,nextAttemptAt:e.nextAttemptAt})) })) };
     });
     this.on('pendingLearningDecisions', async () => (await Promise.all([...this.goals.values()].map(g => withKeyedLock(`${this.id}:decisions:${g.id}`, async () => Object.entries(g.scratchpad)
@@ -1877,8 +2057,10 @@ reviews results and either plans another round or completes/fails the goal.
               }
               const context = structuredClone(p.context ?? {});
               const evidence: Record<string, unknown> = {};
+              // Each cited record is stored once by hash; the decision (and the
+              // knowledge receipts built from it) carries the reference.
               for (const ref of [...(Array.isArray(context.evidenceRefs) ? context.evidenceRefs : []), ...(Array.isArray(context.assessmentRefs) ? context.assessmentRefs : []), ...p.effects.flatMap((e: any) => Array.isArray(e?.evidenceRefs) ? e.evidenceRefs : [])]) {
-                if (typeof ref === 'string' && /^learning\/(task|observation|assessment)\//.test(ref) && ref in goal.scratchpad) evidence[ref] = structuredClone(goal.scratchpad[ref]);
+                if (typeof ref === 'string' && !(ref in evidence) && /^learning\/(task|observation|assessment)\//.test(ref) && ref in goal.scratchpad) evidence[ref] = await this.storeEvidence(goal.scratchpad[ref]);
               }
               decision = { version: 1, id: uuidv4(), goalId: goal.id, operationId: p.operationId, reviewTaskId: p.reviewTaskId,
                 createdAt: Date.now(), updatedAt: Date.now(), context, evidence, repairAttempts: 0,
@@ -1904,11 +2086,21 @@ reviews results and either plans another round or completes/fails the goal.
                 // A crash or incomplete repair must not launch a second model.
                 for (const e of decision.effects) if (e.state === 'needs_repair') { e.state = 'waiting'; e.repairClaimed = true; e.error = `Focused repair claimed; ${e.error ?? ''}`; }
               } else if (method === 'resumeLearningDecision') {
-                decision.repairAttempts = 0; decision.paused = false;
-                for (const e of decision.effects) if (e.state === 'waiting') {
-                  if (/Delivery|retry budget/i.test(e.error ?? '')) { e.state = 'proposed'; e.attempts = 0; }
-                  else e.state = 'needs_repair';
-                  e.nextAttemptAt = 0;
+                if (p.deliveryOnly === true) {
+                  // Retry deliveries that ran out of attempts (a busy or restarting
+                  // KnowledgeBase), and nothing else: the decision's one repair
+                  // stays spent, so this can never start a second model.
+                  for (const e of decision.effects) if (e.state === 'waiting' && /Delivery|retry budget/i.test(e.error ?? '')) {
+                    e.state = 'proposed'; e.attempts = 0; e.nextAttemptAt = 0;
+                    e.deliveryResumes = (e.deliveryResumes ?? 0) + 1;
+                  }
+                } else {
+                  decision.repairAttempts = 0; decision.paused = false;
+                  for (const e of decision.effects) if (e.state === 'waiting') {
+                    if (/Delivery|retry budget/i.test(e.error ?? '')) { e.state = 'proposed'; e.attempts = 0; }
+                    else e.state = 'needs_repair';
+                    e.nextAttemptAt = 0;
+                  }
                 }
               } else {
                 const effect = decision.effects.find(e => e.id === p.effectId);
@@ -1928,7 +2120,7 @@ reviews results and either plans another round or completes/fails the goal.
                   effect.input = structuredClone(c.repair); effect.attempts = 0;
                   if (effect.input.evidence === undefined && typeof decision.context.evidence === 'string') effect.input.evidence = decision.context.evidence;
                   if (effect.input.scope === undefined && typeof decision.context.scope === 'string') effect.input.scope = decision.context.scope;
-                  for (const ref of Array.isArray(effect.input.evidenceRefs) ? effect.input.evidenceRefs : []) if (typeof ref === 'string' && /^learning\/(task|observation|assessment)\//.test(ref) && ref in goal.scratchpad) decision.evidence[ref] = structuredClone(goal.scratchpad[ref]);
+                  for (const ref of Array.isArray(effect.input.evidenceRefs) ? effect.input.evidenceRefs : []) if (typeof ref === 'string' && /^learning\/(task|observation|assessment)\//.test(ref) && ref in goal.scratchpad) decision.evidence[ref] = await this.storeEvidence(goal.scratchpad[ref]);
                   if (effect.input.action === 'save_entry' && !effect.input.id) effect.input.id = uuidv4();
                   effect.state = 'proposed'; effect.nextAttemptAt = 0;
                 }
@@ -1936,7 +2128,10 @@ reviews results and either plans another round or completes/fails the goal.
                 if (c.state === 'applied' && !(c.receipt?.effectId === effect.id && c.receipt?.decisionId === decision.id)
                   && !(effect.input.action === 'no_change' && c.receipt?.disposition === 'no_change' && c.receipt?.decisionId === decision.id)) throw new Error('Applied learning requires the matching receiver receipt');
                 if (c.state === 'abandoned' && (typeof c.error !== 'string' || !c.error.trim())) throw new Error('Abandoning learning requires a reason');
-                if (c.state && ['proposed','applied','needs_repair','waiting','abandoned'].includes(c.state)) effect.state = c.state;
+                if (c.state && ['proposed','applied','needs_repair','waiting','abandoned'].includes(c.state)) {
+                  if ((c.state === 'applied' || c.state === 'abandoned') && effect.state !== c.state) this.countLearningOutcome(c.state);
+                  effect.state = c.state;
+                }
                 if (c.error !== undefined) effect.error = String(c.error);
                 if (c.receipt !== undefined) effect.receipt = structuredClone(c.receipt);
                 if (effect.state === 'applied') delete effect.error;
@@ -2042,7 +2237,7 @@ reviews results and either plans another round or completes/fails the goal.
           const reconsideration: LearningDecision = { version:1,id:uuidv4(),goalId,reviewTaskId:old.reviewTaskId,
             operationId:`reassess:${old.id}:${key}:${assessment.revision}`,createdAt:Date.now(),updatedAt:Date.now(),repairAttempts:0,paused:old.paused,
             context:{ previousDecisionId:old.id, assessmentRef:key, assessmentRevision:assessment.revision, reason:'An assessment supporting accepted knowledge changed' },
-            evidence:{...structuredClone(old.evidence),[key]:structuredClone(assessment)},
+            evidence:{...structuredClone(old.evidence),[key]:await this.storeEvidence(assessment)},
             effects:effects.map(e => ({id:uuidv4(),input:{action:'reconsider_entry',id:e.input.id},original:{effectId:e.id,assessmentRevision:assessment.revision},
               state:old.paused?'waiting':'needs_repair',attempts:0,nextAttemptAt:0,error:'Reassess this claim against the revised assessment; keep it unchanged if still justified',history:[]})),
           };
@@ -2065,10 +2260,22 @@ reviews results and either plans another round or completes/fails the goal.
       requireNonEmpty(operationId, 'operationId');
       const key = `learning/observation/${operationId}`;
       if (key in goal.scratchpad) { await this.persistLearning(goal); return { success: true, duplicate: true }; }
-      goal.scratchpad[key] = { ...(observation as Record<string, unknown>), at: Date.now() };
+      const recorded: Record<string, unknown> = { ...(observation as Record<string, unknown>), at: Date.now() };
+      // A large result (a whole job's return value) is stored once by hash.
+      // The record keeps an excerpt and the hash, and readGoalData returns
+      // it whole, so the evidence stays complete while every checkpoint of
+      // this goal stops carrying it.
+      if (this.storageId && typeof recorded.actual === 'string' && recorded.actual.length > OBSERVATION_INLINE_CAP) {
+        const full = recorded.actual;
+        const reference = await this.storeEvidence(full);
+        recorded.actual = `${full.slice(0, OBSERVATION_INLINE_CAP / 2)}\n[... ${full.length} chars in all; readGoalData on this key returns the whole result ...]\n${full.slice(-OBSERVATION_INLINE_CAP / 4)}`;
+        recorded.actualHash = reference.hash;
+        recorded.actualChars = full.length;
+      }
+      goal.scratchpad[key] = recorded;
       goal.lastMeaningfulProgressAt=Date.now();
       await this.persistLearning(goal);
-      this.changed('observationRecorded', { goalId, operationId, observation });
+      this.changed('observationRecorded', { goalId, operationId, observation: recorded });
       return { success: true };
     });
     this.on('recordScrumCommit', async msg => {
@@ -2585,7 +2792,8 @@ reviews results and either plans another round or completes/fails the goal.
       }
 
       try {
-        await this.request(request(this.id, runtimeId, 'cancelTasksByGoal', { goalId, preserveTaskIds }));
+        await this.request(request(this.id, runtimeId, 'cancelTasksByGoal', { goalId, preserveTaskIds,
+          reason: runtimeFault('superseded', 'a newer plan for this goal replaced the task before it finished') }));
       } catch (err) { return { cancelled, safe: false, error: String(err) }; }
 
       if (cancelled > 0) {
@@ -3189,7 +3397,16 @@ reviews results and either plans another round or completes/fails the goal.
       requireNonEmpty(goalId, 'goalId');
       const goal = await this.readRetainedGoal(goalId);
       if (!goal) return null;
-      if (key) return goal.scratchpad[key] ?? null;
+      if (key) {
+        const value = goal.scratchpad[key] ?? null;
+        // An observation whose result was stored by hash reads back whole.
+        const hash = key.startsWith('learning/observation/') ? (value as { actualHash?: unknown } | null)?.actualHash : undefined;
+        if (typeof hash === 'string') {
+          const full = await this.readEvidenceBody(hash);
+          if (typeof full === 'string') return { ...(value as Record<string, unknown>), actual: full };
+        }
+        return value;
+      }
       return goal.scratchpad;
     });
 

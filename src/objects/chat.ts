@@ -1668,7 +1668,7 @@ So:
 
 ### Memory
 - **remember**: Save a durable fact to the knowledge base. \`remember\` is non-terminal — after it saves you keep going in the same turn, so the natural pattern is to remember first and then \`reply\`/\`done\`. Saving costs you nothing toward the reply. Use your judgment about what is worth keeping: a passing remark or one-off request usually is not, but a standing fact about the user (their name, where they live, how they want to be addressed, a stable preference) is worth saving the moment you learn it. When the user tells you their name, save it before you greet them back.
-  Step 1 — save: \`{ "action": "remember", "title": "User's name is Jordan Lee", "content": "The user said their name is Jordan Lee.", "type": "fact", "tags": ["user", "name"] }\`
+  Step 1 — save: \`{ "action": "remember", "title": "User's name is Jordan Lee", "content": "The user said their name is Jordan Lee.", "type": "fact", "tags": ["profile"] }\` (facts about the user carry the "profile" tag; that is what puts them in every agent's About the User section)
   Step 2 — then reply: \`{ "action": "done", "text": "Nice to meet you, Jordan!" }\`
   Types: 'fact' (personal info, discovered truths), 'learned' (lessons from outcomes), 'insight' (patterns), 'reference' (pointers)
 
@@ -1780,7 +1780,7 @@ Save method-call follow-ups (show, hide, refresh, update) for turns when the use
 
 A single successful creation goal is a complete turn. End it with **done**.
 8. P2P: Resolve remote objects by qualified name: this.find('peer.workspace.ObjectName'). Always use find() for dynamic ID resolution.
-9. When the user shares a standing personal fact (their name, where they live, preferences, job), remember it in that same turn before you reply, so future conversations can recall it. Use your judgment; not every message carries something worth saving, but a fact like a name clearly is.
+9. When the user shares a standing personal fact (their name, where they live, preferences, job), remember it in that same turn before you reply, tagged "profile", so future conversations and every agent working for the user can recall it. Use your judgment; not every message carries something worth saving, but a fact like a name clearly is.
 10. Task descriptions should describe the desired outcome and timing, letting agents decide implementation. Example: "Post a weather briefing to chat every day at 10:30 AM" is better than "Use setInterval to check the time every minute".`;
   }
 
@@ -1981,6 +1981,20 @@ A single successful creation goal is a complete turn. End it with **done**.
     return this.conversationHistory.length ? captureConversation(this.conversationId ?? this.id, this.conversationHistory) : undefined;
   }
 
+  /**
+   * What the knowledge recall searches with besides this message: the
+   * conversation's title and the user's two previous messages, so a
+   * follow-up ("do the same for tomorrow", "how does this relate to ...")
+   * still finds what the knowledge base holds about the subject.
+   */
+  private recallContextFor(userText: string): string | undefined {
+    const earlier = this.conversationHistory
+      .filter(m => m.role === 'user' && typeof m.content === 'string' && m.content.trim() && m.content !== userText)
+      .slice(-2).map(m => m.content.slice(0, 600));
+    const parts = [this.conversationTitle, ...earlier].filter((t): t is string => typeof t === 'string' && t.trim().length > 0);
+    return parts.length ? parts.join('\n') : undefined;
+  }
+
   /** Run one Chat OTA turn with a fixed handoff context, including during model latency. */
   private async runTaskTurn(
     userText: string,
@@ -1994,6 +2008,7 @@ A single successful creation goal is a complete turn. End it with **done**.
       const { ticketId } = await this.request<{ ticketId: string }>(
         request(this.id, this.agentAbjectId!, 'startTask', {
           task: userText,
+          recallQuery: this.recallContextFor(userText),
           systemPrompt: this.buildSystemPrompt(desktop),
           initialMessages: messages,
           goalId: undefined,

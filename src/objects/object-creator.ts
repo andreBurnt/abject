@@ -35,6 +35,7 @@ import { applyDiff, parseSearchReplaceBlocks, levenshtein } from './source-diff.
 import { withKeyedLock } from '../core/keyed-lock.js';
 import { choiceOf, noulOf, type DecisionQuestion } from '../llm/decision.js';
 import { criterion, instruction } from '../core/decision-questions.js';
+import { plannedStepBudget } from '../core/step-budget.js';
 import * as acorn from 'acorn';
 
 const log = new Log('OBJECT-CREATOR');
@@ -3571,6 +3572,7 @@ ${source}
         explicitTaskId: explicitTaskId ?? tupleId,
         // No dispatcher named the kind: a decision model may judge it (and a target).
         inferKind: requested === undefined,
+        plannedMaxSteps: data?.maxSteps,
       });
       return DEFERRED_REPLY;
     });
@@ -3727,6 +3729,8 @@ ${source}
      * An explicit kind or target is never overridden.
      */
     inferKind?: boolean;
+    /** The planner's step budget for this task, clamped to ObjectCreator's range. */
+    plannedMaxSteps?: unknown;
   }): Promise<void> {
     if (!this.agentAbjectId) {
       const result: CreationResult = { success: false, error: 'AgentAbject not available' };
@@ -3824,7 +3828,7 @@ ${source}
             // call-orchestration tasks: discovery + drafting + validate
             // cycles + deploy + behavioral/visual verification. AgentAbject
             // additionally grants progress-aware extensions at the cap.
-            maxSteps: 45,
+            maxSteps: plannedStepBudget(args.plannedMaxSteps, { min: 20, default: 45, max: 80 }),
             timeout: 600000,
             queueName: `object-creator-${taskId}`,
           },

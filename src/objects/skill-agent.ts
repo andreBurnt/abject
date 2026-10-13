@@ -21,6 +21,8 @@ import { choiceOf, noulOf } from '../llm/decision.js';
 import type { DecisionQuestion, DecisionText } from '../llm/decision.js';
 import { askScopeQuestions, criterion, instruction } from '../core/decision-questions.js';
 import { Log } from '../core/timed-log.js';
+import { runtimeFault } from '../core/runtime-fault.js';
+import { plannedStepBudget } from '../core/step-budget.js';
 
 const log = new Log('SkillAgent');
 
@@ -314,7 +316,7 @@ When invited to contribute to a Sprint Plan, describe the specific task I could 
 
     // ── TupleSpace dispatch handler ──
     this.on('executeTask', async (msg: AbjectMessage) => {
-      const { tupleId, taskId: explicitTaskId, goalId, description, approach, failureHistory } = msg.payload as {
+      const { tupleId, taskId: explicitTaskId, goalId, description, data, approach, failureHistory } = msg.payload as {
         tupleId: string; taskId?: string; goalId?: string; description: string;
         data?: Record<string, unknown>; type: string; approach?: string;
         failureHistory?: Array<{ agent: string; error: string }>;
@@ -362,7 +364,8 @@ When invited to contribute to a Sprint Plan, describe the specific task I could 
             dispatchTupleId: tupleId,
             initialMessages: initialMessages.length > 0 ? initialMessages : undefined,
             config: {
-              maxSteps: 15,
+              // The planner may size the task; SkillAgent keeps 5 to 40 steps.
+              maxSteps: plannedStepBudget(data?.maxSteps, { min: 5, default: 15, max: 40 }),
               timeout: 300000,
               queueName: `skill-agent-${taskId}`,
             },
@@ -429,11 +432,11 @@ When invited to contribute to a Sprint Plan, describe the specific task I could 
     // Forward progress to GoalManager so Chat's timeout resets during long operations.
     this.on('progress', (msg: AbjectMessage) => {
       this.resetPendingTicketTimeouts((msg.payload as { taskId?: string } | undefined)?.taskId);
-      // Progress arrives untagged, so it cannot be attributed to one task by
-      // inspection. With several running, every live goal is genuinely being
-      // worked on and each needs its timer reset, so all of them hear about it
-      // — but the message itself belongs to whichever task emitted it, so it
-      // is only quoted when there is no ambiguity about whose it is.
+      // AgentAbject tags its keep-alives with the task's id (streaming, each
+      // think, a running submit_job), so only that task's watchdog resets.
+      // Untagged progress bubbling up from a sub-call is covered by the
+      // agentAct heartbeat instead. The goal line quotes the message only
+      // when it can be attributed to one task.
       if (this.goalManagerId) {
         const payload = msg.payload as { taskId?: string; phase?: string; message?: string } | undefined;
         const goals = new Set<string>();
@@ -1669,7 +1672,7 @@ When using curl, use -s (silent) and pipe JSON through jq.
       entry.timer = this.setTimer(() => {
         this.pendingTickets.delete(ticketId);
         if (this.agentAbjectId) {
-          this.send(request(this.id, this.agentAbjectId, 'cancelTask', { taskId: ticketId }));
+          this.send(request(this.id, this.agentAbjectId, 'cancelTask', { taskId: ticketId, reason: runtimeFault('inactivity-timeout', 'no progress reached SkillAgent within its inactivity window') }));
         }
         entry.reject(new Error(`Task ${ticketId} timed out after ${entry.timeoutMs}ms of inactivity`));
       }, entry.timeoutMs);
@@ -1683,7 +1686,7 @@ When using curl, use -s (silent) and pipe JSON through jq.
       const makeTimer = () => this.setTimer(() => {
         this.pendingTickets.delete(ticketId);
         if (this.agentAbjectId) {
-          this.send(request(this.id, this.agentAbjectId, 'cancelTask', { taskId: ticketId }));
+          this.send(request(this.id, this.agentAbjectId, 'cancelTask', { taskId: ticketId, reason: runtimeFault('inactivity-timeout', 'no progress reached SkillAgent within its inactivity window') }));
         }
         reject(new Error(`Task ${ticketId} timed out after ${timeout}ms of inactivity`));
       }, timeout);

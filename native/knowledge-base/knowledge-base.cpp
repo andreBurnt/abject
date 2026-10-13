@@ -68,6 +68,24 @@ static constexpr int64_t ARCHIVED_PURGE_DAYS = 180;
 static constexpr size_t MAX_DECLARATIONS = 20;
 /// Recent no_effect/harmful applications returned with a woven pattern.
 static constexpr size_t MAX_COUNTEREXAMPLES = 3;
+/// Read counters (accessCount, lastAccessedAt) for every entry, kept in one
+/// small key. A read updates this map instead of rewriting the entry, which
+/// for a belief with a long learning history was megabytes per recall.
+static const char* ACCESS_KEY = "knowledge-base:access";
+static constexpr int64_t ACCESS_FLUSH_MS = 60LL * 1000;
+/// A belief's learning history: the newest receipts stay whole, older ones
+/// keep identity, action and evidence digests, and past RECEIPTS_KEPT the
+/// oldest fold into a tally whose effect ids still identify them for sync.
+static constexpr size_t RECEIPTS_KEPT_WHOLE = 20;
+static constexpr size_t RECEIPTS_KEPT = 200;
+/// A pattern's recorded uses, compacted the same way.
+static constexpr size_t APPLICATIONS_KEPT_WHOLE = 40;
+static constexpr size_t APPLICATIONS_KEPT = 400;
+static constexpr size_t OBSERVATIONS_KEPT = 100;
+static constexpr size_t FEEDBACK_IDS_KEPT = 200;
+/// Text kept per field of an evidence digest, and of a receipt's prior text.
+static constexpr size_t EVIDENCE_TEXT_CAP = 400;
+static constexpr size_t BEFORE_CONTENT_CAP = 8000;
 
 // ── Entry model (JSON shape of KnowledgeEntry in src/core/knowledge.ts) ─
 
@@ -96,6 +114,26 @@ static bool bool_or(const json& p, const char* key, bool dflt) {
 }
 static int64_t int_or(const json& p, const char* key, int64_t dflt) {
   return (p.contains(key) && p[key].is_number()) ? p[key].get<int64_t>() : dflt;
+}
+
+/// Every receipt a learning record holds, by effect id: whole and compacted
+/// receipts in history, and the ones folded into its tally.
+static std::set<std::string> learning_receipt_ids(const json& learning) {
+  std::set<std::string> ids;
+  if (!learning.is_object()) return ids;
+  if (learning.contains("history") && learning["history"].is_array()) {
+    for (const auto& r : learning["history"]) {
+      const auto id = r.is_object() ? str_or(r, "effectId", "") : std::string();
+      if (!id.empty()) ids.insert(id);
+    }
+  }
+  if (learning.contains("rolledUp") && learning["rolledUp"].is_object()) {
+    const json& rolled = learning["rolledUp"];
+    if (rolled.contains("effectIds") && rolled["effectIds"].is_array()) {
+      for (const auto& v : rolled["effectIds"]) if (v.is_string()) ids.insert(v.get<std::string>());
+    }
+  }
+  return ids;
 }
 
 struct Entry {
@@ -133,14 +171,15 @@ struct Entry {
     }
     return true;
   }
+  /// A copy from a peer may replace this entry only if it keeps every
+  /// receipt this one holds. Receipts are matched by effect id, not by
+  /// content: a compacted receipt and the whole one it came from are the
+  /// same receipt.
   bool preserves_learning(const json& incoming) const {
     if (!learning.is_object()) return true;
     if (!incoming.is_object() || int_or(incoming, "revision", -1) < int_or(learning, "revision", 0)) return false;
-    for (const auto& h : learning.value("history", json::array())) {
-      bool found = false;
-      for (const auto& r : incoming.value("history", json::array())) if (r == h) found = true;
-      if (!found) return false;
-    }
+    const auto theirs = learning_receipt_ids(incoming);
+    for (const auto& id : learning_receipt_ids(learning)) if (!theirs.count(id)) return false;
     return true;
   }
 
@@ -251,6 +290,204 @@ static std::string clip_utf8(const std::string& s, size_t max_bytes) {
   return s.substr(0, end);
 }
 
+// ── Learning provenance, kept small ─────────────────────────────────────
+//
+// A receipt records why a belief changed. What it needs to say that is the
+// prediction-level evidence: what was expected, what happened, the verdict,
+// the reviewer's explanation and what it blamed. Whole task transcripts and
+// raw results stay in GoalManager's evidence store, reachable by hash;
+// copying them into every receipt made one belief carry megabytes. The
+// digest fields match evidenceDigest in src/core/evidence.ts.
+
+static std::string clipped_text(const json& v) {
+  return clip_utf8(v.is_string() ? v.get<std::string>() : v.dump(), EVIDENCE_TEXT_CAP);
+}
+
+static json evidence_digest(const json& record) {
+  json d = json::object();
+  if (!record.is_object()) { d["value"] = clipped_text(record); return d; }
+  for (const char* key : {"taskId", "step", "action", "outcome", "verdict", "phase", "revision", "missed", "agentName"}) {
+    if (!record.contains(key)) continue;
+    const json& v = record[key];
+    if (v.is_string()) d[key] = clip_utf8(v.get<std::string>(), EVIDENCE_TEXT_CAP);
+    else if (v.is_number() || v.is_boolean()) d[key] = v;
+  }
+  for (const char* key : {"expect", "explanation", "error", "result", "actual"}) {
+    if (record.contains(key) && !record[key].is_null()) d[key] = clipped_text(record[key]);
+  }
+  if (record.contains("attribution") && record["attribution"].is_object()) {
+    const json& a = record["attribution"];
+    d["attribution"] = a.dump().size() <= EVIDENCE_TEXT_CAP ? a : json{{"source", str_or(a, "source", "")}};
+  }
+  return d;
+}
+
+/// Evidence as a receipt keeps it. GoalManager sends {hash, digest} per
+/// reference; decisions recorded before that sent whole records, which are
+/// reduced here to the same digest (without a hash, since none was taken).
+static json slim_evidence(const json& evidence) {
+  json out = json::object();
+  if (!evidence.is_object()) return out;
+  for (const auto& [ref, value] : evidence.items()) {
+    if (value.is_object() && value.contains("digest")) { out[ref] = value; continue; }
+    out[ref] = {{"digest", evidence_digest(value)}};
+  }
+  return out;
+}
+
+/// The entry as it stood before a change: its text and identity, without
+/// the learning record (the receipt is part of it) and, for a pattern,
+/// without the pattern's own recorded uses and revisions.
+static json slim_before(json before) {
+  if (!before.is_object()) return before;
+  before.erase("learning");
+  std::string content = str_or(before, "content", "");
+  if (str_or(before, "type", "") == "pattern") {
+    if (auto p = kbpat::read(content, str_or(before, "title", ""))) {
+      p->learning = nullptr;
+      content = p->to_json().dump();
+    }
+  }
+  if (content.size() > BEFORE_CONTENT_CAP) {
+    before["contentChars"] = static_cast<int64_t>(content.size());
+    content = clip_utf8(content, BEFORE_CONTENT_CAP);
+  }
+  before["content"] = content;
+  return before;
+}
+
+/// Bound a belief's learning history (see RECEIPTS_KEPT_WHOLE). Returns
+/// whether anything changed. Idempotent: compacting twice changes nothing.
+static bool compact_learning(json& learning) {
+  if (!learning.is_object() || !learning.contains("history") || !learning["history"].is_array()) return false;
+  bool changed = false;
+  json& history = learning["history"];
+  for (auto& r : history) {
+    if (!r.is_object()) continue;
+    if (r.contains("evidence")) {
+      json slim = slim_evidence(r["evidence"]);
+      if (slim != r["evidence"]) { r["evidence"] = std::move(slim); changed = true; }
+    }
+    if (r.contains("before") && r["before"].is_object()) {
+      json slim = slim_before(r["before"]);
+      if (slim != r["before"]) { r["before"] = std::move(slim); changed = true; }
+    }
+  }
+  const size_t n = history.size();
+  for (size_t i = 0; n > RECEIPTS_KEPT_WHOLE && i < n - RECEIPTS_KEPT_WHOLE; i++) {
+    json& r = history[i];
+    if (!r.is_object() || bool_or(r, "compacted", false)) continue;
+    json slim = {{"compacted", true}};
+    for (const char* key : {"effectId", "decisionId", "goalId", "revision", "at"}) if (r.contains(key)) slim[key] = r[key];
+    if (r.contains("input") && r["input"].is_object()) slim["action"] = str_or(r["input"], "action", "");
+    if (r.contains("evidence")) slim["evidence"] = r["evidence"];
+    r = std::move(slim);
+    changed = true;
+  }
+  if (history.size() > RECEIPTS_KEPT) {
+    json& rolled = learning["rolledUp"];
+    if (!rolled.is_object()) rolled = json::object();
+    if (!rolled.contains("effectIds") || !rolled["effectIds"].is_array()) rolled["effectIds"] = json::array();
+    if (!rolled.contains("actions") || !rolled["actions"].is_object()) rolled["actions"] = json::object();
+    const size_t drop = history.size() - RECEIPTS_KEPT;
+    for (size_t i = 0; i < drop; i++) {
+      const json& r = history[i];
+      if (!r.is_object()) continue;
+      const auto id = str_or(r, "effectId", "");
+      if (!id.empty()) rolled["effectIds"].push_back(id);
+      const auto action = str_or(r, "action", r.contains("input") && r["input"].is_object() ? str_or(r["input"], "action", "") : "");
+      if (!action.empty()) rolled["actions"][action] = int_or(rolled["actions"], action.c_str(), 0) + 1;
+      rolled["count"] = int_or(rolled, "count", 0) + 1;
+      const int64_t at = int_or(r, "at", 0);
+      if (at && (!rolled.contains("firstAt") || int_or(rolled, "firstAt", at) > at)) rolled["firstAt"] = at;
+      if (at > int_or(rolled, "lastAt", 0)) rolled["lastAt"] = at;
+    }
+    history.erase(history.begin(), history.begin() + static_cast<std::ptrdiff_t>(drop));
+    changed = true;
+  }
+  return changed;
+}
+
+/// Bound a pattern's own learning record: recorded uses (newest whole, older
+/// compacted, the oldest folded into verdict tallies), reviewer observations
+/// and usefulness operation ids. Idempotent.
+static bool compact_pattern_learning(json& pl) {
+  if (!pl.is_object()) return false;
+  bool changed = false;
+  if (pl.contains("applications") && pl["applications"].is_array()) {
+    json& apps = pl["applications"];
+    const size_t n = apps.size();
+    for (size_t i = 0; n > APPLICATIONS_KEPT_WHOLE && i < n - APPLICATIONS_KEPT_WHOLE; i++) {
+      json& a = apps[i];
+      if (!a.is_object() || bool_or(a, "compacted", false)) continue;
+      json slim = {{"compacted", true}};
+      for (const char* key : {"id", "goalId", "verdict", "patternRevision", "at"}) if (a.contains(key)) slim[key] = a[key];
+      for (const char* key : {"context", "declaredContext", "evidence"}) if (a.contains(key) && a[key].is_string()) slim[key] = clip_utf8(a[key].get<std::string>(), 200);
+      if (a.contains("declarations") && a["declarations"].is_array()) slim["declarationCount"] = static_cast<int64_t>(a["declarations"].size());
+      a = std::move(slim);
+      changed = true;
+    }
+    if (apps.size() > APPLICATIONS_KEPT) {
+      json& rolled = pl["rolledUp"];
+      if (!rolled.is_object()) rolled = json::object();
+      if (!rolled.contains("verdicts") || !rolled["verdicts"].is_object()) rolled["verdicts"] = json::object();
+      const size_t drop = apps.size() - APPLICATIONS_KEPT;
+      for (size_t i = 0; i < drop; i++) {
+        const auto verdict = apps[i].is_object() ? str_or(apps[i], "verdict", "applied") : std::string("applied");
+        rolled["verdicts"][verdict] = int_or(rolled["verdicts"], verdict.c_str(), 0) + 1;
+        rolled["applications"] = int_or(rolled, "applications", 0) + 1;
+      }
+      apps.erase(apps.begin(), apps.begin() + static_cast<std::ptrdiff_t>(drop));
+      changed = true;
+    }
+  }
+  if (pl.contains("observations") && pl["observations"].is_array() && pl["observations"].size() > OBSERVATIONS_KEPT) {
+    json& obs = pl["observations"];
+    obs.erase(obs.begin(), obs.begin() + static_cast<std::ptrdiff_t>(obs.size() - OBSERVATIONS_KEPT));
+    changed = true;
+  }
+  if (pl.contains("feedbackIds") && pl["feedbackIds"].is_array() && pl["feedbackIds"].size() > FEEDBACK_IDS_KEPT) {
+    json& ids = pl["feedbackIds"];
+    ids.erase(ids.begin(), ids.begin() + static_cast<std::ptrdiff_t>(ids.size() - FEEDBACK_IDS_KEPT));
+    changed = true;
+  }
+  return changed;
+}
+
+/// What readers of an entry get of its learning record unless they ask for
+/// the whole history: revision and scope, the live disputes and
+/// supersessions, and how many receipts stand behind it.
+static json learning_summary(const json& learning) {
+  if (!learning.is_object()) return learning;
+  json s = {{"revision", int_or(learning, "revision", 0)}};
+  if (!str_or(learning, "scope", "").empty()) s["scope"] = learning["scope"];
+  for (const char* key : {"disputes", "supersessions"}) {
+    s[key] = learning.contains(key) && learning[key].is_array() ? learning[key] : json::array();
+  }
+  int64_t receipts = learning.contains("history") && learning["history"].is_array() ? static_cast<int64_t>(learning["history"].size()) : 0;
+  if (learning.contains("rolledUp") && learning["rolledUp"].is_object()) receipts += int_or(learning["rolledUp"], "count", 0);
+  s["receipts"] = receipts;
+  s["historyOmitted"] = true;
+  return s;
+}
+
+/// An entry as change events carry it: whole, except that its learning
+/// history is summarized (subscribers render entries, not receipts).
+static json event_json(const Entry& e) {
+  json j = e.to_json();
+  if (e.learning.is_object()) j["learning"] = learning_summary(e.learning);
+  return j;
+}
+
+/// An entry as a reader gets it. The learning history comes only on request
+/// (includeLearning); the summary keeps revision, scope, disputes and
+/// supersessions, which is all an agent or prompt uses.
+static json presented_json(const Entry& e, bool include_learning) {
+  json j = e.to_presented_json();
+  if (!include_learning && e.learning.is_object()) j["learning"] = learning_summary(e.learning);
+  return j;
+}
+
 /// Lowercase, punctuation stripped, whitespace collapsed - dedupe key.
 static std::string normalize_title(const std::string& title) {
   std::string out;
@@ -322,7 +559,7 @@ class KnowledgeBase final : public Object {
         "generative pattern-language entries with Context/Forces/Therefore "
         "sections and links to related patterns). Knowledge "
         "persists across restarts and syncs across peers.",
-        "3.7.0", "abjects:knowledge-base");
+        "3.8.0", "abjects:knowledge-base");
 
     m.method("applyLearningDecision", "Apply an authenticated journaled correction with a durable idempotent receipt")
         .param("goalId", "string", "Evidence owner goal").param("decisionId", "string", "Durable decision")
@@ -348,6 +585,8 @@ class KnowledgeBase final : public Object {
         .param("limit", "number", "Max results (default 10)", true)
         .param("scope", "string", "Explicit applicability scope", true)
         .param("previews", "boolean", "Return compact previews instead of full entries", true)
+        .param("order", "string", "Without a query: 'recent' (default) or 'worth' (user-written first, then reviewer-confirmed useful, then recent)", true)
+        .param("includeLearning", "boolean", "Include each entry's whole learning history (receipts); by default only its summary", true)
         .returns("array");
     m.method("weave",
              "Select pattern entries (type 'pattern') whose contexts match "
@@ -376,7 +615,12 @@ class KnowledgeBase final : public Object {
         .returns("array");
     m.method("get", "Fetch one full knowledge entry by id")
         .param("id", "string", "Entry ID")
+        .param("includeLearning", "boolean", "Include the entry's whole learning history (receipts); by default only its summary", true)
         .returns("object");
+    m.method("evidenceHashes",
+             "The evidence hashes the learning receipts cite, so the evidence "
+             "store keeps the bodies they refer to.")
+        .returns("array");
     m.method("forget",
              "Forget an entry by ID. A live entry is archived: hidden from recall, "
              "match, and the default list, restorable with archive({archived:false}). "
@@ -396,6 +640,7 @@ class KnowledgeBase final : public Object {
         .param("type", "string", "Filter by type", true)
         .param("limit", "number", "Max results (default 50)", true)
         .param("includeArchived", "boolean", "Include archived entries (default false)", true)
+        .param("includeLearning", "boolean", "Include each entry's whole learning history (receipts); by default only its summary", true)
         .returns("array");
     m.method("listTags",
              "List tags in use across active (non-archived) entries with "
@@ -564,9 +809,42 @@ class KnowledgeBase final : public Object {
     loaded_ = true;
     adopt_self_stamped_entries();
     heal_patterns();
+    load_access_counters();
+    compact_loaded_learning();
     log(LogLevel::Info, "KnowledgeBase (C++) loaded " +
                             std::to_string(entries_.size()) + " entries from Storage");
     distill();
+  }
+
+  /// Bound every learning record once at load. Stores written before
+  /// compaction existed held receipts that each copied whole task evidence
+  /// (entries of several megabytes); this rewrites them in the bounded form
+  /// once and is a no-op afterwards. updated_at is left alone: the claims did
+  /// not change, so a reviewer's selected version (knowledgeRef) stays valid,
+  /// and our own older mirror copy carries the same stamp and is refused.
+  void compact_loaded_learning() {
+    size_t compacted = 0, before_bytes = 0, after_bytes = 0;
+    for (auto& [id, e] : entries_) {
+      bool changed = false;
+      const size_t was = e.learning.is_object() || e.type == "pattern" ? e.to_json().dump().size() : 0;
+      if (e.learning.is_object() && compact_learning(e.learning)) changed = true;
+      if (e.type == "pattern") {
+        if (auto p = kbpat::read(e.content, e.title); p && p->learning.is_object() && compact_pattern_learning(p->learning)) {
+          e.content = p->to_json().dump();
+          changed = true;
+        }
+      }
+      if (!changed) continue;
+      compacted++;
+      before_bytes += was;
+      after_bytes += e.to_json().dump().size();
+      persist_entry(e);
+      mark_dirty(id);
+    }
+    if (compacted == 0) return;
+    request_sync();
+    log(LogLevel::Info, "Compacted the learning records of " + std::to_string(compacted) + " entries (" +
+                            std::to_string(before_bytes / 1024) + " KB to " + std::to_string(after_bytes / 1024) + " KB)");
   }
 
   /// Force a pattern body into the structured form at write time.
@@ -674,10 +952,11 @@ class KnowledgeBase final : public Object {
           {"declarations", json::array({declaration})}, {"at", now_ms()}});
       }
     }
+    compact_pattern_learning(pattern->learning);
     Entry& e = it->second;
     e.content = pattern->to_json().dump();
     e.updated_at = std::max(static_cast<int64_t>(now_ms()), e.updated_at + 1);
-    index_.add(e.id, e.title, index_text(e), e.tags); save_entry(e); changed("entryUpdated", e.to_json());
+    index_.add(e.id, e.title, index_text(e), e.tags); save_entry(e); changed("entryUpdated", event_json(e));
     req.reply({{"success", true}, {"applicationRef", ref}});
   }
 
@@ -716,12 +995,13 @@ class KnowledgeBase final : public Object {
     }
     application["at"] = now_ms();
     pattern->learning["applications"].push_back(application);
+    compact_pattern_learning(pattern->learning);
     Entry& e = it->second;
     e.content = pattern->to_json().dump();
     e.updated_at = std::max(static_cast<int64_t>(now_ms()), e.updated_at + 1);
     index_.add(e.id, e.title, index_text(e), e.tags);
     save_entry(e);
-    changed("entryUpdated", e.to_json());
+    changed("entryUpdated", event_json(e));
     req.reply({{"success", true}});
   }
 
@@ -816,7 +1096,7 @@ class KnowledgeBase final : public Object {
     e.updated_at = std::max(static_cast<int64_t>(now_ms()), e.updated_at + 1);
     index_.add(e.id, e.title, p->search_text(), e.tags);
     save_entry(e);
-    changed("entryUpdated", e.to_presented_json());
+    changed("entryUpdated", presented_json(e, false));
     log(LogLevel::Info, "Restored flattened pattern \"" + e.title + "\" from an earlier snapshot");
     return true;
   }
@@ -838,8 +1118,16 @@ class KnowledgeBase final : public Object {
       const std::string id = str_or(input, "id", ""), action = str_or(input, "action", ""), effect_id = str_or(effect, "id", "");
       auto it = entries_.find(id);
       if (it != entries_.end() && it->second.learning.is_object()) {
-        for (const auto& receipt : it->second.learning.value("history", json::array())) if (str_or(receipt, "effectId", "") == effect_id) {
-          reply_to(correlation, {{"success", true}, {"duplicate", true}, {"receipt", receipt}}); return;
+        const json& held = it->second.learning;
+        if (held.contains("history") && held["history"].is_array()) {
+          for (const auto& receipt : held["history"]) if (receipt.is_object() && str_or(receipt, "effectId", "") == effect_id) {
+            reply_to(correlation, {{"success", true}, {"duplicate", true}, {"receipt", receipt}}); return;
+          }
+        }
+        // A receipt old enough to have been folded into the tally is still
+        // this effect's receipt; answering it again keeps delivery idempotent.
+        if (learning_receipt_ids(held).count(effect_id)) {
+          reply_to(correlation, {{"success", true}, {"duplicate", true}, {"receipt", {{"effectId", effect_id}, {"decisionId", decision["id"]}, {"compacted", true}}}}); return;
         }
       }
       if (pending_learning_.count(id)) { reject("Knowledge revision is being persisted", true); return; }
@@ -848,10 +1136,15 @@ class KnowledgeBase final : public Object {
       const bool creating = action == "save_entry";
       if (creating && it != entries_.end()) { reject("Target already exists"); return; }
       if (!creating && it == entries_.end()) { reject("Knowledge target unavailable"); return; }
-      if (!creating && action != "record_pattern_application" && it->second.knowledge_ref() != str_or(input, "knowledgeRef", "")) {
+      // Pattern feedback (a recorded use's verdict, or an observation about a
+      // pattern that was shown) lands on a pattern that agents keep using, so
+      // its version moves constantly; neither rewrites the pattern's claims,
+      // so neither needs the version the reviewer read.
+      const bool pattern_feedback = action == "record_pattern_application" || action == "observe_pattern";
+      if (!creating && !pattern_feedback && it->second.knowledge_ref() != str_or(input, "knowledgeRef", "")) {
         reply_to(correlation, {{"success", false}, {"retryable", false}, {"conflict", true}, {"currentRef", it->second.knowledge_ref()}, {"error", "Selected knowledge version changed"}}); return;
       }
-      if (!creating && it->second.origin == "user" && action != "dispute_entry" && action != "confirm_entry" && action != "record_pattern_application") {
+      if (!creating && it->second.origin == "user" && action != "dispute_entry" && action != "confirm_entry" && !pattern_feedback) {
         reply_to(correlation, {{"success", false}, {"retryable", false}, {"protected", true}, {"error", "User-authored knowledge is protected; record a supported dispute instead"}}); return;
       }
       const std::string scope = str_or(input, "scope", "");
@@ -872,8 +1165,7 @@ class KnowledgeBase final : public Object {
         replacement_snapshot = {{"id", replacement->second.id}, {"knowledgeRef", replacement->second.knowledge_ref()}, {"title", replacement->second.title}, {"content", replacement->second.content}};
       }
       Entry next = creating ? Entry() : it->second;
-      json before = creating ? json(nullptr) : next.to_json();
-      if (before.is_object()) before.erase("learning");
+      const json before = creating ? json(nullptr) : slim_before(next.to_json());
       const int64_t now = std::max(static_cast<int64_t>(now_ms()), next.updated_at + 1);
       if (creating) { next.id = id; next.title = str_or(input,"title",""); next.content = str_or(input,"content",""); next.type = str_or(input,"type","learned"); next.origin = "reviewer"; next.created_by = object_id_; next.created_at = now; next.creator_peer_id = self_peer_id(); }
       if (creating || action == "update_entry") {
@@ -898,6 +1190,24 @@ class KnowledgeBase final : public Object {
           app["verdict"] = input["verdict"]; app["evidence"] = input["evidence"]; found = true;
         }
         if (!found) { reject("Unresolved application reference"); return; }
+        compact_pattern_learning(pattern->learning);
+        next.content = pattern->to_json().dump();
+      }
+      if (action == "observe_pattern") {
+        // The reviewer judged a pattern that this goal did not formally apply
+        // (it was shown, or followed without a declaration). That is weaker
+        // evidence than a recorded use: it is kept beside the uses, never
+        // counted as one, and claims no pattern revision.
+        auto pattern = next.type == "pattern" ? kbpat::read(next.content, next.title) : std::optional<kbpat::Pattern>();
+        if (!pattern) { reject("Pattern not found"); return; }
+        const auto verdict = str_or(input, "verdict", "");
+        if (!valid_feedback_verdict(verdict)) { reject("Invalid pattern usefulness verdict"); return; }
+        if (!pattern->learning.is_object()) pattern->learning = initial_learning();
+        json& observations = pattern->learning["observations"];
+        if (!observations.is_array()) observations = json::array();
+        observations.push_back({{"goalId", decision["goalId"]}, {"verdict", verdict}, {"evidence", clip_utf8(str_or(input, "evidence", ""), EVIDENCE_TEXT_CAP)},
+          {"relevance", clip_utf8(str_or(input, "relevance", "shown"), 40)}, {"effectId", effect_id}, {"at", now_ms()}});
+        compact_pattern_learning(pattern->learning);
         next.content = pattern->to_json().dump();
       }
       if (action == "archive_entry") next.archived = true;
@@ -906,9 +1216,10 @@ class KnowledgeBase final : public Object {
       if (action == "narrow_entry" || (creating && !scope.empty())) next.learning["scope"] = scope;
       next.learning["revision"] = int_or(next.learning,"revision",0) + 1;
       next.updated_at = now;
-      json receipt = {{"effectId",effect_id},{"decisionId",decision["id"]},{"goalId",decision["goalId"]},{"revision",next.learning["revision"]},{"at",now},{"before",before},{"input",input},{"evidence",decision["evidence"]}};
+      json receipt = {{"effectId",effect_id},{"decisionId",decision["id"]},{"goalId",decision["goalId"]},{"revision",next.learning["revision"]},{"at",now},{"before",before},{"input",input},{"evidence",slim_evidence(decision.contains("evidence") ? decision["evidence"] : json::object())}};
       if (!replacement_snapshot.is_null()) receipt["replacement"] = replacement_snapshot;
       next.learning["history"].push_back(receipt);
+      compact_learning(next.learning);
       pending_learning_.insert(id);
       request("@Storage", "set", {{"key",ENTRY_KEY_PREFIX + id},{"value",next.to_json()}}, [this, correlation, next, receipt, creating](const Result& saved) {
         pending_learning_.erase(next.id);
@@ -928,7 +1239,7 @@ class KnowledgeBase final : public Object {
         const bool counters_moved = merged.access_count != next.access_count || merged.useful_count != next.useful_count;
         entries_[next.id] = merged; index_.add(next.id,next.title,index_text(next),next.tags);
         if (counters_moved) persist_entry(entries_[next.id]);
-        mark_dirty(next.id); request_sync(); changed(creating ? "entryAdded" : "entryUpdated",next.to_json());
+        mark_dirty(next.id); request_sync(); changed(creating ? "entryAdded" : "entryUpdated", event_json(next));
         reply_to(correlation, {{"success",true},{"receipt",receipt}});
       });
     });
@@ -940,6 +1251,24 @@ class KnowledgeBase final : public Object {
     on("beginPatternApplication", [this](Request& req) { application_receipt(req, false); });
     on("assessPatternApplication", [this](Request& req) { application_receipt(req, true); });
     on("recordPatternApplication", [this](Request& req) { record_pattern_application(req); });
+    // The evidence hashes every receipt cites, so GoalManager's evidence
+    // store keeps those bodies when it sweeps the ones nothing references.
+    on("evidenceHashes", [this](Request& req) {
+      std::set<std::string> hashes;
+      for (const auto& [_, e] : entries_) {
+        if (!e.learning.is_object() || !e.learning.contains("history") || !e.learning["history"].is_array()) continue;
+        for (const auto& r : e.learning["history"]) {
+          if (!r.is_object() || !r.contains("evidence") || !r["evidence"].is_object()) continue;
+          for (const auto& [ref, v] : r["evidence"].items()) {
+            const auto hash = v.is_object() ? str_or(v, "hash", "") : std::string();
+            if (!hash.empty()) hashes.insert(hash);
+          }
+        }
+      }
+      json out = json::array();
+      for (const auto& h : hashes) out.push_back(h);
+      req.reply(std::move(out));
+    });
     on("patternHistory", [this](Request& req) {
       const auto it = entries_.find(str_or(req.payload(), "id", ""));
       const auto pattern = it != entries_.end() && it->second.type == "pattern"
@@ -950,6 +1279,7 @@ class KnowledgeBase final : public Object {
       const json& p = req.payload();
       const std::string kind = p.contains("data") && p["data"].is_object() ? str_or(p["data"], "kind", "") : "";
       if (kind == "sync") { sync_wakeup_armed_ = false; flush_sync(static_cast<int64_t>(now_ms())); }
+      if (kind == "access") flush_access();
     });
     on("recall", [this](Request& req) { handle_recall(req); });
     on("weave", [this](Request& req) { handle_weave(req); });
@@ -960,9 +1290,7 @@ class KnowledgeBase final : public Object {
       auto it = entries_.find(id);
       if (it == entries_.end()) { req.reply(nullptr); return; }
       touch(it->second);
-      persist_entry(it->second);
-      flush_sync(static_cast<int64_t>(now_ms()));
-      req.reply(it->second.to_presented_json());
+      req.reply(presented_json(it->second, bool_or(req.payload(), "includeLearning", false)));
     });
 
     on("forget", [this](Request& req) {
@@ -980,7 +1308,7 @@ class KnowledgeBase final : public Object {
         e.archived = true;
         e.updated_at = std::max(static_cast<int64_t>(now_ms()), e.updated_at + 1);
         save_entry(e);
-        changed("entryUpdated", e.to_json());
+        changed("entryUpdated", event_json(e));
         log(LogLevel::Info, "Forgot (archived): \"" + e.title + "\"");
         req.reply({{"success", true}, {"archived", true}});
         return;
@@ -1007,7 +1335,8 @@ class KnowledgeBase final : public Object {
       std::vector<const Entry*> results = filtered_by_recency(type, {}, include_archived);
       if (results.size() > max) results.resize(max);
       json out = json::array();
-      for (const Entry* e : results) out.push_back(e->to_presented_json());
+      const bool include_learning = bool_or(p, "includeLearning", false);
+      for (const Entry* e : results) out.push_back(presented_json(*e, include_learning));
       req.reply(std::move(out));
     });
 
@@ -1052,6 +1381,7 @@ class KnowledgeBase final : public Object {
             auto& ids = pattern->learning["feedbackIds"];
             if (std::find(ids.begin(), ids.end(), json(operation)) != ids.end()) continue;
             ids.push_back(operation);
+            compact_pattern_learning(pattern->learning);
             it->second.content = pattern->to_json().dump();
           }
         }
@@ -1059,7 +1389,7 @@ class KnowledgeBase final : public Object {
         it->second.last_useful_at = now;
         persist_entry(it->second);
         mark_dirty(it->second.id);
-        changed("entryUpdated", it->second.to_json());
+        changed("entryUpdated", event_json(it->second));
         marked++;
       }
       if (marked > 0) request_sync();
@@ -1082,7 +1412,7 @@ class KnowledgeBase final : public Object {
       e.archived = bool_or(p, "archived", true);
       e.updated_at = std::max(static_cast<int64_t>(now_ms()), e.updated_at + 1);
       save_entry(e);
-      changed("entryUpdated", e.to_json());
+      changed("entryUpdated", event_json(e));
       log(LogLevel::Info,
           std::string(e.archived ? "Archived" : "Restored") + ": \"" + e.title + "\"");
       req.reply({{"success", true}});
@@ -1176,7 +1506,7 @@ class KnowledgeBase final : public Object {
       existing->updated_at = std::max(now, existing->updated_at + 1);
       index_.add(existing->id, existing->title, index_text(*existing), existing->tags);
       save_entry(*existing);
-      changed("entryUpdated", existing->to_json());
+      changed("entryUpdated", event_json(*existing));
       log(LogLevel::Info, "Updated knowledge: \"" + title + "\" (" + type + ")");
       req.reply({{"id", existing->id}});
       maybe_distill(now);
@@ -1245,7 +1575,20 @@ class KnowledgeBase final : public Object {
         if (rows.size() >= max) break;
       }
     } else {
-      for (const Entry* e : filtered_by_recency(type, tag_filter, false)) {
+      // Without a query the candidates are ordered by recency, or by worth
+      // when asked: what the user wrote first, then what reviewers found
+      // useful, then recency. A prompt that injects the top N of a tag (the
+      // About the User block) wants worth, or an old identity fact loses its
+      // place to whatever was updated last.
+      std::vector<const Entry*> candidates = filtered_by_recency(type, tag_filter, false);
+      if (str_or(p, "order", "") == "worth") {
+        std::stable_sort(candidates.begin(), candidates.end(), [](const Entry* a, const Entry* b) {
+          const bool au = a->origin == "user", bu = b->origin == "user";
+          if (au != bu) return au;
+          return a->useful_count > b->useful_count;
+        });
+      }
+      for (const Entry* e : candidates) {
         if (!e->applicable(scope)) continue;
         // Patterns are stored as JSON; the snippet shows the prose a reader sees.
         const std::string shown = e->type == "pattern" ? e->to_presented_json()["content"].get<std::string>() : e->content;
@@ -1254,27 +1597,22 @@ class KnowledgeBase final : public Object {
       }
     }
 
-    // Bump access counts on returned entries (each bump persists only that
-    // entry).
-    const int64_t now = static_cast<int64_t>(now_ms());
-    for (auto& row : rows) {
-      Entry& live = entries_[row.entry->id];
-      live.access_count++;
-      live.last_accessed_at = now;
-      persist_entry(live);
-    }
-    flush_sync(now);
+    // Count the read. Counters live in one small key (see ACCESS_KEY); the
+    // entries themselves are not rewritten by a read.
+    for (auto& row : rows) touch(entries_[row.entry->id]);
+    const bool include_learning = bool_or(p, "includeLearning", false);
 
     json out = json::array();
     for (const auto& row : rows) {
       if (previews) {
         json preview = {{"id", row.entry->id},   {"title", row.entry->title},
                         {"type", row.entry->type}, {"tags", row.entry->tags},
-                        {"snippet", row.entry->learning.is_object() ? clip_utf8(row.entry->to_presented_json()["content"].get<std::string>(), 240) : row.snippet}, {"knowledgeRef", row.entry->knowledge_ref()}, {"learning", row.entry->learning}};
+                        {"snippet", row.entry->learning.is_object() ? clip_utf8(row.entry->to_presented_json()["content"].get<std::string>(), 240) : row.snippet}, {"knowledgeRef", row.entry->knowledge_ref()},
+                        {"learning", include_learning ? row.entry->learning : learning_summary(row.entry->learning)}};
         if (row.scored) preview["score"] = row.score;
         out.push_back(std::move(preview));
       } else {
-        json full = row.entry->to_presented_json();
+        json full = presented_json(*row.entry, include_learning);
         full["snippet"] = row.snippet;
         if (row.scored) full["score"] = row.score;
         out.push_back(std::move(full));
@@ -1445,10 +1783,8 @@ class KnowledgeBase final : public Object {
     json patterns = json::array();
     for (const auto& w : selected) {
       if (w.seed) continue;
-      w.entry->access_count++;
-      w.entry->last_accessed_at = now;
-      persist_entry(*w.entry);
-      json full = w.entry->to_presented_json();
+      touch(*w.entry);
+      json full = presented_json(*w.entry, false);
       if (w.scored) {
         full["snippet"] = w.snippet;
         full["score"] = w.score;
@@ -1516,10 +1852,8 @@ class KnowledgeBase final : public Object {
     json out = json::array();
     for (const Entry* e : results) {
       Entry& live = entries_[e->id];
-      live.access_count++;
-      live.last_accessed_at = now;
-      persist_entry(live);
-      out.push_back(live.to_presented_json());
+      touch(live);
+      out.push_back(presented_json(live, false));
     }
     flush_sync(now);
 
@@ -1582,7 +1916,7 @@ class KnowledgeBase final : public Object {
     e.updated_at = std::max(now, e.updated_at + 1);
     index_.add(e.id, e.title, index_text(e), e.tags);
     save_entry(e);
-    changed("entryUpdated", e.to_json());
+    changed("entryUpdated", event_json(e));
     log(LogLevel::Info, "Updated: \"" + e.title + "\"");
     req.reply({{"success", true}});
     maybe_distill(now);
@@ -1655,6 +1989,49 @@ class KnowledgeBase final : public Object {
   void touch(Entry& e) {
     e.access_count++;
     e.last_accessed_at = static_cast<int64_t>(now_ms());
+    schedule_access_flush();
+  }
+
+  // ── Read counters ──────────────────────────────────────────────────────
+  //
+  // Reads are the commonest operation and change only two counters, so they
+  // are written as one small map at most once per ACCESS_FLUSH_MS instead of
+  // rewriting each entry read. An entry's own accessCount catches up the
+  // next time the entry is saved for a real change, and on load the map wins
+  // wherever it is ahead.
+
+  bool access_dirty_ = false;
+  bool access_wakeup_armed_ = false;
+
+  void schedule_access_flush() {
+    access_dirty_ = true;
+    if (access_wakeup_armed_) return;
+    access_wakeup_armed_ = true;
+    request("@Timer", "setTimeout", {{"delayMs", ACCESS_FLUSH_MS}, {"data", {{"kind", "access"}}}},
+            [this](const Result& r) { if (!r.ok) access_wakeup_armed_ = false; });
+  }
+
+  void flush_access() {
+    access_wakeup_armed_ = false;
+    if (!access_dirty_ || !loaded_) return;
+    access_dirty_ = false;
+    json counters = json::object();
+    for (const auto& [id, e] : entries_) {
+      if (e.access_count > 0) counters[id] = json::array({e.access_count, e.last_accessed_at});
+    }
+    request("@Storage", "set", {{"key", ACCESS_KEY}, {"value", std::move(counters)}}, [](const Result&) {});
+  }
+
+  void load_access_counters() {
+    request("@Storage", "get", {{"key", ACCESS_KEY}}, [this](const Result& r) {
+      if (!r.ok || !r.payload.is_object()) return;
+      for (const auto& [id, v] : r.payload.items()) {
+        auto it = entries_.find(id);
+        if (it == entries_.end() || !v.is_array() || v.size() != 2 || !v[0].is_number() || !v[1].is_number()) continue;
+        it->second.access_count = std::max(it->second.access_count, v[0].get<int64_t>());
+        it->second.last_accessed_at = std::max(it->second.last_accessed_at, v[1].get<int64_t>());
+      }
+    });
   }
 
   // ── Persistence + sync ─────────────────────────────────────────────────
@@ -1840,7 +2217,7 @@ class KnowledgeBase final : public Object {
     index_.add(re.id, re.title, index_text(re), re.tags);
     entries_[id] = std::move(re);
     persist_entry(entries_[id]);
-    changed(is_new ? "entryAdded" : "entryUpdated", entries_[id].to_json());
+    changed(is_new ? "entryAdded" : "entryUpdated", event_json(entries_[id]));
     return true;
   }
 
@@ -1888,7 +2265,7 @@ class KnowledgeBase final : public Object {
         index_.add(re.id, re.title, index_text(re), re.tags);
         entries_[rid] = std::move(re);
         persist_entry(entries_[rid]);
-        changed(is_new ? "entryAdded" : "entryUpdated", entries_[rid].to_json());
+        changed(is_new ? "entryAdded" : "entryUpdated", event_json(entries_[rid]));
         merged++;
       }
     }
@@ -1916,10 +2293,10 @@ class KnowledgeBase final : public Object {
     if (e.learning.is_object() || pending_learning_.count(e.id)) return true;
     if (e.origin == "user") return true;
     if (e.type == "pattern") return true;
-    if (e.type == "fact") {
-      for (const auto& t : e.tags) {
-        if (t == "user" || t == "person") return true;
-      }
+    for (const auto& t : e.tags) {
+      // Facts about the person (the About the User block reads 'profile').
+      if (t == "profile") return true;
+      if (e.type == "fact" && (t == "user" || t == "person")) return true;
     }
     return e.useful_count > 0;
   }

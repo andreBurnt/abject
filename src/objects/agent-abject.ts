@@ -463,6 +463,14 @@ interface TaskEntry {
   /** Per-task addendum from the caller, placed after the cache breakpoint. */
   taskPrompt?: string;
   /**
+   * Extra words the knowledge recall searches with, beside the task text: a
+   * caller's conversation context (Chat sends the recent user turns), and the
+   * goal's own title and description for a goal task, so recall matches the
+   * user's words and not only a planner's paraphrase.
+   */
+  recallContext?: string;
+  goalRecallText?: string;
+  /**
    * How many leading system messages the conversation opens with (one for
    * the cacheable prefix, one for the volatile remainder, or fewer when a
    * half is empty). Trimming reads this instead of assuming a single system
@@ -542,6 +550,8 @@ interface TaskEntry {
   dispatchTupleId?: string;
   /** Last time this task's stream emitted a keep-alive, for per-task throttling. */
   lastStreamProgressTs?: number;
+  /** Last task-tagged keep-alive sent to the caller (see keepCallerAlive). */
+  lastCallerKeepAliveTs?: number;
   /** Consecutive LLM responses that failed to parse into a valid action. Reset on every successful parse. */
   parseFailures?: number;
   /** Consecutive LLM streams that returned empty content. Reset on every non-empty response. */
@@ -898,6 +908,8 @@ export class AgentAbject extends Abject {
 
   /** submit_job pipelines may legitimately run many bus calls; give them room. */
   private static readonly SUBMIT_JOB_TIMEOUT_MS = 300000;
+  /** Keep-alive cadence to the caller while a submit_job runs (under every watchdog). */
+  private static readonly JOB_KEEPALIVE_MS = 30_000;
   /** Cap on a job result entering the conversation; jobs should aggregate. */
   private static readonly SUBMIT_JOB_RESULT_CAP = 20000;
 
@@ -1810,10 +1822,12 @@ The registered object must implement these handlers to participate in the agent 
         responseSchema,
         goalId: incomingGoalId,
         dispatchTupleId: requestedDispatchTupleId,
+        recallQuery,
       } = msg.payload as {
         agentId?: AbjectId;
         taskId?: string;
         task: string;
+        recallQuery?: string;
         systemPrompt?: string;
         taskPrompt?: string;
         initialMessages?: AgentMessage[];
@@ -1899,6 +1913,7 @@ The registered object must implement these handlers to participate in the agent 
         config,
         systemPrompt: prompt,
         taskPrompt,
+        recallContext: typeof recallQuery === 'string' && recallQuery.trim() ? recallQuery.slice(0, 1500) : undefined,
         initialMessages,
         responseSchema,
         goalId,
@@ -2204,13 +2219,15 @@ The registered object must implement these handlers to participate in the agent 
      * we scan every queue's pending list for a match.
      */
     this.on('cancelTask', async (msg: AbjectMessage) => {
-      const { taskId, agentId: hintedAgent } = msg.payload as { taskId: string; agentId?: AbjectId };
+      const { taskId, agentId: hintedAgent, reason } = msg.payload as { taskId: string; agentId?: AbjectId; reason?: unknown };
       this.cancelDescendants(taskId);
       // First check in-flight tasks
       const entry = this.taskEntries.get(taskId);
       if (entry && (entry.state.phase !== 'done' || entry.settling) && entry.state.phase !== 'error') {
         entry.state.phase = 'error';
-        entry.state.error = 'Cancelled';
+        // A caller that says why (a watchdog names a runtime fault) has that
+        // reason recorded, so a reviewer can tell the runtime from the world.
+        entry.state.error = typeof reason === 'string' && reason.trim() ? reason.slice(0, 500) : 'Cancelled';
         this.notifyAgentCancelled(entry, 'task cancelled');
         return { success: true, where: 'in-flight' };
       }
@@ -2271,7 +2288,10 @@ The registered object must implement these handlers to participate in the agent 
     });
 
     this.on('cancelTasksByGoal', async (msg: AbjectMessage) => {
-      const { goalId, preserveTaskIds = [] } = msg.payload as { goalId: string; preserveTaskIds?: string[] };
+      const { goalId, preserveTaskIds = [], reason } = msg.payload as { goalId: string; preserveTaskIds?: string[]; reason?: unknown };
+      // A replan says why (a runtime fault: the task was superseded); a
+      // person stopping the goal does not, and that reads as plain Cancelled.
+      const cancelReason = typeof reason === 'string' && reason.trim() ? reason.slice(0, 500) : 'Cancelled';
       let cancelled = 0;
       // Cancel in-flight tasks (set phase=error so the OTA loop bails at the
       // next observe/think boundary; runTaskAsync's tail will pop the next
@@ -2280,7 +2300,7 @@ The registered object must implement these handlers to participate in the agent 
         if (!preserveTaskIds.includes(taskId) && (entry.goalId === goalId || entry.incomingGoalId === goalId || entry.config.budgetGoalId === goalId)
             && (entry.state.phase !== 'done' || entry.settling) && entry.state.phase !== 'error') {
           entry.state.phase = 'error';
-          entry.state.error = 'Cancelled';
+          entry.state.error = cancelReason;
           cancelled++;
           this.cancelDescendants(taskId);
           this.notifyAgentCancelled(entry, 'goal stopped');
@@ -2391,12 +2411,7 @@ The registered object must implement these handlers to participate in the agent 
         // timer resets during long LLM calls. The self-directed progress
         // above only bubbles via _handlingRequestSenders (JobManager), which
         // doesn't reach the agent that started the task.
-        if (entry.callerId !== this.id) {
-          this.send(event(this.id, entry.callerId, 'progress', {
-            phase: 'streaming',
-            message: 'LLM thinking...',
-          }));
-        }
+        this.keepCallerAlive(entry, 'streaming', 'LLM thinking...');
       }
     });
 
@@ -2576,6 +2591,21 @@ The registered object must implement these handlers to participate in the agent 
     await this.recordPrediction(entry);
     await this.checkpointSession(entry);
     this.detectAndSteerOscillation(entry, agentName);
+  }
+
+  /**
+   * Tell the agent that started this task it is still being worked on.
+   * Delegating agents reset their inactivity watchdogs only on progress
+   * tagged with the task's id, and a submit_job chain runs entirely inside
+   * thinking with no phase change or action to reset them, so without this
+   * a working task is cancelled as idle. Throttled to one per second.
+   */
+  private keepCallerAlive(entry: TaskEntry, phase: string, message: string): void {
+    if (entry.callerId === this.id) return;
+    const now = Date.now();
+    if (now - (entry.lastCallerKeepAliveTs ?? 0) < 1000) return;
+    entry.lastCallerKeepAliveTs = now;
+    this.send(event(this.id, entry.callerId, 'progress', { taskId: entry.state.id, phase, message }));
   }
 
   private emitIntermediateAction(entry: TaskEntry): void {
@@ -3294,6 +3324,7 @@ The registered object must implement these handlers to participate in the agent 
             }
 
             log.info(`[${agentName}] Step ${task.step + 1} — thinking (awaiting LLM)`);
+            this.keepCallerAlive(entry, 'thinking', `step ${task.step + 1}`);
             const thinkResult = await this.executeStep(
               entry,
               `[${agentName}] Plan next action (step ${task.step + 1})`,
@@ -3336,7 +3367,11 @@ The registered object must implement these handlers to participate in the agent 
 
             // Local runtime actions use the same pre-action prediction and
             // observed-result ledger as domain actions, without another LLM call.
-            if (['replan', 'remember', 'recall', 'read_chunk', 'read_context'].includes(task.action.action)) {
+            // ask_user is the runtime's unless the agent declares its own (the
+            // planner's pauses the whole goal); for every other agent it asks
+            // the person and the answer is this step's result.
+            if (['replan', 'remember', 'recall', 'read_chunk', 'read_context'].includes(task.action.action)
+              || (task.action.action === 'ask_user' && !entry.config.terminalActions.ask_user)) {
               await this.executeRuntimeAction(entry, agentName);
               if (cancelledExternally()) break;
               task.step++;
@@ -3387,6 +3422,14 @@ The registered object must implement these handlers to participate in the agent 
                         agentName,
                       }));
                     }
+                    // The job runs while this task stays in thinking, so the
+                    // caller sees no phase change or action until it returns.
+                    // Keep its watchdog fed for as long as the job runs.
+                    this.keepCallerAlive(entry, 'acting', description.slice(0, 140));
+                    const jobHeartbeat = this.setRecurringTimer(
+                      () => this.keepCallerAlive(entry, 'acting', `job running: ${description.slice(0, 100)}`),
+                      AgentAbject.JOB_KEEPALIVE_MS,
+                    );
                     // submitJob replies with a JobResult envelope even for
                     // failed jobs; unwrap it so the conversation carries the
                     // job's actual return value, not the envelope.
@@ -3411,7 +3454,8 @@ The registered object must implement these handlers to participate in the agent 
                         queue: `pipeline-${entry.agentId.slice(0, 8)}`,
                       }),
                       AgentAbject.SUBMIT_JOB_TIMEOUT_MS,
-                    );
+                    ).finally(() => this.cancelTimer(jobHeartbeat));
+                    this.keepCallerAlive(entry, 'thinking', 'job finished');
                     if (cancelledExternally()) { entry.outstandingOperation = undefined; break; }
                     observed = jobReply?.status === 'completed'
                       ? { success: true, data: jobReply.result }
@@ -4700,7 +4744,7 @@ The registered object must implement these handlers to participate in the agent 
    * Build a text summary of goal + task progress for injection into the LLM context.
    * Returns empty string if no goal or no tasks.
    */
-  private async buildGoalProgressContext(goalId: string, dispatchTupleId?: string): Promise<string> {
+  private async buildGoalProgressContext(goalId: string, dispatchTupleId?: string, entry?: TaskEntry): Promise<string> {
     if (!this.goalManagerId) return '';
     try {
       const tasks = await this.request<Array<{ id: string; fields: Record<string, unknown> }>>(
@@ -4714,6 +4758,8 @@ The registered object must implement these handlers to participate in the agent 
         request(this.id, this.goalManagerId, 'getGoalBriefing', { goalId, keys: tasks?.find(t => t.id === dispatchTupleId)?.fields.consumes ?? [] }),
         5000,
       );
+      // The goal in the user's words, for the knowledge recall that follows.
+      if (entry && goal) entry.goalRecallText = [goal.title, goal.description].filter(Boolean).join('\n').slice(0, 1500);
 
       if (!tasks) return '';
 
@@ -4866,7 +4912,7 @@ When an observation or a result is too big to sit in the conversation, you get a
 **The reader is for locating and inspecting**, when you want a specific thing rather than all of them: \`grep\` to jump to it, \`outline\` to see the structure when you are unsure what to search for, \`offset\`/\`length\` to read a region in order. A grep that reports further matches it did not show is telling you the question was an all-of-them question; switch to code rather than paging on.
 
 The preview often answers the question on its own — when it does, just act.`, true);
-    add('prediction', '\n\n## Prediction\nEvery action carries an `"expect"` field: one line naming the observable outcome you expect, written before the action runs. Comparing what you expected with what happened is how this system learns, so predict routine steps too. State what you actually believe will happen, in terms the result can contradict ("the list comes back with the three saved items", "the window shows the chart"). The expectation comes from what you know: your own understanding, the knowledge and patterns in this prompt, and what earlier steps showed.\n\nThe real result comes back beside your expectation. On your next action, add `"lastPrediction": {"verdict": "held" | "missed" | "unclear", "learned": "one line"}`: your honest reading of the previous expectation against that result, and on a miss, what you now believe instead. Operation success alone does not make a free-text prediction hold, and an expected rejection can. Optionally add `"expectOutcome": "success" | "failure"` for the operation outcome itself.\n\nWhen an expectation rests on a knowledge entry shown to you, cite it: `"basis": [{"id": "<entry id>", "why": "what it told you"}]`. When you apply a pattern, declare it: `"patterns": [{"id": "<pattern id>", "why": "how its Therefore shapes this action"}]`; seeing a pattern is different from using it. The runtime tracks versions, so leave revision numbers out. Predictions, your readings of them and their citations are kept for Scrum replanning and retrospective learning. Use replan to explain material discoveries and ask relevant collaborators what should change.', true);
+    add('prediction', '\n\n## Prediction\nEvery action carries an `"expect"` field: one line naming the observable outcome you expect, written before the action runs. Comparing what you expected with what happened is how this system learns, so predict routine steps too. State what you actually believe will happen, in terms the result can contradict ("the list comes back with the three saved items", "the window shows the chart"). The expectation comes from what you know: your own understanding, the knowledge and patterns in this prompt, and what earlier steps showed.\n\nThe real result comes back beside your expectation. On your next action, add `"lastPrediction": {"verdict": "held" | "missed" | "unclear", "learned": "one line"}`: your honest reading of the previous expectation against that result, and on a miss, what you now believe instead. Operation success alone does not make a free-text prediction hold, and an expected rejection can. Optionally add `"expectOutcome": "success" | "failure"` for the operation outcome itself.\n\nWhen an expectation rests on a knowledge entry shown in this prompt, cite it in the same action: `"basis": [{"id": "<entry id>", "why": "what it told you"}]`, for example `{"action": "...", "expect": "the call lists the three saved items", "basis": [{"id": "<id from Relevant Knowledge>", "why": "it says saved items are listed newest first"}]}`. A citation is how a wrong entry gets corrected: when a cited expectation misses, the reviewer fixes the entry that misled you; an uncited miss can only be put down to your own judgment, and the entry stays as it was. When you apply a pattern, declare it: `"patterns": [{"id": "<pattern id>", "why": "how its Therefore shapes this action"}]`; seeing a pattern is different from using it. The runtime tracks versions, so leave revision numbers out. Predictions, your readings of them and their citations are kept for Scrum replanning and retrospective learning. Use replan to explain material discoveries and ask relevant collaborators what should change.', true);
 
     // Per-task addendum from the caller (task hints, the browsing goal): the
     // reason `systemPrompt` can stay identical across an agent's tasks.
@@ -4877,7 +4923,7 @@ The preview often answers the question on its own — when it does, just act.`, 
 
     // Inject goal + task progress and scratchpad into context
     if (entry.goalId && this.goalManagerId) {
-      add('goal-progress', await this.buildGoalProgressContext(entry.goalId, entry.dispatchTupleId), false);
+      add('goal-progress', await this.buildGoalProgressContext(entry.goalId, entry.dispatchTupleId, entry), false);
     }
 
     // Inject relevant knowledge from KnowledgeBase in three passes:
@@ -4896,13 +4942,20 @@ The preview often answers the question on its own — when it does, just act.`, 
       const knowledgeBaseId = await this.discoverDep('KnowledgeBase');
       if (knowledgeBaseId) {
         type KEntry = { id: string; title: string; type: string; content: string; archived?: boolean; origin?: string; usefulCount?: number; updatedAt?: number; knowledgeRef?: string; patternRef?: string; pattern?: { learning?: { revision?: number } }; counterexamples?: Array<{ verdict: string; evidence: string }> };
+        // Recall in the user's words as well as the task's: a goal's own text
+        // and the caller's conversation context join the task text, so a
+        // follow-up question or a planner's paraphrase still finds what the
+        // knowledge base holds about the subject.
+        const recallQuery = [entry.recallContext, entry.goalRecallText, entry.state.task].filter(Boolean).join('\n').slice(0, 3000);
         const [profileAll, matched, tagList, woven] = await Promise.all([
+          // Worth order inside the KnowledgeBase, before the limit: what the
+          // user wrote first, then what reviewers found useful, then recency.
           this.request<KEntry[] | null>(
-            request(this.id, knowledgeBaseId, 'recall', { tags: [PROFILE_TAG], limit: 50, scope: entry.config.knowledgeScope }),
+            request(this.id, knowledgeBaseId, 'recall', { tags: [PROFILE_TAG], limit: 50, order: 'worth', scope: entry.config.knowledgeScope }),
             5000,
           ).catch(() => null),
           this.request<KEntry[] | null>(
-            request(this.id, knowledgeBaseId, 'recall', { query: entry.state.task, limit: 5, scope: entry.config.knowledgeScope }),
+            request(this.id, knowledgeBaseId, 'recall', { query: recallQuery, limit: 5, scope: entry.config.knowledgeScope }),
             5000,
           ).catch(() => null),
           this.request<Array<{ tag: string; count: number }> | null>(
@@ -4910,7 +4963,7 @@ The preview often answers the question on its own — when it does, just act.`, 
             5000,
           ).catch(() => null),
           this.request<{ patterns?: Array<KEntry & { via?: string }> } | null>(
-            request(this.id, knowledgeBaseId, 'weave', { query: entry.state.task, limit: 3, scope: entry.config.knowledgeScope }),
+            request(this.id, knowledgeBaseId, 'weave', { query: recallQuery, limit: 3, scope: entry.config.knowledgeScope }),
             5000,
           ).catch(() => null),
         ]);
@@ -5058,6 +5111,18 @@ Variants: \`{ "action": "recall", "pattern": "ExactName|other" }\` for exact ide
       // Own separator: this used to hang off the end of the memory-tools
       // block, and the partition now stands it on its own.
       add('known-tags', `\n\nTags currently in use (with entry counts) — reuse these when remembering, and filter by them when recalling: ${entry.knownTagsLine}`, false);
+    }
+
+    // Asking the person is the runtime's own verb for every agent that does
+    // not declare an ask of its own (the planner's pauses the goal instead).
+    if (!entry.config.terminalActions.ask_user) {
+      add('ask-user', `\n\n## Asking the person (ask_user)
+
+**ask_user** action (built-in, available alongside your other actions):
+\`\`\`json
+{ "action": "ask_user", "question": "one clear question", "expect": "the person answers with ..." }
+\`\`\`
+The question goes to the person and their answer comes back as this step's result. Ask when the request leaves open a choice that changes the outcome, and before an action that acts for the person outside this system and is hard to undo (sending, posting, accepting, buying, deleting): name the action and what it will touch, then go ahead on their answer. Ask one question at a time and say what you will do under each likely answer. When nobody answers, the result says so: take the reading the request most plainly supports and say which, or stop and report what is unclear.`, true);
     }
 
     // Guidance on the built-in submit_job verb. Safe to state for every
@@ -5495,7 +5560,7 @@ This task belongs to a goal whose id is \`${entry.goalId}\` — you never need t
     let result: AgentActionResult;
     let message: string;
     try {
-      const response = await this.performRuntimeAction(entry);
+      const response = await this.performRuntimeAction(entry, agentName);
       result = response.result;
       message = response.message;
     } catch (err) {
@@ -5521,9 +5586,30 @@ This task belongs to a goal whose id is \`${entry.goalId}\` — you never need t
     task.lastResult = undefined;
   }
 
-  private async performRuntimeAction(entry: TaskEntry): Promise<{ result: AgentActionResult; message: string }> {
+  private async performRuntimeAction(entry: TaskEntry, agentName = 'An agent'): Promise<{ result: AgentActionResult; message: string }> {
     const task = entry.state;
     const action = task.action!;
+    if (action.action === 'ask_user') {
+      const question = typeof action.question === 'string' ? action.question.trim() : '';
+      if (!question) throw new Error('ask_user needs a question');
+      // DialogBroker reaches whoever answers (a window on the desktop, the
+      // abject command in a terminal). The person may take a while, so the
+      // caller hears the task is waiting on them rather than idle.
+      const waiting = () => this.keepCallerAlive(entry, 'waiting', 'waiting for the person to answer');
+      waiting();
+      const heartbeat = this.setRecurringTimer(waiting, AgentAbject.JOB_KEEPALIVE_MS);
+      let answer: string | null;
+      try {
+        answer = await this.prompt({ title: `${agentName} has a question`, message: question.slice(0, 2000), placeholder: 'Your answer' });
+      } finally {
+        this.cancelTimer(heartbeat);
+      }
+      if (answer === null || !answer.trim()) {
+        return { result: { success: true, data: { question, answered: false } },
+          message: `[No answer] Nobody answered "${question.slice(0, 200)}". Take the reading the request most plainly supports and say which one you took, or stop and report what is unclear.` };
+      }
+      return { result: { success: true, data: { question, answered: true, answer } }, message: `[Answer] ${answer}` };
+    }
     if (action.action === 'read_context') {
       const goalId = entry.goalId ?? entry.incomingGoalId;
       if (!goalId || !this.goalManagerId) throw new Error('read_context requires a goal context');

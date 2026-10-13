@@ -23,6 +23,7 @@ import { clearBrowserIdentity } from './identity-store.js';
 import type { ClientTransport } from './transport.js';
 import { startQrScanner, type QrScannerHandle } from './qr-scanner.js';
 import { InstanceSwitcher } from './instance-switcher.js';
+import { launchRendering, probeRenderer, showRendererUnavailable, showSoftwareNotice } from './render-notice.js';
 import {
   authTokenKey,
   clearAllInstances,
@@ -345,8 +346,23 @@ function start(): void {
   canvas.style.height = '100%';
   container.appendChild(canvas);
 
-  const client = new FrontendClient(canvas, backdropControl);
+  let client: FrontendClient;
+  try {
+    client = new FrontendClient(canvas, backdropControl);
+  } catch (err) {
+    // The renderer could not start (no WebGL2, most often). Say so in place
+    // of a splash that would otherwise wait forever.
+    console.error('[Frontend] the desktop renderer could not start:', err);
+    canvas.remove();
+    showRendererUnavailable(probeRenderer(), err);
+    return;
+  }
   pendingClient = client;
+
+  // Drawing in software (the desktop app relaunched without the GPU, or the
+  // browser fell back on its own) works, more slowly: the person should know.
+  const launched = launchRendering();
+  if (launched.software || probeRenderer().software) showSoftwareNotice(launched.why);
   (window as unknown as Record<string, unknown>).frontendClient = client;
 
   if (isP2PDefault()) {

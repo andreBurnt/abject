@@ -41,13 +41,33 @@ TypeScript callers read its message shapes from `src/core/knowledge.ts`
   (`getLearningEffect`) for the effect to apply; GoalManager answers only when
   the request came from TaskReviewer through the KnowledgeBase. Applied effects
   are journaled on the entry with a receipt keyed by `effectId`, so a retry is
-  answered as a duplicate.
+  answered as a duplicate. `observe_pattern` records a reviewer's verdict on a
+  pattern the goal did not formally apply (shown, or followed undeclared) in
+  the pattern's `observations`, never as a recorded use.
+- **Receipts stay small.** A receipt keeps the prediction-level evidence
+  (`{hash, digest}` per cited record: expectation, outcome, verdict,
+  explanation, attribution; GoalManager stores the whole record once under
+  `evidence:<sha256>`) and the entry's prior text without its own learning
+  record. The newest 20 receipts stay whole, older ones keep identity, action
+  and evidence, and past 200 the oldest fold into `learning.rolledUp` (counts
+  and effect ids). A pattern's recorded uses compact the same way (40 whole,
+  400 kept, the rest folded into verdict tallies). Sync compares receipts by
+  effect id, so a compacted receipt and the whole one it came from are the
+  same receipt. Stores written before this are compacted once at load, with
+  `updatedAt` unchanged so selected versions (`knowledgeRef`) stay valid.
+  `evidenceHashes` lists the hashes receipts cite, for GoalManager's sweep.
+- **Reads do not rewrite entries.** `recall`, `match`, `get` and `weave` bump
+  `accessCount` in memory and write all counters as one small key
+  (`knowledge-base:access`) at most once a minute through a `@Timer` wakeup;
+  on load the map wins wherever it is ahead of an entry. Replies carry a
+  learning summary (revision, scope, disputes, supersessions, receipt count)
+  unless `includeLearning: true` asks for the whole history.
 - **Distillation** runs on load and at most every 30 minutes, piggybacked on
   writes rather than a timer. It archives `learned` entries never accessed
   within 7 days, `learned`/`reference` entries idle for 30 days, and the least
   useful entries over the 1000-entry active cap. User-authored entries,
-  patterns, `user`/`person` facts, entries marked useful and entries with
-  learning history are never touched. Archived entries are purged after 180
+  patterns, `profile`-tagged entries, `user`/`person` facts, entries marked
+  useful and entries with learning history are never touched. Archived entries are purged after 180
   days or past 2000 archived (user-authored ones never).
 - **`ask`** is answered by the host from the manifest plus `ask-guide.md`
   (declared under `ask` in `abject.json`), at the balanced tier. The module
@@ -58,9 +78,9 @@ TypeScript callers read its message shapes from `src/core/knowledge.ts`
 | Group | Methods |
 |---|---|
 | Store | `remember` (dedup by normalized title + type; optional `origin`: user, agent, reviewer, scrum), `update` (optional `expectedRevision`), `forget` (first call archives, second deletes), `archive` |
-| Retrieve | `recall` (BM25, `previews: true` for `{id, title, snippet}`), `match` (literal or `A\|B`), `get`, `list`, `listTags`, `weave` (patterns by context, plus linked patterns; `from`, `hops` up to 2) |
+| Retrieve | `recall` (BM25, `previews: true` for `{id, title, snippet}`; without a query, `order: 'worth'` ranks user-written, then reviewer-confirmed useful, then recent), `match` (literal or `A\|B`), `get`, `list`, `listTags`, `weave` (patterns by context, plus linked patterns; `from`, `hops` up to 2); `recall`, `get` and `list` take `includeLearning` |
 | Curation | `markUseful` (bumps `usefulCount`, which protects an entry from distillation) |
-| Pattern learning | `beginPatternApplication`, `assessPatternApplication`, `recordPatternApplication`, `patternHistory`, `applyLearningDecision` |
+| Pattern learning | `beginPatternApplication`, `assessPatternApplication`, `recordPatternApplication`, `patternHistory`, `applyLearningDecision`, `evidenceHashes` |
 | Events | `entryAdded`, `entryUpdated`, `entryRemoved` |
 
 It also handles `timerFired` (its own Timer wakeup) and `changed` (SharedState

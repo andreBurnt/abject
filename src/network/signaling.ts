@@ -13,6 +13,20 @@ import { Log } from '../core/timed-log.js';
 
 const log = new Log('Signaling');
 
+/** The name a remote UI client (a phone or browser) registers under. */
+export const REMOTE_UI_CLIENT_NAME = 'remote-ui-client';
+/** The name prefix a desktop's RemoteUIAccess registers under. */
+export const UI_BRIDGE_NAME_PREFIX = 'ui-bridge:';
+
+/**
+ * True for the endpoints of the remote UI link (a UI client or a desktop's
+ * UI bridge). They speak the pairing protocol, not the peer mesh, so a mesh
+ * offer to one is never answered.
+ */
+export function isRemoteUiEndpoint(name: string | undefined): boolean {
+  return name === REMOTE_UI_CLIENT_NAME || (name ?? '').startsWith(UI_BRIDGE_NAME_PREFIX);
+}
+
 export type SignalingState = 'disconnected' | 'connecting' | 'connected' | 'error';
 
 export interface SignalingMessage {
@@ -67,6 +81,8 @@ export class SignalingClient implements SignalingRelay {
   private pingTimer?: ReturnType<typeof setInterval>;
   private static readonly PING_INTERVAL = 120_000; // 2 minutes
   private persistent = false;
+  /** Set by disconnect(): a deliberate close never reconnects. */
+  private closedByCaller = false;
   /** Resolvers awaiting an `ice-servers` reply (see requestIceServers). */
   private pendingIceResolvers: Array<(servers: RTCIceServer[]) => void> = [];
 
@@ -95,6 +111,7 @@ export class SignalingClient implements SignalingRelay {
   async connect(endpoint: string, timeoutMs = 5000): Promise<void> {
     precondition(endpoint !== '', 'endpoint is required');
     this.endpoint = endpoint;
+    this.closedByCaller = false;
     this.state = 'connecting';
 
     return new Promise((resolve, reject) => {
@@ -109,6 +126,9 @@ export class SignalingClient implements SignalingRelay {
         }
         this.state = 'error';
         reject(new Error(`Signaling connection to ${endpoint} timed out after ${timeoutMs}ms`));
+        // The handlers are detached, so no close event will retry for us. A
+        // persistent client keeps trying even when its first attempt times out.
+        if (this.persistent) this.scheduleReconnect();
       }, timeoutMs);
 
       try {
@@ -154,9 +174,16 @@ export class SignalingClient implements SignalingRelay {
    */
   async disconnect(): Promise<void> {
     this.persistent = false;
+    this.closedByCaller = true;
     this.clearReconnectTimer();
     this.stopPing();
     if (this.socket) {
+      // Detach first: the close event of a socket we closed on purpose
+      // must not schedule a reconnect.
+      this.socket.onopen = null;
+      this.socket.onerror = null;
+      this.socket.onclose = null;
+      this.socket.onmessage = null;
       this.socket.close(1000, 'Client disconnect');
       this.socket = undefined;
     }
@@ -329,6 +356,7 @@ export class SignalingClient implements SignalingRelay {
 
   private scheduleReconnect(): void {
     if (this.reconnectTimer) return;
+    if (this.closedByCaller || this.state === 'connected') return;
     if (!this.persistent && this.reconnectAttempts >= this.maxReconnectAttempts) return;
     if (!this.endpoint) return;
 
@@ -356,6 +384,9 @@ export class SignalingClient implements SignalingRelay {
             const msg = err instanceof Error ? err.message : String(err);
             log.warn(`Reconnect to ${endpoint} failed: ${msg}`);
           }
+          // A timed-out attempt detaches the socket's handlers, so no close
+          // event will follow it: the chain continues from here or not at all.
+          this.scheduleReconnect();
         });
       }
     }, delay);

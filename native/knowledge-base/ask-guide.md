@@ -1,7 +1,7 @@
 ## KnowledgeBase Usage Guide
 
 ### Three lookup modes (use them in this order)
-1. **recall** searches by keywords (BM25 full text, title-boosted). Results carry a `snippet` and `score`. Pass `previews: true` to scan cheaply, and `tags` or `type` to narrow.
+1. **recall** searches by keywords (BM25 full text, title-boosted). Results carry a `snippet` and `score`. Pass `previews: true` to scan cheaply, and `tags` or `type` to narrow. Without a query, `order: 'worth'` lists what the user wrote first, then what reviewers found useful, then the most recent.
 
   const hits = await call(await dep('KnowledgeBase'), 'recall', {
     query: 'ui preferences', limit: 5, previews: true,
@@ -11,7 +11,7 @@
 
   const exact = await call(await dep('KnowledgeBase'), 'match', { pattern: 'GraphViewer|abjects:registry' });
 
-3. **get** fetches one full entry by id. Scan with previews first, then get the winners.
+3. **get** fetches one full entry by id. Scan with previews first, then get the winners. An entry's `learning` comes as a summary (revision, scope, disputes, supersessions, how many receipts stand behind it); pass `includeLearning: true` for the receipts themselves.
 
   const entry = await call(await dep('KnowledgeBase'), 'get', { id: hits[0].id });
 

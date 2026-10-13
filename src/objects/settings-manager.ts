@@ -635,7 +635,7 @@ export class SettingsManager extends Abject {
         id: 'permissions', label: 'Permissions', description: 'What happens to a request no rule, grant or project autonomy decides.',
         fields: [{
           key: 'mode', label: 'Permission prompts', type: 'enum', options: [...PROMPT_MODES],
-          description: 'ask: wait for you to answer, on the desktop or in the terminal. allow: allow it once without asking (dangerous commands still ask). deny: deny it without asking.',
+          description: 'ask: wait for you to answer, on the desktop or in the terminal. allow: allow it once without asking (dangerous commands, website clicks that submit or activate something, and destructive MCP tools still ask). deny: deny it without asking.',
         }],
       },
     ];

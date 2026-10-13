@@ -49,6 +49,7 @@ import { boundDecisionState, choiceOf, noulOf, type DecisionQuestion } from '../
 import { criterion, instruction } from '../core/decision-questions.js';
 import type { DecisionMode } from '../core/decision-sites.js';
 import { Log } from '../core/timed-log.js';
+import { parseRuntimeFault } from '../core/runtime-fault.js';
 
 const log = new Log('TASK-REVIEWER');
 
@@ -208,7 +209,8 @@ interface ReviewTaskExtra {
   /** Plan-declared patterns whose goal-level application the KnowledgeBase holds. */
   planApplicationsRecorded?: string[];
   /** Verdicts refused because the pattern had no recorded use in the goal. */
-  ignoredApplications?: number;
+  /** Pattern verdicts with no recorded use, journaled as observations instead. */
+  observedWithoutRecordedUse?: number;
   /** Set once the goal's summary-fidelity verdict is on record. */
   summaryFidelityRecorded?: boolean;
   /** Decision-model judgments made at launch; priors in the dossier, automated records when a site acts. */
@@ -900,7 +902,12 @@ My work is internal maintenance of this workspace's memory. When invited to cont
       if (!effect.attempts && effect.input.action === 'record_pattern_application' && effect.input.application) {
         const app = effect.input.application as Record<string, unknown>;
         const bound = this.bindApplication(extra, String(effect.input.id), app);
-        if (bound) decision = await this.changeEffect(decision, effect, { prepare: { ...bound, verdict: app.verdict, evidence: app.evidence } });
+        // A verdict with no recorded use to bind to (the pattern was shown or
+        // followed without a declaration) is still evidence about the
+        // pattern: it lands as an observation beside the recorded uses.
+        decision = await this.changeEffect(decision, effect, { prepare: bound
+          ? { ...bound, verdict: app.verdict, evidence: app.evidence }
+          : { action: 'observe_pattern', verdict: app.verdict, evidence: app.evidence ?? effect.input.evidence, relevance: 'shown' } });
       }
       const ref = extra.knowledgeRefs?.[String(effect.input.id)];
       if (!effect.attempts && !effect.input.knowledgeRef && ref) decision = await this.changeEffect(decision, effect, { prepare: { knowledgeRef: ref } });
@@ -1018,11 +1025,121 @@ My work is internal maintenance of this workspace's memory. When invited to cont
     return this.changeEffect(decision, effect, { prepare: { action: 'update_entry', content: serializePattern(built.pattern), knowledgeRef: current.knowledgeRef } });
   }
 
+  /**
+   * Settle what needs no model, so only work that can still move reaches the
+   * repair queue:
+   * - a pattern verdict with no recorded use to bind to becomes an
+   *   observation about the pattern (it can never bind, and no repair could
+   *   invent the provenance it lacks);
+   * - an effect whose one repair is spent, or a repair that never reported
+   *   back within REPAIR_SETTLE_MS, is abandoned with its last error as the
+   *   reason (kept in the journal);
+   * - a delivery that ran out of attempts is retried after DELIVERY_RETRY_MS,
+   *   at most MAX_DELIVERY_RESUMES times, then abandoned;
+   * - learning paused by a stopped goal or a cancelled review and not
+   *   resumed within PAUSED_SETTLE_MS is abandoned, so the goal can archive;
+   * - a retirement whose replacement was abandoned is abandoned with it.
+   */
+  private async settleLearningDecision(initial: LearningDecision, budget: { changes: number }): Promise<LearningDecision> {
+    let decision = initial;
+    const now = Date.now();
+    const quiet = now - decision.updatedAt;
+    for (const original of initial.effects) {
+      if (budget.changes <= 0) break;
+      const effect = decision.effects.find(e => e.id === original.id);
+      if (!effect || effect.state === 'applied' || effect.state === 'abandoned') continue;
+      const before = decision;
+      const error = effect.error ?? '';
+      try {
+        if (effect.state === 'needs_repair' && effect.input.action === 'record_pattern_application' && !effect.input.applicationRef
+          && /Unresolved application/.test(error)) {
+          const app = (effect.input.application ?? {}) as Record<string, unknown>;
+          decision = await this.changeEffect(decision, effect, { repair: {
+            action: 'observe_pattern', id: effect.input.id, verdict: effect.input.verdict ?? app.verdict,
+            evidence: effect.input.evidence ?? app.evidence, relevance: 'shown',
+            ...(Array.isArray(effect.input.evidenceRefs) ? { evidenceRefs: effect.input.evidenceRefs } : {}),
+          } });
+        } else if (effect.state === 'needs_repair' && decision.repairAttempts >= 1) {
+          decision = await this.changeEffect(decision, effect, { state: 'abandoned', error: `Repair spent without resolving: ${error || 'no reason recorded'}` });
+        } else if (effect.state === 'waiting' && effect.repairClaimed && quiet > TaskReviewer.REPAIR_SETTLE_MS) {
+          decision = await this.changeEffect(decision, effect, { state: 'abandoned', error: `Repair claimed but never reported back: ${error}` });
+        } else if (effect.state === 'waiting' && /Delivery|retry budget/i.test(error) && quiet > TaskReviewer.DELIVERY_RETRY_MS) {
+          if ((effect.deliveryResumes ?? 0) >= TaskReviewer.MAX_DELIVERY_RESUMES) {
+            decision = await this.changeEffect(decision, effect, { state: 'abandoned', error: `Delivery kept failing: ${error}` });
+          } else {
+            const r = await this.request<{ success: boolean; decision: LearningDecision }>(request(this.id, this.goalManagerId!, 'resumeLearningDecision',
+              { goalId: decision.goalId, decisionId: decision.id, deliveryOnly: true }), 5000);
+            if (r.success) decision = r.decision;
+          }
+        } else if (effect.state === 'proposed' && effect.dependsOn?.some(id => decision.effects.find(d => d.id === id)?.state === 'abandoned')) {
+          // A retirement waits for its replacement to land; once that was
+          // abandoned, the retirement can never apply and stays undone.
+          decision = await this.changeEffect(decision, effect, { state: 'abandoned', error: 'The replacement it waited for was abandoned, so this retirement stays undone' });
+        } else if (effect.state === 'waiting' && /explicit (learning )?resumption required/i.test(error) && quiet > TaskReviewer.PAUSED_SETTLE_MS) {
+          decision = await this.changeEffect(decision, effect, { state: 'abandoned', error: `Not resumed within ${Math.round(TaskReviewer.PAUSED_SETTLE_MS / 86400000)} days: ${error}` });
+        }
+      } catch (err) {
+        log.warn(`settling learning effect ${effect.id.slice(0, 8)} failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      if (decision !== before) budget.changes--;
+    }
+    return decision;
+  }
+
+  /** Goals whose runtime faults were already reported (bounded). */
+  private reportedRuntimeFaults = new Set<string>();
+
+  /**
+   * Tell the person when the runtime ended tasks of a goal (an inactivity
+   * watchdog, a dead worker). Those failures belong to the system, not the
+   * world, so they go to the person rather than into the world model. A task
+   * superseded by a newer plan is routine and not reported.
+   */
+  private reportRuntimeFaults(goalId: string, records: TranscriptResponse[]): void {
+    const faults = records.map(r => ({ r, fault: parseRuntimeFault(r.error) }))
+      .filter((x): x is { r: TranscriptResponse; fault: NonNullable<ReturnType<typeof parseRuntimeFault>> } => !!x.fault && x.fault.code !== 'superseded');
+    if (faults.length === 0 || this.reportedRuntimeFaults.has(goalId)) return;
+    if (this.reportedRuntimeFaults.size > 500) this.reportedRuntimeFaults.clear();
+    this.reportedRuntimeFaults.add(goalId);
+    const text = `A goal lost ${faults.length} task(s) to a runtime fault: ${faults.map(x => `${x.r.agentName} (${x.fault.code})`).join(', ')}. `
+      + `Its review leaves the knowledge base unchanged for those tasks.`;
+    log.warn(`${text} goal=${goalId.slice(0, 8)}`);
+    void this.discoverDep('NotificationCenter').then(nc => {
+      if (nc) this.send(request(this.id, nc, 'notify', { message: text, level: 'warning' }));
+    }).catch(() => undefined);
+  }
+
+  /** Whether a decision has work this pass can do: a due delivery, or a repair it may still claim. */
+  private learningCanProgress(decision: LearningDecision): boolean {
+    if (decision.paused) return false;
+    const now = Date.now();
+    return decision.effects.some(e => (e.state === 'proposed' && e.nextAttemptAt <= now
+        && !e.dependsOn?.some(id => decision.effects.find(d => d.id === id)?.state !== 'applied'))
+      || (e.state === 'needs_repair' && decision.repairAttempts === 0));
+  }
+
+  private static readonly REPAIR_SETTLE_MS = 60 * 60 * 1000;
+  private static readonly DELIVERY_RETRY_MS = 30 * 60 * 1000;
+  private static readonly MAX_DELIVERY_RESUMES = 3;
+  private static readonly PAUSED_SETTLE_MS = 14 * 24 * 60 * 60 * 1000;
+  private static readonly SETTLE_CHANGES_PER_PASS = 20;
+
   private async drainLearningDecisions(): Promise<void> {
     if (this.drainingLearning || !this.goalManagerId || this.inFlight) return;
     this.drainingLearning = true;
     try {
-      const decisions = await this.request<LearningDecision[]>(request(this.id, this.goalManagerId, 'pendingLearningDecisions', {}));
+      const pendingDecisions = await this.request<LearningDecision[]>(request(this.id, this.goalManagerId, 'pendingLearningDecisions', {}));
+      // Settle mechanically first, then work on decisions that can move: a
+      // decision waiting on nothing anyone will do must not hold the front
+      // of the queue while work behind it waits.
+      // Each change rewrites its goal's learning checkpoint, so a backlog is
+      // settled a bounded number of changes per pass rather than all at once.
+      const budget = { changes: TaskReviewer.SETTLE_CHANGES_PER_PASS };
+      const decisions: LearningDecision[] = [];
+      for (const pending of pendingDecisions) {
+        const settled = budget.changes > 0 ? await this.settleLearningDecision(pending, budget) : pending;
+        if (this.learningCanProgress(settled)) decisions.push(settled);
+      }
       for (const pending of decisions.slice(0, 5)) {
         const decision = await this.applyDecision(pending);
         if (decision.paused || !decision.effects.some(e => e.state === 'needs_repair') || decision.repairAttempts || !this.underDailyCap()) continue;
@@ -1037,9 +1154,12 @@ My work is internal maintenance of this workspace's memory. When invited to cont
           if (entry?.knowledgeRef) refs[entry.id] = entry.knowledgeRef;
           claims.push(entry);
         }
-        const records = Object.entries(claim.decision.evidence).filter(([key]) => key.startsWith('learning/task/')).map(([,r]) => r as TranscriptResponse);
+        // Decisions cite evidence by reference; the repair reads the whole records.
+        const evidence = await this.request<Record<string, unknown> | null>(request(this.id, this.goalManagerId, 'getLearningEvidence',
+          { goalId: decision.goalId, decisionId: decision.id })).catch(() => null) ?? claim.decision.evidence;
+        const records = Object.entries(evidence).filter(([key]) => key.startsWith('learning/task/')).map(([,r]) => r as TranscriptResponse);
         const knowledgeScope = typeof decision.context.scope === 'string' ? decision.context.scope : this.reviewScope(records);
-        this.taskExtras.set(taskId, { kind: 'repair', goalId: decision.goalId, repairDecisionId: decision.id, decisions: [claim.decision], knowledgeRefs: refs, fullMaterial: JSON.stringify(claim.decision), records, knowledgeScope });
+        this.taskExtras.set(taskId, { kind: 'repair', goalId: decision.goalId, repairDecisionId: decision.id, decisions: [claim.decision], knowledgeRefs: refs, fullMaterial: JSON.stringify({ ...claim.decision, evidence }), records, knowledgeScope });
         this.inFlight = { ticketId: taskId, startedAt: Date.now() };
         try {
           await this.request(request(this.id, this.agentAbjectId!, 'startTask', { taskId,
@@ -1089,13 +1209,19 @@ My work is internal maintenance of this workspace's memory. When invited to cont
       // that a repair pass would later pay to revisit.
       if (extra?.goalId && this.goalManagerId && action.action === 'record_pattern_application' && action.application && typeof action.application === 'object'
         && !this.bindApplication(extra, String(action.id), action.application as Record<string, unknown>)) {
-        extra.ignoredApplications = (extra.ignoredApplications ?? 0) + 1;
-        return { success: false, error: `No recorded use of pattern ${String(action.id)} in this goal to judge. Applications cover the uses listed under Pattern applications: the plan's (no taskId) or an agent's own (its taskId). A woven pattern that shaped the work without being declared can be strengthened with update_pattern instead.` };
+        // No recorded use to judge: the verdict becomes an observation about
+        // the pattern (weaker than a recorded use, never counted as one), so
+        // it lands instead of becoming pending work no repair can finish.
+        const app = action.application as Record<string, unknown>;
+        extra.observedWithoutRecordedUse = (extra.observedWithoutRecordedUse ?? 0) + 1;
+        action = { action: 'observe_pattern', id: action.id, verdict: app.verdict, evidence: app.evidence ?? action.evidence, relevance: 'shown',
+          ...(action.evidenceRefs ? { evidenceRefs: action.evidenceRefs } : {}) } as AgentAction;
       }
-      if (extra?.goalId && this.goalManagerId && (action.action === 'learn' || ['save_entry','update_entry','archive_entry','supersede_entry','dispute_entry','narrow_entry','confirm_entry','no_change','save_pattern','update_pattern','record_pattern_application'].includes(action.action))) {
+      if (extra?.goalId && this.goalManagerId && (action.action === 'learn' || ['save_entry','update_entry','archive_entry','supersede_entry','dispute_entry','narrow_entry','confirm_entry','no_change','save_pattern','update_pattern','record_pattern_application','observe_pattern'].includes(action.action))) {
         const app = action.application as Record<string, unknown> | undefined;
-        // A plan-level application rests on the whole goal's task records.
-        const planWide = action.action === 'record_pattern_application' && !app?.taskId && extra.evidenceTaskIds?.length
+        // A plan-level application, and an observation about a pattern, rest
+        // on the whole goal's task records.
+        const planWide = (action.action === 'record_pattern_application' || action.action === 'observe_pattern') && !app?.taskId && extra.evidenceTaskIds?.length
           ? extra.evidenceTaskIds.map(id => `learning/task/${id}`) : undefined;
         const context = action.action === 'learn' ? (action.context ?? {}) as Record<string, unknown> : { evidence: action.evidence ?? app?.evidence, evidenceRefs: action.evidenceRefs ?? (app?.taskId ? [`learning/task/${app.taskId}`] : planWide), assessmentRefs: app?.taskId && app.step ? [`learning/assessment/${app.taskId}:${app.step}`] : undefined, scope: action.scope };
         const decision = await this.proposeLearning(taskId, action.action === 'learn' && Array.isArray(action.effects) ? action.effects : [action], context);
@@ -1380,7 +1506,7 @@ My work is internal maintenance of this workspace's memory. When invited to cont
       decisions: (extra?.decisions ?? []).map(d => ({ id: d.id, effects: d.effects.map(e => ({ id: e.id, state: e.state, action: e.input.action, knowledgeId: e.input.id })) })),
       attempts: updates.map(brief), limitations: extra?.completionIssues ?? [],
       predictions: { total: episodes.size, ...counts, unassessed, episodes: episodesWithLearning },
-      patterns: { ...patternCounts, unassessed: unassessedApplications, ...(extra?.ignoredApplications ? { refusedWithoutRecordedUse: extra.ignoredApplications } : {}) },
+      patterns: { ...patternCounts, unassessed: unassessedApplications, ...(extra?.observedWithoutRecordedUse ? { observedWithoutRecordedUse: extra.observedWithoutRecordedUse } : {}) },
       summary: `Learning review ${status}: ${allSaved.length} updates saved, ${allPending.length} pending. Predictions: ${counts.supported} supported, ${counts.contradicted} contradicted, ${counts.unresolved} unresolved. Pattern applications: ${patternCounts.helpful} helpful, ${patternCounts.harmful} harmful, ${patternCounts.inconclusive} inconclusive, ${patternCounts.unresolved} unassessed.` };
   }
 
@@ -1573,6 +1699,7 @@ My work is internal maintenance of this workspace's memory. When invited to cont
       + (r.phase === 'error' ? 50 : 0) - i;
     const records = all.map((r, i) => ({ r, score: priority(r, i) }))
       .sort((a, b) => b.score - a.score).slice(0, MAX_TASKS_PER_GOAL_REVIEW).map(x => x.r);
+    this.reportRuntimeFaults(review.goalId, all);
     if (records.length === 0) {
       if (this.goalManagerId) await this.request(request(this.id, this.goalManagerId, 'ackReview', { goalId: review.goalId, reason: 'No execution evidence; no pattern claims made' }));
       return;
@@ -2177,7 +2304,8 @@ My work is internal maintenance of this workspace's memory. When invited to cont
     return (
       `Agent: ${record.agentName}\n` +
       `Task: ${record.task}\n` +
-      `Reported outcome: ${record.phase === 'done' ? 'success' : `failure (${record.error ?? 'unknown'})`} after ${record.steps} steps\n\n` +
+      `Reported outcome: ${record.phase === 'done' ? 'success' : `failure (${record.error ?? 'unknown'})`} after ${record.steps} steps\n` +
+      `${parseRuntimeFault(record.error) ? 'The runtime ended this task, not the world: its misses are attributed to runtime and it teaches the world model nothing.\n' : ''}\n` +
       `### Knowledge entries injected into this agent's prompt\n${injected}` +
       this.formatPredictions(record) +
       `\n\n### Transcript\n${transcript}`
@@ -2322,6 +2450,11 @@ My work is internal maintenance of this workspace's memory. When invited to cont
     const rows: string[] = [];
     for (const r of records) {
       const shown = new Map((r.injectedKnowledge ?? []).map(k => [k.id, k.title]));
+      // The beliefs in this task's prompt, with ids, so a miss can be blamed
+      // on the entry or pattern it rested on even when the agent named none.
+      const shownBeliefs = (r.injectedKnowledge ?? []).filter(k => k.source !== 'profile').slice(0, 8)
+        .map(k => `${clipText(k.title, 60)} [id=${k.id}${k.source ? `, ${k.source}` : ''}]`);
+      const fault = parseRuntimeFault(r.error);
       for (const p of r.predictions ?? []) {
         if (!isPredicted(p)) continue;
         const reading = p.selfAssessment?.verdict;
@@ -2334,11 +2467,12 @@ My work is internal maintenance of this workspace's memory. When invited to cont
           + `\n  agent's reading: ${reading ?? 'not given'}${p.selfAssessment?.learned ? `; learned: "${clipText(p.selfAssessment.learned, 200)}"` : ''}`
           + `${p.verdict === 'contradicted' ? '; operation status contradicted' : ''}${p.decisionVerdict?.verdict === 'contradicted' ? `; decision model: contradicted (p=${fmtP(p.decisionVerdict.confidence)})` : ''}`
           + `\n  rested on: ${basis.length ? basis.join(', ') : 'nothing cited'}${patterns.length ? `; patterns: ${patterns.join(', ')}` : ''}`
-          + `${shown.size ? `; shown to the agent: ${[...shown.values()].slice(0, 5).map(t => clipText(t, 60)).join('; ')}` : ''}`);
+          + `${shownBeliefs.length ? `\n  beliefs in its prompt: ${shownBeliefs.join('; ')}` : ''}`
+          + `${fault ? `\n  the runtime ended this task (${fault.code}): attribute to runtime` : ''}`);
       }
     }
     if (!rows.length) return '';
-    return `Surprises (${rows.length}): predictions that missed or that the agent could not call. For each, name in assess_prediction's attribution which belief failed (prior, entry, pattern, link or world) and act on it: an entry it rested on gets corrected or narrowed, a pattern gets the counterexample, a wrong prior becomes a lesson stating what holds.\n${rows.join('\n')}`;
+    return `Surprises (${rows.length}): predictions that missed or that the agent could not call. For each, name in assess_prediction's attribution which belief failed (prior, entry, pattern, link, world, or runtime when the system itself ended the task) and act on it: an entry it rested on gets corrected or narrowed, a pattern gets the counterexample, a wrong prior becomes a lesson stating what holds, and a runtime fault leaves the world model as it is.\n${rows.join('\n')}`;
   }
 
   /**
@@ -3015,7 +3149,7 @@ Respond with ONE JSON action object inside \`\`\`json fenced code markers. Outpu
 | Action | Fields | Purpose |
 |--------|--------|---------|
 | mark_useful | ids | Credit the injected entries that genuinely influenced the work |
-| assess_prediction | taskId, step, verdict, explanation, attribution? | Record supported/contradicted/unresolved semantic assessment with an evidence-grounded explanation, separately from observations; for a miss, attribution {source: prior\|entry\|pattern\|link\|world, id?, note?} names the belief that failed |
+| assess_prediction | taskId, step, verdict, explanation, attribution? | Record supported/contradicted/unresolved semantic assessment with an evidence-grounded explanation, separately from observations; for a miss, attribution {source: prior\|entry\|pattern\|link\|world\|runtime, id?, note?} names the belief that failed (runtime: the system itself ended the task) |
 | read_evidence | taskId?, step?, key?, context?, messageId?, sourceGoalId?, offset?, length? | Retrieve complete task evidence or a prediction/observation pair; context:true reads the reviewed goal's linked conversation/proposal through GoalManager, separately from taskId/step |
 | recall_knowledge | query | Check what the knowledge base already holds before saving |
 | save_entry | title, content, type?, tags? | Save one durable lesson (type: 'learned'\|'fact'\|'insight'\|'reference') |
@@ -3046,7 +3180,7 @@ Use real task/step identities from the dossier. Cover the recorded predictions, 
 1. **Evaluate predictions first.** Compare the expected claim with the actual result, and include the assessment in the completion batch. Then consider knowledge usefulness. Compare the injected knowledge list against the transcript: entries that demonstrably helped the outcome get one mark_useful call with their ids; mere retrieval or use is not benefit. When none were used, omit usefulness credit; still assess the recorded predictions.
 2. **Mine the prediction misses.** A prediction ledger, when present, lists what each agent expected before acting beside what actually happened. A divergence marks the exact moment a working belief about this system turned out to be wrong, which makes it the most reliable lesson source in the whole record: trust it ahead of anything an agent narrated about its own performance. Runtime verdicts compare declared operation status; they do not assess the free-text expectation. A failed action can be the expected result. Legacy missed flags are not proof. Distinguish an invalid pattern from incorrect application, changed conditions, and an execution defect. Preserve competing explanations and scope any revision to the evidence. Distinguish uncertainty from contradiction; for the rest, judge the expectation against the actual result yourself, since an agent can succeed at an action and still have expected the wrong thing. Save the corrected belief, phrased as what actually holds and what to do with it, rather than the incident that revealed it. Record semantic assessments with assess_prediction. Successful actions alone do not establish that predictions held.
 
-   The dossier's Surprises section gathers the misses with what each prediction rested on (the entries and patterns it cited) and the agent's own reading, given while the full result was in view; audit that reading against the evidence rather than adopting it. For each miss, name the belief that failed in the assessment's attribution and update that belief: the model's own prior (save what actually holds as a lesson), an entry it rested on (correct, narrow or dispute that entry), a pattern it followed (a counterexample on the application), the link that led from one pattern to the next (see Weave the pattern language), or a world that changed under it (record the change; the belief may still hold).
+   The dossier's Surprises section gathers the misses with what each prediction rested on (the entries and patterns it cited) and the agent's own reading, given while the full result was in view; audit that reading against the evidence rather than adopting it. For each miss, name the belief that failed in the assessment's attribution and update that belief: the model's own prior (save what actually holds as a lesson), an entry it rested on (correct, narrow or dispute that entry), a pattern it followed (a counterexample on the application), the link that led from one pattern to the next (see Weave the pattern language), or a world that changed under it (record the change; the belief may still hold). A task the runtime ended (its outcome names a runtime fault: an inactivity timeout, a plan that superseded it, a worker that died) says nothing about the world: attribute its misses to runtime and leave the world model unchanged on its account; the person is told about the fault separately.
 3. **Distill sparingly.** New reusable lessons are optional. A routine task can finish with no new lesson after recording its prediction assessments; an empty learning update list does not replace those assessments. Save a lesson only when it will help a later task in the applicable project or environment: a capability that was hard to locate, an approach that beat the obvious one (with the reason), a constraint that was invisible up front, or a user fact the task confirmed (tag user facts "profile").
 
    **Save what is true, not the route that was taken.** An entry that tells a future task which steps to run for a kind of question — look here, then check that — freezes one attempt's path as though it described the world, and the next task follows it rather than working out its own. The risk runs opposite to confidence: a task that answered the wrong question without friction yields the tidiest-looking procedure for answering it wrongly again, and writing that down is how a single wrong turn becomes the route everyone takes. Before saving steps, check the transcript against what was actually asked — a fulfilled prediction only shows the agent did what it predicted, not that the user's question was answered, so an entry resting on assessments alone rests on nothing. Record what a thing is, what it exposes, and what its output means; leave the steps to the task.

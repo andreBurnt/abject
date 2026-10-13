@@ -53,6 +53,18 @@ desktop edition of the Node backend (compiled to `dist-server/` by
     own child processes, run the backend's `backendShutdown` (at most 5 s),
     then let Electron quit; `will-quit` kills children again and calls
     `app.exit(0)` after 1.5 s.
+- **gpu-fallback.ts**: software rendering when the GPU fails. The desktop
+  draws with WebGL2, and Chromium turns WebGL off for the session after three
+  GPU-process crashes (a graphics driver updated without a reboot does this),
+  so `setupGpuFallback()` (before ready) watches `child-process-gone` for the
+  GPU and the WebGL feature status, and relaunches once with
+  `--disable-gpu --enable-unsafe-swiftshader` (SwiftShader WebGL2) and the
+  reason in `--abject-software-gl=<reason>`. At startup (until 20 s after the
+  window opens) it relaunches without asking; later it asks first, since a
+  relaunch restarts the backend. The window loads `?render=software&why=...`
+  so the page says so (`client/render-notice.ts`). The relaunch waits for this
+  process to exit and starts the AppImage file itself, as AppUpdater does.
+  `ABJECTS_SOFTWARE_GL=1` starts in software rendering on purpose.
 - **cli-command.ts**: `installCliCommand()`, behind Help, Install the abject
   Command. Linux: a script in `~/.local/bin/abject` (for an AppImage it
   re-enters the AppImage with `ABJECT_DESKTOP_CLI=1`, since the mount path
@@ -145,6 +157,12 @@ minute after boot.
 - **`ws` is external.** `main.ts` imports `cli/backend.ts` (to stop a
   headless backend), which reaches the CLI gateway with `ws`; it must stay in
   the files list of `electron-builder.yml`.
+- **A driver update needs a reboot.** After the NVIDIA userspace libraries
+  are upgraded, a new process loads them against the old kernel module
+  (`nvidia-smi`: "Driver/library version mismatch"), the GPU process crashes
+  and the app comes up in software rendering until the computer restarts.
+  `abject.log` names the GPU exits; the app's own `DevTools listening on`
+  port reaches the page for diagnosis.
 - **The dev client cannot reach a packaged app's socket.** With
   `ELECTRON_PACKAGED=1` the origin policy drops the Vite client's origin.
 

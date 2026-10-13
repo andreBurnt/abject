@@ -53,6 +53,8 @@ import { looksLikeUngroundedClaim, looksLikeBareAcknowledgement } from '../core/
 import { resultKindQuestions, interjectionQuestions, roundOutcomeQuestions, DEFERRABLE_NOTES, criterion, instruction } from '../core/decision-questions.js';
 import { choiceOf, noulOf, scoreOf, topLevel, type DecisionQuestion } from '../llm/decision.js';
 import { declaredPatterns, planPatternIds } from '../core/plan-patterns.js';
+import { runtimeFault } from '../core/runtime-fault.js';
+import { isInternalScratchpadKey } from '../core/scratchpad-keys.js';
 
 const log = new Log('ScrumMaster');
 
@@ -80,10 +82,14 @@ interface WovenForPlanning {
   counterexamples?: Array<{ verdict: string; evidence: string }>;
 }
 
-/** The dispatch data a task carries to its agent, or nothing when it has none. */
-function taskData(target?: string, patterns?: Array<{ id: string; why: string }>): Record<string, unknown> | undefined {
-  if (!target && !patterns?.length) return undefined;
-  return { ...(target ? { target } : {}), ...(patterns?.length ? { patterns } : {}) };
+/**
+ * The dispatch data a task carries to its agent, or nothing when it has none.
+ * `maxSteps` is the planner's sizing; the agent clamps it to its own range.
+ */
+function taskData(target?: string, patterns?: Array<{ id: string; why: string }>, maxSteps?: number): Record<string, unknown> | undefined {
+  const sized = typeof maxSteps === 'number' && Number.isFinite(maxSteps);
+  if (!target && !patterns?.length && !sized) return undefined;
+  return { ...(target ? { target } : {}), ...(patterns?.length ? { patterns } : {}), ...(sized ? { maxSteps } : {}) };
 }
 
 interface StagedTask {
@@ -242,6 +248,8 @@ export class ScrumMaster extends Abject {
     target?: string;
     /** Patterns the plan assigned to the task, delivered with it. */
     patterns?: Array<{ id: string; why: string }>;
+    /** Planner-sized step budget, delivered with it. */
+    maxSteps?: number;
   }>();
   /**
    * Selection receipts (patternRef) of the patterns each goal's planning was
@@ -725,7 +733,7 @@ export class ScrumMaster extends Abject {
       const timer = this.setTimer(() => {
         this.pendingTickets.delete(ticketId);
         if (this.agentAbjectId) {
-          this.send(request(this.id, this.agentAbjectId, 'cancelTask', { taskId: ticketId }));
+          this.send(request(this.id, this.agentAbjectId, 'cancelTask', { taskId: ticketId, reason: runtimeFault('inactivity-timeout', 'no progress reached ScrumMaster within its inactivity window') }));
         }
         reject(new Error(`Scrum task ${ticketId.slice(0, 8)} timed out after ${timeout}ms`));
       }, timeout);
@@ -1985,7 +1993,7 @@ Reply PASS if you have no capability that fits the goal. The ScrumMaster uses yo
         (goal.interjections ?? []).map(i => `- ${i.note.slice(0, 500)}`).join('\n')
       : '';
 
-    const prompt = `Synthesize a complete, self-contained final answer for the user.
+    const prompt = `Write the final answer for the user: self-contained, and sized to what they asked.
 
 Goal: "${goal.title}"
 
@@ -2000,16 +2008,20 @@ ${scratchpadBlock}${hintBlock}
 
 Rules:
 - The user only sees this text. They do not see the scratchpad, task list, or any internal artifacts.
-- INLINE the actual data from the scratchpad. Lists, tables, full content, all of it. Do not say "see above" or reference internal artifacts.
-- Figures about checks and tests (how many ran, passed, failed; exit codes) come ONLY from the verification record, and the newest run supersedes every earlier figure, including numbers quoted in older scratchpad prose. When the record is empty, say the work was not verified by a recorded run rather than quoting a number from prose.
+- Answer what the user asked. A question gets its answer first, then the supporting detail; a request for a list, table or report gets the whole of it. Let the length follow the question: a short question gets a short answer.
+- INLINE the actual data from the scratchpad that the answer needs, in full where the user asked for it. Refer only to what is in this text, so "see above" never comes up.
+- Write about what was found and done. How the team organized the work (tasks, rounds, lanes, retries, cancellations, internal records) belongs in the answer only when the user asked about it.
+${record.length > 0
+    ? `- Figures about checks and tests (how many ran, passed, failed; exit codes) come ONLY from the verification record, and the newest run supersedes every earlier figure, including numbers quoted in older scratchpad prose.
+- When the verification record shows that a task asked to change something modified 0 files, say so plainly: the change was already present in the working tree, or nothing was changed by this run. Describe it as such, not as work done now.`
+    : '- No checks ran under a recorded verification. Quote a test or check figure only when a task report gives one, and say it comes from that report.'}
 - When a task report lists what it did not verify, could not cover, or left open, carry that forward under a heading "Not verified" so the reader knows the edges of the claim.
-- When the verification record shows that a task asked to change something modified 0 files, say so plainly: the change was already present in the working tree, or nothing was changed by this run. Do not describe it as work done now.
 - ${this.display
     ? 'When the work created or modified objects, open with how the user reaches the result: a window they can open now, or — for objects with no visual surface — say plainly that nothing appears on screen and they use it by asking in chat; offer building a window as a natural next step.'
     : 'When the work created or modified objects, open with how the user reaches the result: by asking in this conversation, on a schedule, or through the web gateway. This instance has no display, so nothing opens in a window.'}
 - Markdown formatting is fine and encouraged.
 - If the scratchpad is empty or the goal couldn't be resolved, say so plainly.
-- Do not include action JSON or any meta-commentary about the scrum process.
+- Write the answer itself, with no action JSON.
 - Output the answer directly — no preamble like "Here is the result:".`;
 
     try {
@@ -2803,6 +2815,7 @@ Rules:
           priority: weights.get(String(i)) ?? 0,
           target: inflight.staged[i].target,
           patterns: inflight.staged[i].patterns,
+          maxSteps: inflight.staged[i].maxSteps,
         });
         log.info(`dispatch: task ${taskIds[i].slice(0, 8)} deferred on ${blockerSets[i].length} dep(s): ${blockerSets[i].map(d => d.slice(0, 8)).join(', ')}`);
       }
@@ -2820,7 +2833,7 @@ Rules:
             goalId,
             dispatchTupleId: taskIds[i],
             priority: weights.get(String(i)) ?? 0,
-            data: taskData(staged.target, staged.patterns),
+            data: taskData(staged.target, staged.patterns, staged.maxSteps),
           }),
         );
       }
@@ -2878,10 +2891,10 @@ Rules:
           }
           const waiting = blockers.filter(id => byId.get(id)?.fields.status !== 'done');
           if (waiting.length) {
-            this.pendingDeps.set(tuple.id, { goalId: goal.id, agentId: agent.agentId, description: tuple.fields.description, blockers: new Set(waiting), priority: data.priority ?? 0, target: data.target, patterns: declaredPatterns(data.patterns) });
+            this.pendingDeps.set(tuple.id, { goalId: goal.id, agentId: agent.agentId, description: tuple.fields.description, blockers: new Set(waiting), priority: data.priority ?? 0, target: data.target, patterns: declaredPatterns(data.patterns), maxSteps: data.maxSteps });
             continue;
           }
-          await this.request(request(this.id, this.agentAbjectId, 'enqueueTask', { agentId: agent.agentId, taskId: tuple.id, dispatchTupleId: tuple.id, goalId: goal.id, task: tuple.fields.description, priority: data.priority ?? 0, data: taskData(data.target, declaredPatterns(data.patterns)) }));
+          await this.request(request(this.id, this.agentAbjectId, 'enqueueTask', { agentId: agent.agentId, taskId: tuple.id, dispatchTupleId: tuple.id, goalId: goal.id, task: tuple.fields.description, priority: data.priority ?? 0, data: taskData(data.target, declaredPatterns(data.patterns), data.maxSteps) }));
           this.recoveredEnqueues.add(tuple.id);
           this.pendingDeps.delete(tuple.id);
         }
@@ -2891,13 +2904,13 @@ Rules:
 
   private async unblockDependents(completedTaskId: string): Promise<void> {
     if (!this.agentAbjectId) return;
-    const newlyReady: Array<{ taskId: string; goalId: string; agentId: AbjectId; description: string; target?: string; patterns?: Array<{ id: string; why: string }>; priority: number }> = [];
+    const newlyReady: Array<{ taskId: string; goalId: string; agentId: AbjectId; description: string; target?: string; patterns?: Array<{ id: string; why: string }>; maxSteps?: number; priority: number }> = [];
     for (const [pendingId, info] of this.pendingDeps) {
       if (!info.blockers.has(completedTaskId)) continue;
       info.blockers.delete(completedTaskId);
       if (info.blockers.size === 0) {
         this.pendingDeps.delete(pendingId);
-        newlyReady.push({ taskId: pendingId, goalId: info.goalId, agentId: info.agentId, description: info.description, target: info.target, patterns: info.patterns, priority: info.priority });
+        newlyReady.push({ taskId: pendingId, goalId: info.goalId, agentId: info.agentId, description: info.description, target: info.target, patterns: info.patterns, maxSteps: info.maxSteps, priority: info.priority });
       }
     }
     for (const t of newlyReady) {
@@ -2910,7 +2923,7 @@ Rules:
           goalId: t.goalId,
           dispatchTupleId: t.taskId,
           priority: t.priority,
-          data: taskData(t.target, t.patterns),
+          data: taskData(t.target, t.patterns, t.maxSteps),
         }),
       ).catch(err => log.warn(`enqueueTask(${t.taskId.slice(0, 8)}) failed: ${err instanceof Error ? err.message : String(err)}`));
     }
@@ -3062,7 +3075,7 @@ When to INCLUDE synthesis inline:
 - The user asked a question the data alone doesn't answer cleanly
 - The synthesis is short (1–2 sentences) and you've already composed it during your reasoning
 
-Either way, the synthesis (whether yours or auto-generated) is the user's ONLY view. Inline data from scratchpad. Don't say "see above" — there is no above. ${this.display
+Either way, the synthesis (whether yours or auto-generated) is the user's ONLY view. Inline data from scratchpad. Don't say "see above" — there is no above. It answers what the user asked, at a length that fits the question, and talks about what was found and done rather than how the team organized the work (rounds, lanes, retries, cancellations), unless the user asked about that. ${this.display
     ? 'And "deployed" is invisible to the user unless something appears on screen: when the round shipped objects without a window, make sure the synthesis says so plainly and points at the chat/message path for using them (a \`hint\` like "headless — usable via chat only, offer a window" is enough).'
     : 'And "deployed" is invisible to the user: this instance has no display, so the synthesis says how to use what shipped (asking in chat, a schedule, the web gateway).'}
 
@@ -3173,6 +3186,7 @@ Lessons record what WORKED — agent/task mappings, payload shapes, scratchpad c
 - Prefer 1-3 tasks per scrum unless work is naturally parallelizable. When it is, stage the whole independent set in ONE round with \`dependsOn: []\` on each: a wide parallel round finishes sooner than the same tasks split across sequential rounds, and agents run several at once. When what makes that set plannable is research nobody has done yet, run the research round FIRST and stage the wide round in the next scrum (see **Research-first goals**).
 - Synthesis in \`complete_goal\` MUST be self-contained text. Pull data from scratchpad and inline it. No "see above".
 - Figures about checks and tests come from the \`verification/*\` scratchpad receipts (written by the capability owners), and the NEWEST receipt supersedes any number an earlier task's prose mentions. A task report's "what this does not cover" notes travel into the synthesis under "Not verified".
+- The file-count rule applies only to tasks that were asked to change something; a research or question goal has nothing to report about files.
 - A receipt showing 0 files modified for a task that was asked to change something means the change was already on disk or nothing was changed by this run; the synthesis says which, rather than presenting it as work done now.
 - All action fields go on the TOP LEVEL of the JSON object. Do NOT wrap them in a \`params\`, \`arguments\`, or \`input\` envelope. Correct: \`{ "action": "add_task", "description": "...", "assignedAgentName": "..." }\`. Wrong: \`{ "action": "add_task", "params": { "description": "..." } }\`.
 
@@ -3245,8 +3259,11 @@ interface VerificationRunLike {
  */
 export function orderedScratchpadBlock(scratchpad: Record<string, unknown>, updatedAt: Record<string, number>): string {
   // Only structured receipts are rendered elsewhere. A planner may name a
-  // prose key "verification/…" too, and that prose still belongs here.
-  const keys = Object.keys(scratchpad).filter(k => !isVerificationReceipt(k, scratchpad[k]));
+  // prose key "verification/…" too, and that prose still belongs here. The
+  // runtime's own records about the work (learning evidence, routing, context,
+  // the execution record) are for reviewers; given to the writer of the
+  // user's answer they become narration about lanes and cancelled tasks.
+  const keys = Object.keys(scratchpad).filter(k => !isVerificationReceipt(k, scratchpad[k]) && !isInternalScratchpadKey(k));
   if (keys.length === 0) return '(empty)';
   const ordered = keys
     .map((key, index) => ({ key, index, at: updatedAt[key] }))
@@ -3283,7 +3300,7 @@ function renderRun(label: string, run?: VerificationRunLike): string {
 export function renderVerificationRecord(record: VerificationRecordEntry[]): string {
   if (record.length === 0) return '(no recorded verification runs)';
   return record.map((r, i) => {
-    const head = `${i === 0 ? 'NEWEST — ' : ''}${r.agent ?? 'task'} ${r.taskId.slice(0, 8)}${r.project ? ` in ${r.project}` : ''} (${new Date(r.at).toISOString()}, ${r.outcome ?? 'unknown'}, ${r.filesModified ?? '?'} file(s) modified)`;
+    const head = `${i === 0 ? 'NEWEST — ' : ''}${r.agent ?? 'task'} ${r.taskId.slice(0, 8)}${r.project ? ` in ${r.project}` : ''} (${new Date(r.at).toISOString()}, ${r.outcome ?? 'unknown'}, ${typeof r.filesModified === 'number' ? `${r.filesModified} file(s) modified` : 'files not counted'})`;
     return `- ${head}\n  ${renderRun('verify', r.verify)}\n  ${renderRun('check', r.check)}${r.gate ? `\n  gate: ${r.gate.ok ? 'ok' : 'NOT ok'} — ${r.gate.note}` : ''}`;
   }).join('\n');
 }

@@ -10,7 +10,7 @@ import { Abject } from '../core/abject.js';
 import { require as precondition, invariant } from '../core/contracts.js';
 import { request as createRequest, event as createEvent } from '../core/message.js';
 import type { PeerId, PeerIdentity, PeerContact, PeerConnectionState } from '../core/identity.js';
-import { SignalingClient } from '../network/signaling.js';
+import { SignalingClient, isRemoteUiEndpoint } from '../network/signaling.js';
 import type { SignalingRelay } from '../network/signaling.js';
 import { PeerTransport, PeerTransportConfig } from '../network/peer-transport.js';
 import type { AuthenticatedSessionMetadata } from '../network/transport.js';
@@ -1124,6 +1124,8 @@ export class PeerRegistry extends Abject {
         // Persist gossip peers with their signaling URLs
         for (const peer of peers) {
           if (peer.peerId === this.localIdentity?.peerId) continue;
+          // Phones and UI bridges answer the pairing protocol, not the mesh.
+          if (isRemoteUiEndpoint(peer.name)) continue;
           if (this.contacts.has(peer.peerId)) {
             // Update contact addresses with this signaling URL
             const contact = this.contacts.get(peer.peerId)!;
@@ -1775,6 +1777,9 @@ export class PeerRegistry extends Abject {
 
     for (const peer of peers) {
       if (peer.peerId === myPeerId) continue;
+      // A remote UI client or UI bridge never answers a mesh offer; dialing
+      // one only builds a PeerConnection and a relay allocation that time out.
+      if (isRemoteUiEndpoint(peer.name)) continue;
       if (!this.admits(peer.peerId)) continue;
       if (this.contacts.has(peer.peerId)) continue;
       if (this.transports.has(peer.peerId)) continue;
@@ -2257,6 +2262,8 @@ export class PeerRegistry extends Abject {
       );
       if (Array.isArray(result)) {
         for (const gp of result) {
+          // Older builds stored phones and UI bridges as gossip peers.
+          if (isRemoteUiEndpoint(gp.name)) continue;
           this.gossipPeers.set(gp.peerId, gp);
         }
       }

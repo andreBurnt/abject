@@ -134,6 +134,21 @@ A request becomes work like this:
    learned to the KnowledgeBase. GoalObserver fails a goal that has made no
    progress for 30 minutes.
 
+The KnowledgeBase is the workspace's world model, and the loop that keeps it
+honest runs through these objects. Every action an agent takes states what it
+expects (`expect`) and may cite the entries and patterns it rests on
+(`basis`, `patterns`); AgentAbject records the prediction beside what happened
+(`recordObservation`). TaskReviewer judges each prediction, blames the belief
+that failed (`prior`, `entry`, `pattern`, `link`, `world`, or `runtime` when
+the system itself ended the task) and journals corrections as learning
+decisions in GoalManager, which the KnowledgeBase applies with receipts.
+GoalManager stores cited records once by hash (`evidence:<sha256>`, see
+`src/core/evidence.ts`) and sweeps the ones nothing cites; TaskReviewer
+settles what needs no model (a pattern verdict with no recorded use becomes
+an `observe_pattern` observation, a spent repair is abandoned with its
+reason) before the queue picks work. `getLearningFunnel` reports how much of
+the loop reaches the world model; KnowledgeBrowser shows it.
+
 The ask protocol underlies all of it. Every Abject answers `describe` (its
 manifest) and `ask` (a plain-language question, answered by the LLM from the
 object's manifest and the guidance it adds), and the Registry's `ask` answers
@@ -180,6 +195,19 @@ decides in this order:
    `ask` (the default) puts the question to the person; `allow` allows it once
    without asking, without the host's credentials, and still asks about a
    dangerous or unreadable command; `deny` refuses without asking.
+
+Outward actions have their own path. WebBrowser asks (type `web_action`,
+scope the site's origin) before a click, key or page-script call that submits
+a form or activates a button, and an MCPBridge asks (type `mcp_tool`, scope
+`server/tool`) before a tool its server annotates `destructiveHint: true`.
+Only those two built-in owners may ask, each on behalf of the object that
+wanted the action. No autonomy level approves one and `allow` mode still asks;
+a deny rule or `deny` mode refuses; a remembered answer ("Always allow
+WebAgent on https://example.com", an exact rule keyed `web_action:<origin>` or
+`mcp_tool:<server>/<tool>` for that caller) lets one through, except in a
+public workspace or for an object exposed to remote peers, where every one
+goes to the person. A refusal reaches the agent as a failure naming who
+declined (`refusalMessage` in `src/core/permission-outcome.ts`).
 
 A question goes to DialogBroker as an `options` dialog and waits indefinitely:
 the broker's heartbeat keeps the request alive, and the 30-minute timer fires
@@ -250,13 +278,13 @@ The KnowledgeBase in `INFRA_OBJECTS` is the C++/WASM package in `native/knowledg
 
 | File | Object | Runs | Role |
 |------|--------|------|------|
-| `agent-abject.ts` | AgentAbject | workspace, worker | Agent runtime: registration, observe-think-act loop, per-agent task queues (`enqueueTask`, `startTask`), delegation, task status and cancellation |
-| `scrum-master.ts` | ScrumMaster | workspace, worker | Plans each goal as a sprint of scrums: review, poll the team, stage, dispatch, complete or fail; `quick_dispatch` for one-step goals |
-| `goal-manager.ts` | GoalManager | workspace, worker | The goal tree, tasks, results, budgets and scratchpad; emits `goalCreated` and `goalReadyForCompletion`; shares goals with peers through SharedState |
+| `agent-abject.ts` | AgentAbject | workspace, worker | Agent runtime: registration, observe-think-act loop, per-agent task queues (`enqueueTask`, `startTask`), delegation, task status and cancellation (a `reason` names a runtime fault). Sends task-tagged keep-alives to the delegating agent (streaming, each think, a running `submit_job`, a pending `ask_user`), so its inactivity watchdog never cancels working tasks. Runtime verbs every agent has: `remember`, `recall`, `replan`, `submit_job`, `read_chunk`, `read_context`, and `ask_user` (asks the person through DialogBroker) unless the agent declares its own. Knowledge recall searches the task text with the goal's own words and the caller's `recallQuery` |
+| `scrum-master.ts` | ScrumMaster | workspace, worker | Plans each goal as a sprint of scrums: review, poll the team, stage, dispatch, complete or fail; `quick_dispatch` for one-step goals. A task's planned `maxSteps` travels in its dispatch data (each agent clamps it with `src/core/step-budget.ts`); the final answer is written from result keys only (`src/core/scratchpad-keys.ts`), sized to the question |
+| `goal-manager.ts` | GoalManager | workspace, worker | The goal tree, tasks, results, budgets and scratchpad; emits `goalCreated` and `goalReadyForCompletion`; shares goals with peers through SharedState. Owns the learning journal and its evidence store (`evidence:<sha256>`: decisions cite records by reference, large observation results are stored by hash and `readGoalData` returns them whole, `getLearningEvidence` gives TaskReviewer whole records, maintenance sweeps unreferenced bodies), `getLearningStatus` (decisions and effects as separate units, lifetime totals) and `getLearningFunnel` |
 | `tuple-space.ts` | TupleSpace | workspace, worker | Task tuples over SharedState (last writer wins), one namespace per top-level goal; a stale claim becomes reclaimable after 5 minutes |
 | `goal-observer.ts` | GoalObserver | workspace, worker | Watchdog: sweeps goals every minute, fails one with no progress for 30 minutes |
 | `task-session.ts` | TaskSession | workspace, worker | Durable task sessions: checkpoint, resume, fork, reconcile, result delivery |
-| `task-reviewer.ts` | TaskReviewer | workspace, worker | Reviews finished work into the KnowledgeBase, judges which knowledge helped, proposes skills, and writes the workspace's patterns |
+| `task-reviewer.ts` | TaskReviewer | workspace, worker | Reviews finished work into the KnowledgeBase, judges which knowledge helped, proposes skills, and writes the workspace's patterns. Shows each miss with the beliefs in its task's prompt (ids and sources) so it can be blamed on an entry or pattern; attributes runtime faults to `runtime` and tells the person (NotificationCenter) instead of learning from them; settles stuck learning effects without a model before draining actionable ones |
 | `agent-evaluation.ts` | AgentEvaluation | workspace, worker | Evaluation runs of an agent (driver) checked by an independent verifier, with durable reports |
 | `agent-creator.ts` | AgentCreator | workspace, worker | Advisory agent for designing agents, schedules and watchers; answers through `ask` and declines tasks |
 | `object-creator.ts` | ObjectCreator | workspace, worker | Creates and modifies Abjects through one ReAct loop whose primitive is `call(target, method, payload)` |
@@ -291,7 +319,7 @@ ChatBrowser, the roster window, is under Per-workspace UI.
 | File | Object | Runs | Role |
 |------|--------|------|------|
 | `skill-registry.ts` | SkillRegistry | global, worker | SKILL.md skills in the data directory's `skills/`: scan, install, enable, config; spawns an MCPBridge per enabled MCP server |
-| `mcp-bridge.ts` | MCPBridge | on demand (SkillRegistry), worker | Owns one MCP server's transport and exposes its tools as methods (`callTool`, `listTools`, `readResource`) |
+| `mcp-bridge.ts` | MCPBridge | on demand (SkillRegistry), worker | Owns one MCP server's transport and exposes its tools as methods (`callTool`, `listTools`, `readResource`); a tool annotated `destructiveHint: true` asks PermissionBroker first and a refusal returns as an `isError` result |
 | `mcp-registry-client.ts` | MCPRegistryClient | global, worker | Read-only client for the official MCP registry, cached 24 hours |
 | `clawhub-client.ts` | ClawHubClient | global, worker | Client for clawhub.ai skills; downloads bundles for SkillRegistry |
 | `secrets-vault.ts` | SecretsVault | global, worker | Encrypted credentials for skills and MCP servers; values leave only through `bindEnv` and owner-gated `reveal` |
@@ -304,11 +332,11 @@ ChatBrowser, the roster window, is under Per-workspace UI.
 | File | Object | Runs | Role |
 |------|--------|------|------|
 | `identity.ts` | Identity (class `IdentityObject`) | global, P2P | ECDSA P-256 signing and ECDH P-256 key agreement; keys persisted via Storage |
-| `peer-registry.ts` | PeerRegistry | global, P2P | Contacts, WebRTC connections via signaling, fixed signaling and peer admission, blocking, introductions |
+| `peer-registry.ts` | PeerRegistry | global, P2P | Contacts, WebRTC connections via signaling, fixed signaling and peer admission, blocking, introductions. Never dials remote UI endpoints (phones, UI bridges) found on signaling |
 | `peer-discovery.ts` | PeerDiscovery (class `PeerDiscoveryObject`) | global, P2P | Gossip discovery: peer exchange, find-peer floods, speculative mesh links |
 | `signaling-relay.ts` | SignalingRelay (class `SignalingRelayObject`) | global, P2P | Relays SDP and ICE between peers over data channels when the signaling server is down |
 | `remote-registry.ts` | RemoteRegistry | global, P2P | Finds objects on connected peers, with a 5-minute cache |
-| `remote-ui-access.ts` | RemoteUIAccess | global, desktop, P2P | Pairs remote browsers (QR token) and attaches them to the display over encrypted WebRTC |
+| `remote-ui-access.ts` | RemoteUIAccess | global, desktop, P2P | Pairs remote browsers (QR token) and attaches them to the display over encrypted WebRTC. Holds its signaling client while it retries, checks it every minute and rebuilds it after five minutes down; making a pairing starts listening if it is off; a newer offer from a phone supersedes an older one mid-answer |
 | `workspace-share-registry.ts` | WorkspaceShareRegistry | global, worker | Shared-workspace catalogs, multi-hop workspace discovery, join and leave, members |
 | `peer-network.ts` | PeerNetwork | global, desktop, worker | Window for identity, signaling servers and contacts |
 | `workspace-browser.ts` | WorkspaceBrowser | global, desktop, worker | Window to browse peers' discovered workspaces |

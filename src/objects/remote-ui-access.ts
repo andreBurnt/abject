@@ -22,7 +22,7 @@
 
 import { AbjectId, AbjectMessage, InterfaceId } from '../core/types.js';
 import { Abject } from '../core/abject.js';
-import { require as precondition, invariant } from '../core/contracts.js';
+import { require as precondition, ensure, invariant } from '../core/contracts.js';
 import { request as createRequest } from '../core/message.js';
 import { Log } from '../core/timed-log.js';
 import { randomToken, utf8ToBase64Url } from '../core/encoding.js';
@@ -35,7 +35,7 @@ import {
   importExchangePrivateKey,
   derivePeerId,
 } from '../core/identity.js';
-import { SignalingClient } from '../network/signaling.js';
+import { SignalingClient, UI_BRIDGE_NAME_PREFIX } from '../network/signaling.js';
 import { PeerTransport } from '../network/peer-transport.js';
 import { WebRTCUITransport, UITransportLike } from '../network/webrtc-ui-transport.js';
 import QRCode from 'qrcode';
@@ -55,6 +55,14 @@ const DEFAULT_SIGNALING_URL = 'wss://signal.abject.world';
 const DEFAULT_CLIENT_BASE = 'https://client.abject.world';
 const TOKEN_TTL_MS = 5 * 60 * 1000;
 const PRE_AUTH_TIMEOUT_MS = 30_000;
+/** How often the listener checks that it is still reachable through signaling. */
+const SIGNALING_CHECK_MS = 60_000;
+/**
+ * A signaling client that has been down this long is rebuilt from scratch.
+ * The client retries on its own with backoff capped at a minute, so this only
+ * fires when that retry chain has stopped for a reason it cannot see.
+ */
+const SIGNALING_REBUILD_AFTER_MS = 5 * 60_000;
 
 interface AuthorizedClient {
   peerId: string;
@@ -118,6 +126,16 @@ export class RemoteUIAccess extends Abject {
    * lookup cannot build a transport behind a sweep that has already run.
    */
   private stopping = false;
+  /** Watches the signaling client while listening; see checkSignaling. */
+  private signalingWatchdog?: ReturnType<typeof setInterval>;
+  /** When the signaling client was first seen down, or 0 while it is up. */
+  private signalingDownSince = 0;
+  /**
+   * Per-peer count of offers taken. An answer that suspended (ICE lookup,
+   * tearing down a stale transport) and finds a newer offer has arrived
+   * stops, so two overlapping offers never share one PeerConnection.
+   */
+  private offerGeneration: Map<string, number> = new Map();
   private cachedIceServers?: RTCIceServer[];
   private cachedIceServersAt = 0;
 
@@ -305,6 +323,10 @@ export class RemoteUIAccess extends Abject {
     precondition(this.signingPubJwk !== undefined, 'signing key not exported');
     precondition(this.exchangePubJwk !== undefined, 'exchange key not exported');
 
+    // A pairing is only useful while this desktop is reachable, so making one
+    // starts the listener if it is not running (remote access must be on).
+    if (this.enabled && !this.signalingClient) await this.startListening();
+
     const token = randomToken(32);
     const expires = Date.now() + TOKEN_TTL_MS;
     this.pendingTokens.set(token, { expires, name });
@@ -403,8 +425,11 @@ export class RemoteUIAccess extends Abject {
     client.on({
       onConnect: () => {
         client.register(this.peerId!, this.signingPubJwk!, this.exchangePubJwk!,
-          `ui-bridge:${this.deviceLabel || 'abjects'}`);
+          `${UI_BRIDGE_NAME_PREFIX}${this.deviceLabel || 'abjects'}`);
+        this.signalingDownSince = 0;
+        log.info(`Listening for remote UI clients via ${this.signalingUrl} as ${this.peerId!.slice(0, 16)}`);
       },
+      onDisconnect: (reason) => log.info(`signaling disconnected (${reason ?? 'closed'}); reconnecting in the background`),
       onSdpOffer: (fromPeerId, sdp) => this.handleIncomingOffer(fromPeerId, sdp).catch((err) => {
         log.warn(`incoming offer failed for ${fromPeerId.slice(0, 16)}: ${err}`);
       }),
@@ -419,14 +444,51 @@ export class RemoteUIAccess extends Abject {
       onError: (err) => log.warn(`signaling error: ${err}`),
     });
 
+    // Hold the client before it connects. It is persistent, so a first attempt
+    // that fails keeps retrying in the background, and the offers it delivers
+    // once it does connect must find it here.
+    this.signalingClient = client;
+    this.ensureSignalingWatchdog();
     try {
       await client.connect(this.signalingUrl);
-      this.signalingClient = client;
-      log.info(`Listening for remote UI clients via ${this.signalingUrl} as ${this.peerId.slice(0, 16)}`);
     } catch (err) {
-      log.warn(`failed to connect to signaling: ${err instanceof Error ? err.message : err}`);
-      throw err;
+      log.warn(`signaling not reachable yet (${err instanceof Error ? err.message : err}); retrying in the background`);
     }
+    ensure(this.signalingClient !== undefined || this.stopping, 'a listener holds its signaling client');
+  }
+
+  private ensureSignalingWatchdog(): void {
+    if (this.signalingWatchdog) return;
+    this.signalingWatchdog = this.setRecurringTimer(() => this.checkSignaling(), SIGNALING_CHECK_MS);
+  }
+
+  /**
+   * Keep the listener reachable. A missing client is started; one that has
+   * been down for SIGNALING_REBUILD_AFTER_MS is replaced, since phones can
+   * only reach this desktop while it is registered with signaling.
+   */
+  private async checkSignaling(): Promise<void> {
+    if (!this.enabled || this.stopping) return;
+    const client = this.signalingClient;
+    if (!client) {
+      await this.startListening();
+      return;
+    }
+    if (client.isConnected) {
+      this.signalingDownSince = 0;
+      return;
+    }
+    if (this.signalingDownSince === 0) {
+      this.signalingDownSince = Date.now();
+      return;
+    }
+    const downFor = Date.now() - this.signalingDownSince;
+    if (downFor < SIGNALING_REBUILD_AFTER_MS) return;
+    log.warn(`signaling down for ${Math.round(downFor / 1000)}s; rebuilding the listener`);
+    this.signalingDownSince = 0;
+    this.signalingClient = undefined;
+    try { await client.disconnect(); } catch { /* ignore */ }
+    await this.startListening();
   }
 
   private async stopListening(): Promise<void> {
@@ -435,6 +497,9 @@ export class RemoteUIAccess extends Abject {
     // afterwards and build a PeerConnection that no map still holds and
     // nothing closes, keeping the process alive after the window is gone.
     this.stopping = true;
+    this.cancelTimer(this.signalingWatchdog);
+    this.signalingWatchdog = undefined;
+    this.signalingDownSince = 0;
     if (this.signalingClient) {
       try { await this.signalingClient.disconnect(); } catch { /* ignore */ }
       this.signalingClient = undefined;
@@ -484,11 +549,17 @@ export class RemoteUIAccess extends Abject {
 
   private async handleIncomingOffer(fromPeerId: string, sdp: RTCSessionDescriptionInit): Promise<void> {
     if (!this.signalingClient || !this.peerId) return;
+    const generation = (this.offerGeneration.get(fromPeerId) ?? 0) + 1;
+    this.offerGeneration.set(fromPeerId, generation);
+    // A phone that reconnects twice in quick succession sends two offers. The
+    // newer one wins; the older answer stops at its next suspension point
+    // instead of answering on a PeerConnection the newer one tore down.
+    const superseded = () => this.offerGeneration.get(fromPeerId) !== generation;
 
     const iceServers = await this.resolveIceServers();
     // Teardown may have begun while the ICE lookup was in flight; a
     // PeerConnection built now would outlive the sweep that already ran.
-    if (this.stopping) return;
+    if (this.stopping || superseded()) return;
 
     // A fresh inbound offer means the remote built a brand-new RTCPeerConnection
     // (e.g. a mobile UI client closed and reopened). Any transport we still hold
@@ -519,6 +590,7 @@ export class RemoteUIAccess extends Abject {
       log.info(`Reconnect offer from ${fromPeerId.slice(0, 16)}; replacing stale negotiating transport`);
       try { await staleNegotiating.disconnect(); } catch { /* ignore */ }
     }
+    if (this.stopping || superseded()) return;
 
     const transport = new PeerTransport({
       localPeerId: this.peerId,
@@ -532,7 +604,7 @@ export class RemoteUIAccess extends Abject {
 
     transport.on({
       onConnect: () => this.beginPreAuth(fromPeerId, transport),
-      onDisconnect: () => this.cleanupTransport(fromPeerId),
+      onDisconnect: () => this.cleanupTransport(fromPeerId, transport),
       onError: (err) => log.warn(`peer transport error ${fromPeerId.slice(0, 16)}: ${err.message}`),
     });
 
@@ -542,7 +614,14 @@ export class RemoteUIAccess extends Abject {
     // candidates are dropped and the DataChannel never forms on cell networks.
     this.negotiatingTransports.set(fromPeerId, transport);
 
-    await transport.handleSdpOffer(sdp);
+    try {
+      await transport.handleSdpOffer(sdp);
+    } catch (err) {
+      // A newer offer replaced this transport mid-answer; that offer owns the
+      // connection now, so this one has nothing left to report.
+      if (superseded()) return;
+      throw err;
+    }
   }
 
   /**
@@ -670,14 +749,19 @@ export class RemoteUIAccess extends Abject {
     this.emitClientsChanged();
   }
 
-  private cleanupTransport(peerId: string): void {
-    const wasConnected = this.connectedTransports.delete(peerId);
+  /**
+   * Forget a transport that disconnected. Only that transport's own entries
+   * are removed: a reconnect may already have registered its replacement
+   * under the same peer, and the old close event can arrive after it.
+   */
+  private cleanupTransport(peerId: string, transport: PeerTransport): void {
+    const wasConnected = this.connectedTransports.get(peerId) === transport && this.connectedTransports.delete(peerId);
     const pending = this.pendingAuth.get(peerId);
-    if (pending) {
+    if (pending?.peerTransport === transport) {
       clearTimeout(pending.authTimer);
       this.pendingAuth.delete(peerId);
     }
-    this.negotiatingTransports.delete(peerId);
+    if (this.negotiatingTransports.get(peerId) === transport) this.negotiatingTransports.delete(peerId);
     if (wasConnected) this.emitClientsChanged();
   }
 

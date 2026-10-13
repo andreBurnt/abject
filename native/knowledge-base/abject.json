@@ -1,6 +1,6 @@
 {
   "name": "KnowledgeBaseCpp",
-  "version": "3.7.0",
+  "version": "3.8.0",
   "abi": 1,
   "wasm": "main.wasm",
   "scope": "workspace",
@@ -184,6 +184,24 @@
                 "kind": "primitive",
                 "primitive": "boolean"
               }
+            },
+            {
+              "description": "Without a query: 'recent' (default) or 'worth' (user-written first, then reviewer-confirmed useful, then recent)",
+              "name": "order",
+              "optional": true,
+              "type": {
+                "kind": "primitive",
+                "primitive": "string"
+              }
+            },
+            {
+              "description": "Include each entry's whole learning history (receipts); by default only its summary",
+              "name": "includeLearning",
+              "optional": true,
+              "type": {
+                "kind": "primitive",
+                "primitive": "boolean"
+              }
             }
           ],
           "returns": {
@@ -290,11 +308,28 @@
                 "kind": "primitive",
                 "primitive": "string"
               }
+            },
+            {
+              "description": "Include the entry's whole learning history (receipts); by default only its summary",
+              "name": "includeLearning",
+              "optional": true,
+              "type": {
+                "kind": "primitive",
+                "primitive": "boolean"
+              }
             }
           ],
           "returns": {
             "kind": "object",
             "properties": {}
+          }
+        },
+        {
+          "description": "The evidence hashes the learning receipts cite, so the evidence store keeps the bodies they refer to.",
+          "name": "evidenceHashes",
+          "parameters": [],
+          "returns": {
+            "kind": "array"
           }
         },
         {
@@ -393,6 +428,15 @@
             {
               "description": "Include archived entries (default false)",
               "name": "includeArchived",
+              "optional": true,
+              "type": {
+                "kind": "primitive",
+                "primitive": "boolean"
+              }
+            },
+            {
+              "description": "Include each entry's whole learning history (receipts); by default only its summary",
+              "name": "includeLearning",
               "optional": true,
               "type": {
                 "kind": "primitive",
@@ -636,6 +680,6 @@
       "system",
       "knowledge"
     ],
-    "version": "3.7.0"
+    "version": "3.8.0"
   }
 }

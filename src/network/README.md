@@ -163,10 +163,18 @@ which starts with `{` or `[`.
 name)`, `unregister`, `findPeer`, `listPeers`, `requestIceServers()` (STUN
 plus TURN credentials minted by the server; resolves `[]` on timeout),
 `sendSdpOffer`, `sendSdpAnswer`, `sendIceCandidate`, and `setPersistent(true)`
-to retry forever (backoff capped at 60s) instead of 5 attempts. Events:
+to retry forever (backoff capped at 60s) instead of 5 attempts. A persistent
+client keeps retrying when an attempt times out (the timeout detaches the
+socket's handlers, so the retry is scheduled there and in the reconnect's
+failure path, not by a close event), including a first attempt that times
+out. `disconnect()` detaches the handlers before closing, so a deliberate
+close never reconnects. Events:
 `onPeerFound`, `onPeerNotFound`, `onPeerList`, `onSdpOffer`, `onSdpAnswer`,
 `onIceCandidate`, `onIceServers`, `onConnect`, `onDisconnect`, `onError`.
-Pings every 2 minutes. The `SignalingRelay` interface (the three `send*`
+Pings every 2 minutes. `REMOTE_UI_CLIENT_NAME` and `UI_BRIDGE_NAME_PREFIX` are
+the names a phone or browser client and a desktop's RemoteUIAccess register
+under; `isRemoteUiEndpoint(name)` tells them apart from mesh peers, which
+PeerRegistry uses so it never dials them. The `SignalingRelay` interface (the three `send*`
 methods) is also implemented by `SignalingRelayObject`
 (`src/objects/signaling-relay.ts`), which relays through connected peers.
 
@@ -289,6 +297,11 @@ Run with `pnpm test`.
   `RTCPeerConnection`; the P2P worker (or `server/boot.ts` when dedicated
   workers are off) installs `node-datachannel/polyfill` first. SDP rollback is
   not supported by that polyfill, hence `resetForGlare()`.
+- **A signaling client that stops retrying is silent.** Before the timeout
+  path continued the retry chain, one timed-out reconnect (a network blip)
+  left RemoteUIAccess unregistered for good, and phones could no longer reach
+  the desktop. When a phone cannot connect, check abject.log for the last
+  `Listening for remote UI clients` against `[Signaling] Reconnect ... failed`.
 - **Do not route requests speculatively.** A guessed peer that lacks the
   object never answers, so the caller waits out its full timeout.
 

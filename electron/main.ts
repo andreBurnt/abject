@@ -17,6 +17,7 @@ import { defaultDataDir } from '../server/data-dir.js';
 import { liveInstance } from '../server/instance-file.js';
 import { stopBackend } from '../cli/backend.js';
 import { installCliCommand } from './cli-command.js';
+import { setupGpuFallback, type GpuFallback } from './gpu-fallback.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -71,6 +72,11 @@ if (!holdsInstanceLock) {
   // pass the same switch.
   app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
 }
+
+// Software rendering when the GPU fails (or this launch asked for it): the
+// switches must be set before the app is ready. Only the instance that holds
+// the lock watches the GPU; a second launch is on its way out.
+const gpu: GpuFallback | undefined = holdsInstanceLock ? setupGpuFallback() : undefined;
 
 // Use the OS-standard data directory unless explicitly overridden: the same
 // one the `abject` command uses, so the app and the terminal share workspaces.
@@ -173,8 +179,11 @@ function createWindow(port: number): void {
     },
   });
 
-  // Load via HTTP so Google Fonts, WebSocket, and localStorage all work
-  mainWindow.loadURL(`http://127.0.0.1:${port}`);
+  // Load via HTTP so Google Fonts, WebSocket, and localStorage all work. When
+  // rendering in software the page is told why, so it can say so.
+  const software = gpu?.softwareReason;
+  mainWindow.loadURL(`http://127.0.0.1:${port}/${software ? `?render=software&why=${encodeURIComponent(software)}` : ''}`);
+  gpu?.windowOpened();
 
   mainWindow.on('closed', () => {
     mainWindow = null;

@@ -21,6 +21,13 @@
  * it without asking. Rules, protected paths and deny decisions apply first in
  * every mode, and a dangerous command is asked about even in allow mode.
  *
+ * Outward actions get the same treatment as a dangerous command. WebBrowser
+ * asks before a click, key or script that submits or activates something on
+ * a website (where the browser profile may be signed in as the person), and
+ * an MCPBridge asks before a tool its server marks destructive. No autonomy
+ * level answers these and allow mode still asks: only a remembered answer for
+ * that site or that tool, given by the person, lets one through unseen.
+ *
  * The split matters. Capability objects stay capabilities with no opinion about
  * projects; DialogBroker owns the question and who may answer it; policy lives
  * here and nowhere else.
@@ -44,7 +51,7 @@ import * as os from 'os';
 import { AbjectId, AbjectMessage, InterfaceId } from '../core/types.js';
 import { Abject, DEFERRED_REPLY } from '../core/abject.js';
 import { request } from '../core/message.js';
-import { require as contractRequire, invariant } from '../core/contracts.js';
+import { require as contractRequire, ensure, invariant } from '../core/contracts.js';
 import { Log } from '../core/timed-log.js';
 import {
   analyzeCommand, checkContainment, pathsOutside, protectedWrites, describeAnalysis,
@@ -89,6 +96,49 @@ const SESSION_GRANT_MS = 30 * 60 * 1000;
 
 /** Auto-approvals one caller may take before it has to check in again. */
 const DEFAULT_BUDGET = 200;
+
+/** The name a caller gets when the registry cannot place it. */
+const UNKNOWN_CALLER = 'an object';
+
+/**
+ * Request types for consequential actions outside this machine.
+ *
+ *   web_action  a click, key or page script that submits or activates
+ *               something on a website, asked by WebBrowser; scope = origin
+ *   mcp_tool    a tool call its MCP server annotates as destructive, asked by
+ *               the MCPBridge for that server; scope = "server/tool"
+ *
+ * They share one policy (decideOutward): a deny rule refuses, the prompt mode
+ * `deny` refuses, a remembered allow for the scope answers in a local or
+ * shared workspace, and everything else is put to the person, in allow mode
+ * too. No autonomy level approves one.
+ */
+export type OutwardType = 'web_action' | 'mcp_tool';
+const OUTWARD_TYPES: readonly OutwardType[] = ['web_action', 'mcp_tool'];
+
+function isOutward(type: string): type is OutwardType {
+  return (OUTWARD_TYPES as readonly string[]).includes(type);
+}
+
+/**
+ * Whether a registered name belongs to the object that performs an outward
+ * action of this type. Checked together with `builtIn`: only an instance of
+ * the class compiled into the server may forward another caller's request.
+ * An MCPBridge registers as `MCPBridge-<server>`, one per enabled server.
+ */
+function ownsOutward(type: OutwardType, name: string): boolean {
+  return type === 'web_action'
+    ? name === 'WebBrowser'
+    : name === 'MCPBridge' || name.startsWith('MCPBridge-');
+}
+
+/** Owner-supplied detail lines: a few short strings, never markup or a novel. */
+function cleanDetail(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((d): d is string => typeof d === 'string')
+    .slice(0, 6)
+    .map(d => d.replace(/[\r\n\t]+/g, ' ').slice(0, 200));
+}
 
 /** Decisions this object understands, whether from a dialog or from policy. */
 export type PermissionDecision =
@@ -237,6 +287,8 @@ export class PermissionBroker extends Abject {
           'Holds the permissions authority on ShellExecutor, HostFileSystem, HttpClient and StreamClient, ' +
           'analyses each shell command into the programs it really runs, and applies the calling ' +
           'project\'s autonomy level capped by the calling workspace\'s access mode. ' +
+          'Consequential web actions (WebBrowser) and destructive MCP tools (MCPBridge) go to the person ' +
+          'unless they remembered an answer for that site or tool. ' +
           'Keeps a log of everything approved without a prompt.',
         version: '1.0.0',
         icon: '🛡️',
@@ -249,11 +301,13 @@ export class PermissionBroker extends Abject {
               name: 'requestPermission',
               description: 'Called by capability objects. Returns a decision, asking the user only when policy cannot answer.',
               parameters: [
-                { name: 'type', type: { kind: 'primitive', primitive: 'string' }, description: 'shell | directory | domain | skill_shell' },
-                { name: 'resource', type: { kind: 'primitive', primitive: 'string' }, description: 'The command, path, or domain' },
-                { name: 'description', type: { kind: 'primitive', primitive: 'string' }, description: 'Human-readable request', optional: true },
+                { name: 'type', type: { kind: 'primitive', primitive: 'string' }, description: 'shell | directory | domain | skill_shell | web_action | mcp_tool' },
+                { name: 'resource', type: { kind: 'primitive', primitive: 'string' }, description: 'The command, path, domain, or the action as the person should read it (e.g. https://example.com: click button "Send")' },
+                { name: 'description', type: { kind: 'primitive', primitive: 'string' }, description: 'Human-readable request; for web_action the action itself (click button "Send")', optional: true },
                 { name: 'cwd', type: { kind: 'primitive', primitive: 'string' }, description: 'Where a command would run', optional: true },
                 { name: 'callerId', type: { kind: 'primitive', primitive: 'string' }, description: 'The object that wants to act', optional: true },
+                { name: 'scope', type: { kind: 'primitive', primitive: 'string' }, description: 'web_action and mcp_tool: what a remembered answer covers (the site origin, or "server/tool")', optional: true },
+                { name: 'detail', type: { kind: 'array', elementType: { kind: 'primitive', primitive: 'string' } }, description: 'web_action and mcp_tool: a few lines shown under the request', optional: true },
               ],
               returns: { kind: 'object', properties: { decision: { kind: 'primitive', primitive: 'string' } } },
             },
@@ -329,7 +383,7 @@ export class PermissionBroker extends Abject {
             },
             {
               name: 'getPromptMode',
-              description: 'What a request no rule decides gets: ask (wait for the person), allow (once, without asking; dangerous commands still ask) or deny.',
+              description: 'What a request no rule decides gets: ask (wait for the person), allow (once, without asking; dangerous commands, consequential web actions and destructive MCP tools still ask) or deny.',
               parameters: [],
               returns: { kind: 'primitive', primitive: 'string' },
             },
@@ -570,6 +624,8 @@ export class PermissionBroker extends Abject {
   /** Only capability owners may attest the originating caller and local grants. */
   private async authorizeRequest(msg: AbjectMessage): Promise<PermissionRequest> {
     const req = { ...(msg.payload as PermissionRequest) };
+    delete req.receipt;
+    if (isOutward(req.type)) return this.authorizeOutward(req, msg.routing.from);
     const ownerNames = req.type === 'shell' || req.type === 'skill_shell' ? ['ShellExecutor']
       : req.type === 'directory' ? ['HostFileSystem', 'ShellExecutor'] : ['HttpClient', 'StreamClient'];
     const owners = await Promise.all(ownerNames.map(name => this.discoverDep(name)));
@@ -580,7 +636,6 @@ export class PermissionBroker extends Abject {
       req.skillPreapproved = false;
       delete req.physicalPaths;
     }
-    delete req.receipt;
     req.skillAuthenticated = false;
     if (req.skillPreapproved && req.callerId) {
       const rows = await this.workspaceRows();
@@ -597,12 +652,43 @@ export class PermissionBroker extends Abject {
     return req;
   }
 
+  /**
+   * An outward request is asked only by the object that will perform it, on
+   * behalf of the object that wants it done. Nothing else has a reason to ask
+   * about a click on a website or a destructive tool, and an object asking on
+   * its own behalf could dress up the question to plant a standing "always"
+   * for itself, so anyone else is refused before a dialog opens.
+   */
+  private async authorizeOutward(req: PermissionRequest, senderId: AbjectId): Promise<PermissionRequest> {
+    const type = req.type as OutwardType;
+    const sender = await this.resolveCallerIdentity(senderId);
+    if (!sender?.builtIn || !ownsOutward(type, sender.name)) {
+      throw new Error(`Only the object that performs a ${type} request may ask about it`);
+    }
+    contractRequire(typeof req.resource === 'string' && req.resource.trim().length > 0, 'resource must be a non-empty string');
+    contractRequire(typeof req.callerId === 'string' && req.callerId.length > 0, 'an outward request names the object it acts for');
+    // A remembered answer is keyed on the scope, so the scope has to be the
+    // part of the resource the person reads first. Anything else falls back
+    // to the whole resource, which can only make a rule narrower.
+    const scope = typeof req.scope === 'string' ? req.scope.trim() : '';
+    req.scope = scope && req.resource.startsWith(scope) ? scope : req.resource;
+    req.description = typeof req.description === 'string' ? req.description.slice(0, 200) : undefined;
+    req.detail = cleanDetail(req.detail);
+    req.preapproved = false;
+    req.skillPreapproved = false;
+    req.skillAuthenticated = false;
+    delete req.physicalPaths;
+    ensure(req.resource.startsWith(req.scope), 'an outward scope is a prefix of its resource');
+    return req;
+  }
+
   private async decide(req: PermissionRequest): Promise<Outcome> {
     contractRequire(typeof req?.resource === 'string', 'resource must be a string');
 
     const ctx = await this.callerContext(req.callerId);
     if (req.type === 'shell') return this.decideShell(req, ctx);
     if (req.type === 'directory') return this.decideDirectory(req, ctx);
+    if (isOutward(req.type)) return this.decideOutward(req, ctx);
 
     const standing = this.standingVerdict(req.type, req.resource);
     if (standing !== undefined) {
@@ -736,6 +822,50 @@ export class PermissionBroker extends Abject {
       }
     }
     return this.ask(req, ctx, undefined, `No standing ${operation} permission for this path`, project);
+  }
+
+  /**
+   * A consequential action outside this machine (see OutwardType).
+   *
+   * Treated like a dangerous command: no autonomy level approves it and the
+   * person sees it unless they already answered for this scope. A remembered
+   * "always" answers only where the caller's workspace keeps autonomy of its
+   * own. In a public workspace, or for an object remote peers can address,
+   * the ceiling is `ask` (ceilingFor), so every one goes to the person there:
+   * a stranger's message could be what set it off.
+   */
+  private async decideOutward(req: PermissionRequest, ctx: CallerContext): Promise<Outcome> {
+    const type = req.type as OutwardType;
+    const scope = req.scope ?? req.resource;
+    const remembered = this.outwardVerdict(type, scope, ctx.name);
+    if (remembered === false) {
+      this.record(req, ctx, 'deny', false, `blocked by rule: ${describeOutward(type, scope, ctx.name, false)}`);
+      return { decision: 'deny', asked: false, restrictEnv: false };
+    }
+    const ceiling: AutonomyLevel = ctx.exposed ? 'ask' : ceilingFor(ctx.accessMode);
+    if (remembered === true && ceiling !== 'ask') {
+      this.record(req, ctx, 'accept_once', false, `rule: ${describeOutward(type, scope, ctx.name, true)}`, undefined, ceiling);
+      return { decision: 'accept_once', asked: false, restrictEnv: false };
+    }
+    const why = remembered === true
+      ? `the remembered allow does not reach ${ctx.exposed ? 'an object remote peers can address'
+        : `the ${ctx.accessMode} workspace${ctx.workspaceName ? ` "${ctx.workspaceName}"` : ''}`}`
+      : type === 'web_action'
+        ? `it can submit or change something on ${scope} with this browser profile's sign-in, and no remembered answer covers the site`
+        : 'its server marks the tool destructive, and no remembered answer covers it';
+    return this.ask(req, ctx, undefined, why, undefined, ceiling);
+  }
+
+  /**
+   * A remembered answer for this scope, from this caller or for every caller.
+   * Undefined when nothing was said; a block outranks an allow.
+   */
+  private outwardVerdict(type: OutwardType, scope: string, caller: string): boolean | undefined {
+    const key = standingKey(type, scope);
+    const matches = this.rules.filter(r =>
+      r.kind === 'exact' && r.command === key && (r.caller === caller || r.caller === '*'));
+    if (matches.some(r => !r.allow)) return false;
+    return matches.some(r => r.allow) ? true : undefined;
   }
 
   /** The level actually in force: the project's ask, capped by reachability. */
@@ -1075,7 +1205,7 @@ export class PermissionBroker extends Abject {
     project?: ExternalProject,
     effective?: AutonomyLevel,
   ): Promise<Outcome> {
-    const unattended = this.unattendedDecision(analysis);
+    const unattended = this.unattendedDecision(req, analysis);
     if (unattended) {
       this.record(req, ctx, unattended, false, `${why}; prompt mode ${this.promptMode}`, project, effective);
       // Nobody saw this command: an allow runs without the host's credentials.
@@ -1095,12 +1225,14 @@ export class PermissionBroker extends Abject {
 
   /**
    * The answer the prompt mode gives without asking, or undefined to ask.
-   * Allow mode still asks about a dangerous or unreadable command: those are
-   * exactly the ones a person should see.
+   * Allow mode still asks about a dangerous or unreadable command, a
+   * consequential web action and a destructive tool: those are exactly the
+   * ones a person should see.
    */
-  private unattendedDecision(analysis: CommandAnalysis | undefined): PermissionDecision | undefined {
+  private unattendedDecision(req: PermissionRequest, analysis: CommandAnalysis | undefined): PermissionDecision | undefined {
     if (this.promptMode === 'deny') return 'deny';
-    if (this.promptMode === 'allow' && !(analysis && (analysis.effect === 'dangerous' || analysis.opaque))) {
+    if (this.promptMode === 'allow' && !isOutward(req.type)
+      && !(analysis && (analysis.effect === 'dangerous' || analysis.opaque))) {
       return 'accept_once';
     }
     return undefined;
@@ -1114,6 +1246,7 @@ export class PermissionBroker extends Abject {
     project?: ExternalProject,
   ): Promise<PermissionDecision> {
     const groups = this.optionsFor(req, ctx, analysis, project);
+    if (isOutward(req.type)) return this.showOutwardPrompt(req, ctx, why, groups);
     const detail = analysis
       ? (() => {
         const d = describeAnalysis(analysis, project?.root);
@@ -1141,6 +1274,39 @@ export class PermissionBroker extends Abject {
       groups,
       // Rides along so the broker's heartbeat names the task and reaches
       // every caller serving it, not just the ones with nothing else open.
+      taskId: req.taskId,
+    });
+    const offered = groups.flatMap(g => g.options.map(o => o.id));
+    if (!answer.answered || !answer.confirmed || !answer.option || !offered.includes(answer.option)) return 'deny';
+    return answer.option as PermissionDecision;
+  }
+
+  /**
+   * The question for a web action or a destructive tool. The sentence is built
+   * here from the verified owner's description, so it reads the same on the
+   * desktop and in a terminal: who, what, and where.
+   */
+  private async showOutwardPrompt(
+    req: PermissionRequest,
+    ctx: CallerContext,
+    why: string,
+    groups: PromptGroup[],
+  ): Promise<PermissionDecision> {
+    const scope = req.scope ?? req.resource;
+    const slash = scope.indexOf('/');
+    const message = req.type === 'web_action'
+      ? `${ctx.name} wants to ${req.description || 'act'} on ${scope}`
+      : slash > 0
+        ? `${ctx.name} wants to run ${scope.slice(slash + 1)} on the ${scope.slice(0, slash)} MCP server, which marks it destructive`
+        : `${ctx.name} wants to run ${scope}, which its MCP server marks destructive`;
+    const answer = await this.askPerson({
+      kind: 'options',
+      topic: 'permission',
+      title: req.type === 'web_action' ? 'Web Action Permission' : 'Tool Permission',
+      message,
+      resource: redactCommand(req.resource),
+      detail: [...(req.detail ?? []), `Asking because   ${why}`],
+      groups,
       taskId: req.taskId,
     });
     const offered = groups.flatMap(g => g.options.map(o => o.id));
@@ -1198,6 +1364,25 @@ export class PermissionBroker extends Abject {
         { id: 'deny', label: 'Deny once', tone: 'default' },
       ],
     });
+
+    // A web action is remembered per site and a tool per server and tool, for
+    // the object asking. Never wider: "always" here means this caller on this
+    // site, not every agent everywhere. An unnamed caller gets no remembered
+    // answer at all, since a rule for "an object" would match strangers.
+    if (isOutward(req.type)) {
+      if (ctx.callerId && ctx.name !== UNKNOWN_CALLER) {
+        const scope = req.scope ?? req.resource;
+        const what = req.type === 'web_action' ? `${ctx.name} on ${scope}` : `${ctx.name} to run ${scope}`;
+        groups.push({
+          label: req.type === 'web_action' ? `On ${scope}` : `Tool ${scope}`,
+          options: [
+            { id: 'accept_always', label: `Always allow ${what}`, tone: 'good' },
+            { id: 'deny_always', label: `Never allow ${what}`, tone: 'bad' },
+          ],
+        });
+      }
+      return groups;
+    }
 
     // A filesystem call has no command line to analyze, but it has the same
     // answers on offer: this task, this project, or the directory it reached
@@ -1276,6 +1461,19 @@ export class PermissionBroker extends Abject {
     analysis: CommandAnalysis | undefined,
     project?: ExternalProject,
   ): Promise<void> {
+    // An outward answer is remembered for this caller and scope only (see
+    // optionsFor); the other decisions have nothing to remember.
+    if (isOutward(req.type)) {
+      if ((decision === 'accept_always' || decision === 'deny_always') && ctx.callerId && ctx.name !== UNKNOWN_CALLER) {
+        await this.addRule({
+          kind: 'exact', caller: ctx.name,
+          command: standingKey(req.type, req.scope ?? req.resource),
+          allow: decision === 'accept_always',
+        });
+      }
+      return;
+    }
+
     // A grant is written for every program the line runs, because a rule
     // covers a line only when it covers all of them. Granting the principal
     // alone left `grep … | head` asking again with the same button on offer.
@@ -1424,7 +1622,7 @@ export class PermissionBroker extends Abject {
   // ═══════════════════════════════════════════════════════════════════
 
   private async callerContext(callerId?: AbjectId): Promise<CallerContext> {
-    const name = (callerId ? await this.resolveCallerName(callerId) : undefined) ?? 'an object';
+    const name = (callerId ? await this.resolveCallerName(callerId) : undefined) ?? UNKNOWN_CALLER;
     if (!callerId) {
       // An unplaceable caller gets the most restrictive treatment there is.
       return { name, accessMode: 'public', exposed: true };
@@ -1525,6 +1723,10 @@ export class PermissionBroker extends Abject {
       '',
       'Levels are set by the user through the project browser. Nothing an object sends here raises one.',
       'Call takeTheWheel to drop everything back to asking.',
+      '',
+      'Outward actions (web_action from WebBrowser, mcp_tool from an MCPBridge) go to the person in',
+      'every mode but deny, unless they remembered an answer for that caller on that site or tool.',
+      'A refusal comes back to the acting object as a failure it can report and adapt to.',
     ];
     return super.askPrompt(question) + '\n\n' + lines.join('\n');
   }
@@ -1581,9 +1783,13 @@ interface PermissionRequest {
   physicalPaths?: Array<{ logical: string; physical?: string }>;
   receipt?: PermissionReceipt;
   taskId?: string;
-  type: 'shell' | 'directory' | 'domain' | 'skill_shell';
+  type: 'shell' | 'directory' | 'domain' | 'skill_shell' | OutwardType;
   resource: string;
   description?: string;
+  /** Outward requests: what a remembered answer covers (site origin, "server/tool"). */
+  scope?: string;
+  /** Outward requests: lines from the acting object shown under the request. */
+  detail?: string[];
   cwd?: string;
   callerId?: AbjectId;
   objectName?: string;
@@ -1698,6 +1904,14 @@ function commonAncestor(a: string, b: string): string | undefined {
   return shared.join(path.sep) || undefined;
 }
 
+/** A remembered outward answer as a person would say it. */
+function describeOutward(type: OutwardType, scope: string, caller: string, allow: boolean): string {
+  const who = caller === '*' ? 'Every object' : caller;
+  return type === 'web_action'
+    ? `${who} ${allow ? 'may' : 'may not'} click, submit or press keys that act on ${scope}`
+    : `${who} ${allow ? 'may' : 'may not'} run the destructive tool ${scope}`;
+}
+
 function describeRule(r: Rule): string {
   const scope = (s: RuleScope) => s.kind === 'anywhere' ? 'anywhere' : s.kind === 'project' ? `in ${s.name}` : `under ${s.root}`;
   // A class rule covers filesystem calls as well as commands of that effect.
@@ -1709,6 +1923,8 @@ function describeRule(r: Rule): string {
   if (standingPath) {
     return `${standingPath[2]} ${r.allow ? 'may' : 'may not'} ${standingPath[1]} "${standingPath[3]}"`;
   }
+  const outward = /^(web_action|mcp_tool):(.*)$/s.exec(r.command);
+  if (outward) return describeOutward(outward[1] as OutwardType, outward[2], r.caller, r.allow);
   const standing = /^(directory|domain|skill_shell):(.*)$/s.exec(r.command);
   if (standing) {
     return `${standing[1] === 'domain' ? 'Network' : 'Filesystem'} access to ` +

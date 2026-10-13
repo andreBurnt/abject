@@ -186,7 +186,10 @@ behind JobManager or AgentAbject); `retainTaskResult()` / `takeTaskResult()`.
   callers learn it through the built-in `getResultContract` request.
 - **permission-outcome.ts**: `PermissionReceipt` (evidence produced by the
   object that owns an operation), `PermissionDenied` (code
-  `PERMISSION_DENIED`, receipt in `details`), `errorDetails()`.
+  `PERMISSION_DENIED`, receipt in `details`, optional caller-facing message),
+  `refusalMessage()` (the one sentence a refused outward action reports:
+  declined by the person, refused by a rule or setting, or nobody reachable),
+  `errorDetails()`.
 
 ### Identity, encoding, ownership
 
@@ -285,6 +288,19 @@ All but `file-edit.ts` and `tool-output.ts` import Node built-ins (`fs`,
 - **agent-session-codec.ts**: `encodeAgentState` / `decodeAgentState`: JSON
   persistence that keeps `Map` and `Set` and drops promises, functions and
   deferred messages.
+- **runtime-fault.ts**: errors for a task the system itself ended, not the
+  world: `runtimeFault(code, detail)` writes `[runtime:<code>] detail`
+  (`inactivity-timeout` from a delegating agent's watchdog, `superseded` by a
+  newer plan, `worker-died`) and `parseRuntimeFault()` reads it back, so the
+  reviewer attributes those misses to `runtime` and keeps them out of the
+  world model.
+- **step-budget.ts**: `plannedStepBudget(requested, {min, default, max})`
+  clamps a planner-sized `maxSteps` into an agent's own range; anything
+  unusable means the agent's default.
+- **scratchpad-keys.ts**: `isInternalScratchpadKey()` and
+  `INTERNAL_SCRATCHPAD_PREFIXES` (`learning/`, `routing/`, `context/`,
+  `scrum/`): the runtime's records about how the work went, which the writer
+  of the user's answer does not see.
 
 ### Knowledge and learning
 
@@ -297,7 +313,14 @@ All but `file-edit.ts` and `tool-output.ts` import Node built-ins (`fs`,
   (`LearningDecision`, `LearningEffect`, `KnowledgeLearning`),
   `validateLearningEffect()` (the accepted knowledge dispositions such as
   `save_entry`, `supersede_entry`, `record_pattern_application`),
-  `canonical()` and `learningFingerprint()`.
+  `canonical()` and `learningFingerprint()`. `observe_pattern` is a verdict on
+  a pattern the goal did not formally apply, kept beside its recorded uses.
+- **evidence.ts**: learning evidence by reference. A decision or knowledge
+  receipt cites a record as `{hash, digest}` (`evidenceReference()`,
+  `evidenceDigest()`: expectation, outcome, verdict, explanation, attribution,
+  each clipped); GoalManager stores the whole record once under
+  `evidence:<sha256>` (`evidenceKey()`). The digest fields match
+  `evidence_digest` in `native/knowledge-base`.
 - **pattern.ts**: the structured pattern-language entry (`PatternBody`:
   context, forces, therefore, evidence, links, ...) stored as JSON and
   rendered for people. `makePattern`, `serializePattern`, `readPattern`,

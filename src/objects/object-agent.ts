@@ -19,6 +19,8 @@ import type { ContentPart } from '../llm/provider.js';
 import { Log } from '../core/timed-log.js';
 import { choiceOf, noulOf, type DecisionQuestion } from '../llm/decision.js';
 import { askScopeQuestions, criterion, instruction } from '../core/decision-questions.js';
+import { runtimeFault } from '../core/runtime-fault.js';
+import { plannedStepBudget } from '../core/step-budget.js';
 
 const log = new Log('ObjectAgent');
 
@@ -280,7 +282,8 @@ When asked about a task, describe which objects you would message and what you w
             dispatchTupleId: tupleId,
             initialMessages: initialMessages.length > 0 ? initialMessages : undefined,
             config: {
-              maxSteps: 15,
+              // The planner may size the task; ObjectAgent keeps 5 to 40 steps.
+              maxSteps: plannedStepBudget(data?.maxSteps, { min: 5, default: 15, max: 40 }),
               timeout: 300000,
               queueName: `object-agent-${taskId}`,
             },
@@ -340,11 +343,11 @@ When asked about a task, describe which objects you would message and what you w
     // at JobManager (no upstream during job execution).
     this.on('progress', (msg: AbjectMessage) => {
       this.resetPendingTicketTimeouts((msg.payload as { taskId?: string } | undefined)?.taskId);
-      // Progress arrives untagged, so it cannot be attributed to one task by
-      // inspection. With several running, every live goal is genuinely being
-      // worked on and each needs its timer reset, so all of them hear about it
-      // — but the message itself belongs to whichever task emitted it, so it
-      // is only quoted when there is no ambiguity about whose it is.
+      // AgentAbject tags its keep-alives with the task's id (streaming, each
+      // think, a running submit_job), so only that task's watchdog resets.
+      // Untagged progress bubbling up from a sub-call is covered by the
+      // agentAct heartbeat instead. The goal line quotes the message only
+      // when it can be attributed to one task.
       if (this.goalManagerId) {
         const payload = msg.payload as { taskId?: string; phase?: string; message?: string } | undefined;
         const goals = new Set<string>();
@@ -849,7 +852,7 @@ Respond with ONE JSON object inside \`\`\`json fenced code markers. Output ONLY 
         this.pendingTickets.delete(ticketId);
         if (this.agentAbjectId) {
           this.send(
-            request(this.id, this.agentAbjectId, 'cancelTask', { taskId: ticketId })
+            request(this.id, this.agentAbjectId, 'cancelTask', { taskId: ticketId, reason: runtimeFault('inactivity-timeout', 'no progress reached ObjectAgent within its inactivity window') })
           );
         }
         entry.reject(new Error(`Task ${ticketId} timed out after ${entry.timeoutMs}ms of inactivity`));
@@ -865,7 +868,7 @@ Respond with ONE JSON object inside \`\`\`json fenced code markers. Output ONLY 
         this.pendingTickets.delete(ticketId);
         if (this.agentAbjectId) {
           this.send(
-            request(this.id, this.agentAbjectId, 'cancelTask', { taskId: ticketId })
+            request(this.id, this.agentAbjectId, 'cancelTask', { taskId: ticketId, reason: runtimeFault('inactivity-timeout', 'no progress reached ObjectAgent within its inactivity window') })
           );
         }
         reject(new Error(`Task ${ticketId} timed out after ${timeout}ms of inactivity`));

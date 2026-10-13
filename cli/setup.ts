@@ -128,7 +128,7 @@ async function setupPermissions(client: AbjectClient): Promise<void> {
   say('Questions show up in this terminal (and on the desktop, when one is open) and wait for your answer.');
   const modes = [
     'Ask me (recommended)',
-    'Allow without asking: for a trusted machine running unattended (dangerous commands still ask)',
+    'Allow without asking: for a trusted machine running unattended (dangerous commands, website clicks that submit or activate something, and destructive MCP tools still ask)',
     'Deny without asking: unattended, and nothing new runs',
   ];
   const current = await client.request<{ mode: string }>('getSettings', { section: 'permissions' }).catch(() => ({ mode: 'ask' }));

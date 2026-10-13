@@ -4082,7 +4082,7 @@ The settings themselves live in SettingsManager, which this window loads from an
         { type: 'select', windowId: this.windowId, options: [...PROMPT_MODE_OPTIONS],
           selectedIndex: Math.max(0, PROMPT_MODE_OPTIONS.indexOf(this.promptMode)) },
         { type: 'label', windowId: this.windowId,
-          text: 'ask waits for you here or in the terminal; allow approves once without asking (dangerous commands still ask); deny refuses.',
+          text: 'ask waits for you here or in the terminal; allow approves once without asking (dangerous commands, website clicks that submit or activate something, and destructive MCP tools still ask); deny refuses.',
           style: { color: this.theme.textSecondary, fontSize: 11, wordWrap: true } },
       ]})
     );

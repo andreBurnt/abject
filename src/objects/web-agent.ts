@@ -17,6 +17,8 @@ import { choiceOf, noulOf, scoreOf, topLevel } from '../llm/decision.js';
 import type { DecisionQuestion, DecisionText } from '../llm/decision.js';
 import { askScopeQuestions, criterion, instruction } from '../core/decision-questions.js';
 import { Log } from '../core/timed-log.js';
+import { runtimeFault } from '../core/runtime-fault.js';
+import { plannedStepBudget } from '../core/step-budget.js';
 
 const log = new Log('WebAgent');
 
@@ -756,7 +758,8 @@ Set keepPageOpen: false to explicitly close the page when done.
             dispatchTupleId: tupleId,
             initialMessages: initialMessages.length > 0 ? initialMessages : undefined,
             config: {
-              maxSteps: 15,
+              // The planner may size the task; multi-page work needs 30 to 50.
+              maxSteps: plannedStepBudget(data?.maxSteps, { min: 5, default: 15, max: 50 }),
               timeout: 300000,
               queueName: `web-agent-${taskId}`,
             },
@@ -792,11 +795,11 @@ Set keepPageOpen: false to explicitly close the page when done.
     // Forward progress to GoalManager so Chat's timeout resets during long operations.
     this.on('progress', (msg: AbjectMessage) => {
       this.resetPendingTicketTimeouts((msg.payload as { taskId?: string } | undefined)?.taskId);
-      // Progress arrives untagged, so it cannot be attributed to one task by
-      // inspection. With several running, every live goal is genuinely being
-      // worked on and each needs its timer reset, so all of them hear about it
-      // — but the message itself belongs to whichever task emitted it, so it
-      // is only quoted when there is no ambiguity about whose it is.
+      // AgentAbject tags its keep-alives with the task's id (streaming, each
+      // think, a running submit_job), so only that task's watchdog resets.
+      // Untagged progress bubbling up from a sub-call is covered by the
+      // agentAct heartbeat instead. The goal line quotes the message only
+      // when it can be attributed to one task.
       if (this.goalManagerId) {
         const payload = msg.payload as { taskId?: string; phase?: string; message?: string } | undefined;
         const goals = new Set<string>();
@@ -960,7 +963,7 @@ Set keepPageOpen: false to explicitly close the page when done.
       entry.timer = this.setTimer(() => {
         this.pendingTickets.delete(ticketId);
         if (this.agentAbjectId) {
-          this.send(request(this.id, this.agentAbjectId, 'cancelTask', { taskId: ticketId }));
+          this.send(request(this.id, this.agentAbjectId, 'cancelTask', { taskId: ticketId, reason: runtimeFault('inactivity-timeout', 'no progress reached WebAgent within its inactivity window') }));
         }
         entry.reject(new Error(`Task ${ticketId} timed out after ${entry.timeoutMs}ms of inactivity`));
       }, entry.timeoutMs);
@@ -979,7 +982,7 @@ Set keepPageOpen: false to explicitly close the page when done.
       const makeTimer = () => this.setTimer(() => {
         this.pendingTickets.delete(ticketId);
         if (this.agentAbjectId) {
-          this.send(request(this.id, this.agentAbjectId, 'cancelTask', { taskId: ticketId }));
+          this.send(request(this.id, this.agentAbjectId, 'cancelTask', { taskId: ticketId, reason: runtimeFault('inactivity-timeout', 'no progress reached WebAgent within its inactivity window') }));
         }
         reject(new Error(`Task ${ticketId} timed out after ${timeoutMs}ms of inactivity`));
       }, timeoutMs);
@@ -2239,7 +2242,8 @@ The page screenshot you produce with \`attach_screenshot\` (and on "done") is a 
 6. If stuck after several attempts, use "fail" with a clear reason.
 7. Give an action at most two tries. When it fails twice, change approach (another ref, the pointer, another route) or fail.
 8. Output ONLY the JSON block. Any one-sentence note belongs in the JSON's \`reasoning\` field.
-9. Pay attention to the step counter. When steps are running low, call "done" with whatever you have.`;
+9. Pay attention to the step counter. When steps are running low, call "done" with whatever you have.
+10. A click, key or script that submits a form or activates a button waits for the person's approval. When it comes back declined (PERMISSION_DENIED: The person declined ...), treat that as their answer: leave the action undone and finish with done or fail, saying what they declined.`;
   }
 }
 

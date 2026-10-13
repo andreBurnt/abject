@@ -4,12 +4,17 @@
  *
  * One MCPBridge instance exists per enabled MCP server. SkillRegistry
  * spawns bridges on enable and stops them on disable.
+ *
+ * A tool its server annotates `destructiveHint: true` runs only after
+ * PermissionBroker approves it (type `mcp_tool`), asked on behalf of the
+ * caller; a refusal comes back as an `isError` result.
  */
 
 import { AbjectId, AbjectMessage, InterfaceId } from '../core/types.js';
 import { Abject, DEFERRED_REPLY } from '../core/abject.js';
 import { request, error } from '../core/message.js';
 import { require as contractRequire } from '../core/contracts.js';
+import { refusalMessage, type PermissionReceipt } from '../core/permission-outcome.js';
 import { MCPTransport } from '../network/mcp-transport.js';
 import type {
   MCPToolDefinition,
@@ -34,6 +39,46 @@ export const MCP_BRIDGE_ID = 'abjects:mcp-bridge' as AbjectId;
 
 export type MCPBridgeStatus = 'idle' | 'connecting' | 'connected' | 'error';
 
+/**
+ * What a server says about its own tool (MCP tool annotations). They are the
+ * server's claims, not guarantees; the bridge acts on `destructiveHint` alone.
+ */
+interface MCPToolAnnotations {
+  title?: string;
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
+}
+
+/**
+ * How long a destructive call waits on PermissionBroker. The broker's dialog
+ * heartbeats while the person decides, which keeps this and every caller
+ * behind it alive, so the timer fires only if the broker itself is gone.
+ */
+const PERMISSION_WAIT_MS = 31 * 60 * 1000;
+
+/** Argument names whose values are never shown in a permission question. */
+const SECRET_ARGUMENT = /token|secret|passw|api[-_]?key|auth|credential|cookie|session/i;
+
+/**
+ * A tool call's arguments as one short line for a person to judge:
+ * `(owner: "me", repo: "demo")`. Strings are clipped, structures are counted,
+ * and anything whose name says it is a secret is masked.
+ */
+function summarizeArguments(input: Record<string, unknown>): string {
+  const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+  const parts = Object.entries(input).map(([key, value]) => {
+    if (SECRET_ARGUMENT.test(key)) return `${key}: ***`;
+    if (typeof value === 'string') return `${key}: ${JSON.stringify(clip(value.replace(/\s+/g, ' '), 40))}`;
+    if (typeof value === 'number' || typeof value === 'boolean' || value === null) return `${key}: ${String(value)}`;
+    if (Array.isArray(value)) return `${key}: [${value.length} item${value.length === 1 ? '' : 's'}]`;
+    if (value && typeof value === 'object') return `${key}: {…}`;
+    return `${key}: ${typeof value}`;
+  });
+  return parts.length > 0 ? `(${clip(parts.join(', '), 160)})` : '';
+}
+
 export interface MCPBridgeConfig {
   serverName: string;
   command: string;
@@ -51,6 +96,8 @@ export class MCPBridge extends Abject {
   private transport: MCPTransport | null = null;
   private bridgeStatus: MCPBridgeStatus = 'idle';
   private bridgeStatusError?: string;
+  /** PermissionBroker, verified built-in; asked before a destructive tool runs. */
+  private permissionBrokerId?: AbjectId;
 
   private cachedTools: MCPToolDefinition[] = [];
   private cachedResources: MCPResourceDefinition[] = [];
@@ -79,7 +126,7 @@ export class MCPBridge extends Abject {
           methods: [
             {
               name: 'callTool',
-              description: 'Invoke an MCP tool on the connected server',
+              description: 'Invoke an MCP tool on the connected server. A tool its server marks destructive waits for the person\'s approval first and may come back declined, as an isError result that says so.',
               parameters: [
                 { name: 'toolName', type: { kind: 'primitive', primitive: 'string' }, description: 'Tool name' },
                 { name: 'input', type: { kind: 'object', properties: {} }, description: 'Tool input arguments' },
@@ -160,6 +207,7 @@ export class MCPBridge extends Abject {
       prompt += `const result = await call(bridgeId, 'callTool', { toolName: '<tool>', input: { /* params */ } });\n`;
       prompt += `// result: { content: string, isError: boolean }\n`;
       prompt += '```\n\n';
+      prompt += 'A tool the server marks destructive waits for the person to approve it, and a declined call returns `isError: true` with content saying who declined; report that and choose another way forward.\n\n';
       prompt += 'Parameter-name aliases are accepted for MCP-standard compatibility: `tool` or `name` for the tool, `arguments` or `args` for the input. Tool names and parameter keys are case-sensitive.\n\n';
       prompt += `### Other methods\n\n`;
       prompt += `- \`listTools\`: returns \`MCPToolDefinition[]\` (the raw list behind the block above).\n`;
@@ -212,7 +260,7 @@ export class MCPBridge extends Abject {
       void _envelopeTimeout;  // currently unused; could be wired into sendRequest deadline later
       contractRequire(typeof toolName === 'string' && toolName.length > 0, 'toolName must be non-empty (accepts toolName, tool, or name)');
 
-      return await this.callTool(toolName, input);
+      return await this.callTool(toolName, input, msg.routing.from);
     });
 
     this.on('listTools', async (_msg: AbjectMessage) => {
@@ -347,7 +395,11 @@ export class MCPBridge extends Abject {
   // Tool / Resource Operations
   // ═══════════════════════════════════════════════════════════════════
 
-  private async callTool(toolName: string, input: Record<string, unknown>): Promise<{ content: string; isError: boolean }> {
+  private async callTool(
+    toolName: string,
+    input: Record<string, unknown>,
+    callerId: AbjectId,
+  ): Promise<{ content: string; isError: boolean; permission?: PermissionReceipt }> {
     contractRequire(this.transport?.isConnected === true, `MCP server "${this.serverName}" is not connected`);
 
     // Validate the tool exists
@@ -368,6 +420,11 @@ export class MCPBridge extends Abject {
       throw err;
     }
 
+    const refusal = await this.consentFor(tool, input, callerId);
+    if (refusal) return refusal;
+    // The person may have taken a while; the server may be gone by now.
+    contractRequire(this.transport?.isConnected === true, `MCP server "${this.serverName}" is not connected`);
+
     const result = await this.transport!.sendRequest('tools/call', {
       name: toolName,
       arguments: input,
@@ -376,6 +433,72 @@ export class MCPBridge extends Abject {
     // Flatten content items to a string for agent consumption
     const text = this.flattenContent(result.content ?? []);
     return { content: text, isError: result.isError ?? false };
+  }
+
+  /**
+   * A tool its server marks destructive runs only once PermissionBroker says
+   * so, asked on behalf of whoever called. Only an explicit
+   * `destructiveHint: true` counts, and not when the same tool also claims
+   * `readOnlyHint: true`; a tool with no annotations runs as before, since
+   * reading intent into a name or description is guessing.
+   *
+   * Returns the refusal as a tool result (`isError`), the shape every caller
+   * of callTool already handles, or undefined to go ahead.
+   */
+  private async consentFor(
+    tool: MCPToolDefinition,
+    input: Record<string, unknown>,
+    callerId: AbjectId,
+  ): Promise<{ content: string; isError: true; permission: PermissionReceipt } | undefined> {
+    const hints = (tool as MCPToolDefinition & { annotations?: MCPToolAnnotations }).annotations;
+    if (hints?.destructiveHint !== true || hints.readOnlyHint === true) return undefined;
+
+    const scope = `${this.serverName}/${tool.name}`;
+    const args = summarizeArguments(input);
+    const resource = args ? `${scope} ${args}` : scope;
+    const action = `run ${resource}`;
+    const receipt = (source: PermissionReceipt['source'], reason: string, decision = 'deny'): PermissionReceipt => ({
+      authority: this.id, callerId, operation: 'mcp_tool', resource, decision, source, reason,
+    });
+    const refuse = (permission: PermissionReceipt) => {
+      log.info(`[${this.serverName}] ${tool.name} not run: ${permission.reason}`);
+      return { content: refusalMessage(permission, action), isError: true as const, permission };
+    };
+
+    const brokerId = await this.permissionBroker();
+    if (!brokerId) return refuse(receipt('unavailable', 'no permission broker is running'));
+    try {
+      const response = await this.request<{ decision: string; receipt?: PermissionReceipt }>(
+        request(this.id, brokerId, 'requestPermission', {
+          type: 'mcp_tool', scope, resource, callerId,
+          description: hints.title ?? tool.name,
+          detail: [
+            ...(tool.description ? [`Tool       ${tool.description.replace(/\s+/g, ' ').slice(0, 160)}`] : []),
+            ...(args ? [`Arguments  ${args}`] : []),
+          ],
+        }),
+        PERMISSION_WAIT_MS,
+      );
+      if (response?.decision?.startsWith('accept')) return undefined;
+      return refuse(response?.receipt ?? receipt('policy', 'refused by PermissionBroker', response?.decision));
+    } catch (err) {
+      // A broker that stopped answering may have been respawned under a new id.
+      this.permissionBrokerId = undefined;
+      return refuse(receipt('unavailable', err instanceof Error ? err.message : String(err)));
+    }
+  }
+
+  /**
+   * The built-in PermissionBroker, found once. Its registered name alone
+   * proves nothing, so the id is accepted only from a built-in registration:
+   * an object that merely calls itself PermissionBroker never answers here.
+   */
+  private async permissionBroker(): Promise<AbjectId | undefined> {
+    if (this.permissionBrokerId) return this.permissionBrokerId;
+    const id = await this.discoverDep('PermissionBroker').catch(() => null);
+    if (!id || !(await this.isBuiltInCaller(id, ['PermissionBroker']))) return undefined;
+    this.permissionBrokerId = id;
+    return id;
   }
 
   private async readResource(uri: string): Promise<{ content: string; mimeType?: string }> {

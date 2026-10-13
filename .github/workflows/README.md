@@ -15,7 +15,7 @@ requests.
     build     (3 runners)  desktop app per OS  -> artifacts release-<platform>
     headless  (5 runners)  headless archives   -> artifacts headless-<target>
     docker    (1 runner)   multi-arch image    -> ghcr.io/<owner>/abject:<version>, :latest
-    release   needs build + headless: download all artifacts, gh release create
+    release   needs build + headless: download release-* and headless-*, gh release create
 ```
 
 ## Jobs
@@ -37,8 +37,9 @@ Every build job checks out the tag and installs Node 24 and pnpm 10, then
 - **docker**: QEMU and Buildx, a GHCR login with the workflow token, and a
   build of the root `Dockerfile` for `linux/amd64` and `linux/arm64`, pushed as
   `ghcr.io/<owner, lowercased>/abject:<version>` and `:latest`.
-- **release**: after `build` and `headless`, downloads every artifact into one
-  directory and runs `gh release create` with all of them, titled
+- **release**: after `build` and `headless`, downloads the `release-*` and
+  `headless-*` artifacts into one directory and runs `gh release create` with
+  all of them, titled
   `Abject <tag>`. The body is the tag's annotation (which `release.mjs`
   writes), or GitHub's generated notes when the annotation is 40 bytes or
   less.
@@ -53,12 +54,17 @@ Permissions: `contents: write` (the release) and `packages: write` (GHCR).
   the `packaging/` templates if package managers should get it.
 - A new desktop artifact type needs its glob in the `build` job's upload step,
   or it never reaches the release (`if-no-files-found: error` only catches a
-  job that uploads nothing).
+  job that uploads nothing). A new job's artifact needs a name the `release`
+  job's download `pattern` matches.
 
 ## Gotchas
 
 - The `release` job does not wait for `docker`; an image push can fail while
   the release still publishes, and the reverse.
+- `docker/build-push-action` uploads its own `*.dockerbuild` build-record
+  artifact. Downloading it fails ("Artifact download failed after 5
+  retries"), which is why the `release` job downloads by pattern instead of
+  everything (v0.15.2 and v0.15.3 failed this way).
 - Package-manager manifests are not published here. After a release, fill
   them with `scripts/fill-manifests.mjs` and publish them by hand (see
   `packaging/README.md`).

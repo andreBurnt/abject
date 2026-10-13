@@ -10,7 +10,7 @@
 
 import type { ClientTransport } from './transport.js';
 import type { PairingPayload } from './pairing.js';
-import { SignalingClient } from '../src/network/signaling.js';
+import { SignalingClient, REMOTE_UI_CLIENT_NAME } from '../src/network/signaling.js';
 import { PeerTransport } from '../src/network/peer-transport.js';
 import { getBrowserIdentity, BrowserIdentity } from './identity-store.js';
 import {
@@ -194,7 +194,7 @@ export class WebRTCClientTransport implements ClientTransport {
         signaling.register(this.identity!.peerId,
           this.identity!.publicSigningKeyJwk,
           this.identity!.publicExchangeKeyJwk,
-          'remote-ui-client');
+          REMOTE_UI_CLIENT_NAME);
         // The signaling socket is persistent and fires onConnect again on
         // every reconnect of its own (server ping timeout, network blip,
         // phone waking up). An established DataChannel does not need

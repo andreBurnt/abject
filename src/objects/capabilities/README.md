@@ -18,7 +18,7 @@ refused, recorded or put to the person.
      ▼
   capability object ──requestPermission──▶ PermissionBroker ──askPerson──▶ DialogBroker
      │   (ShellExecutor, HostFileSystem,     rules, project autonomy,     desktop dialog or
-     │    StreamClient)                      workspace access, prompt mode  terminal answer
+     │    StreamClient, WebBrowser)          workspace access, prompt mode  terminal answer
      ▼
   host effect: child process, fs, socket, fetch, Playwright page
      │
@@ -168,6 +168,15 @@ instance.
   them and close when it unregisters. As a plain Node server it launches its
   own Chromium; inside the desktop app it attaches over CDP to Electron's
   Chromium and gets its windows from BrowserWindowHost.
+  A click, Enter/Space, a typed line break, or a page script's
+  `click()`/`submit()` that submits a form or activates a button-like control
+  is judged in the page at action time from the element's tag, type, role and
+  form (links, GET forms with a declared action, menu openers, fields and
+  reset buttons are not) and goes to PermissionBroker as a `web_action` for
+  the requesting object before it happens; the approved action runs on the
+  same element, a refusal replies `PERMISSION_DENIED` with a sentence such as
+  `The person declined: click button "Accept" on https://example.com`.
+  `viewerInput` (the person's takeover) is taken only from WebBrowserViewer.
 - **`browser-window-host.ts`**: `BrowserWindowHost`
   (`BROWSER_WINDOW_HOST_ID`). Electron-only, main thread only: `getCdpEndpoint`,
   `createWindow`, `closeWindow`, `clearSession`, answered for WebBrowser alone.
@@ -218,7 +227,10 @@ governs and before SettingsManager for that reason. From then on:
   `applyToCapability`, which forwards only those three methods. With no broker
   (a stripped bootstrap) SettingsManager claims the authority itself.
 - ShellExecutor (`shell`), HostFileSystem (`directory`) and StreamClient
-  (`domain`, for an unlisted domain) send `requestPermission` and wait. The
+  (`domain`, for an unlisted domain) send `requestPermission` and wait.
+  WebBrowser (`web_action`) and MCPBridge (`mcp_tool`, outside this
+  directory) find the broker by name, accept it only as a built-in object,
+  and ask before a consequential action; with no broker they refuse. The
   broker decides from durable rules, the external project's autonomy and the
   calling workspace's access mode; what is still undecided follows the prompt
   mode, a global setting: `ask` (default) puts it to the person through

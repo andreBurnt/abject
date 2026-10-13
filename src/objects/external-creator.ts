@@ -44,6 +44,8 @@ import type { FileEdit } from '../core/file-edit.js';
 import { Log } from '../core/timed-log.js';
 import { choiceOf, noulOf, type DecisionQuestion } from '../llm/decision.js';
 import { askScopeQuestions, criterion, instruction } from '../core/decision-questions.js';
+import { runtimeFault } from '../core/runtime-fault.js';
+import { plannedStepBudget } from '../core/step-budget.js';
 
 const log = new Log('ExternalCreator');
 
@@ -80,9 +82,7 @@ const MAX_TASK_STEPS = 120;
 
 /** A planner-requested budget, clamped; anything unusable means the default. */
 export function taskStepBudget(requested: unknown): number {
-  const n = typeof requested === 'number' ? requested : typeof requested === 'string' ? Number(requested) : NaN;
-  if (!Number.isFinite(n)) return DEFAULT_TASK_STEPS;
-  return Math.min(MAX_TASK_STEPS, Math.max(MIN_TASK_STEPS, Math.round(n)));
+  return plannedStepBudget(requested, { min: MIN_TASK_STEPS, default: DEFAULT_TASK_STEPS, max: MAX_TASK_STEPS });
 }
 /** Goal scratchpad prefix for structured verification receipts, one per task. */
 export const VERIFICATION_KEY_PREFIX = 'verification/';
@@ -3169,7 +3169,7 @@ Report in your done result: what changed, which command proved it, and anything 
       entry.timer = this.setTimer(() => {
         this.pendingTickets.delete(ticketId);
         if (this.agentAbjectId) {
-          this.send(request(this.id, this.agentAbjectId, 'cancelTask', { taskId: ticketId }));
+          this.send(request(this.id, this.agentAbjectId, 'cancelTask', { taskId: ticketId, reason: runtimeFault('inactivity-timeout', 'no progress reached ExternalCreator within its inactivity window') }));
         }
         entry.reject(new Error(`Task ${ticketId} timed out after ${entry.timeoutMs}ms of inactivity`));
       }, entry.timeoutMs);
@@ -3187,7 +3187,7 @@ Report in your done result: what changed, which command proved it, and anything 
         timer: this.setTimer(() => {
           this.pendingTickets.delete(ticketId);
           if (this.agentAbjectId) {
-            this.send(request(this.id, this.agentAbjectId, 'cancelTask', { taskId: ticketId }));
+            this.send(request(this.id, this.agentAbjectId, 'cancelTask', { taskId: ticketId, reason: runtimeFault('inactivity-timeout', 'no progress reached ExternalCreator within its inactivity window') }));
           }
           reject(new Error(`Task ${ticketId} timed out after ${timeout}ms of inactivity`));
         }, timeout),

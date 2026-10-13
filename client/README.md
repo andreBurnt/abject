@@ -83,6 +83,14 @@ reaches a desktop over WebRTC.
   reconnects over WebRTC, otherwise WebSocket; the p2p build connects to the
   selected instance or shows the picker), starts the backdrop, creates the
   FrontendClient, and exposes it as `window.frontendClient` for debugging.
+- **`render-notice.ts`**: how the desktop is being drawn. `probeRenderer()`
+  checks WebGL2 on a scratch canvas and recognizes software renderers
+  (SwiftShader, llvmpipe); `showSoftwareNotice(why)` puts a dismissible card
+  in the corner when the desktop is drawn in software (the desktop app says
+  why with `?render=software&why=...`, see `electron/gpu-fallback.ts`; a
+  browser may fall back on its own); `showRendererUnavailable()` replaces
+  the splash's "Assembling the workspace" when the renderer cannot start (no
+  WebGL2), which used to leave the splash up forever.
 - **`frontend-client.ts`**: `FrontendClient`. Owns the canvas, Compositor and
   transport. Applies backend messages (surfaces, draws, scene ops, theme,
   motion, presets, workspaces, Exposé, cursor, file picker), answers

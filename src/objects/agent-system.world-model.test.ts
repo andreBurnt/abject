@@ -116,8 +116,10 @@ for(const native of [true]) {
       assert(!task.injectedKnowledge.some((e:any)=>e.id===old1.id||e.id===old2.id));
       const unrelated=await f.runtime.call(f.kb.id,'recall',{scope:'project:other'});
       assert(unrelated.some((e:any)=>e.id===old1.id),'different scopes must not inherit the retirement');
-      const history=await f.runtime.call(f.kb.id,'get',{id:old1.id});
-      assert.equal(history.learning.history[0].evidence['learning/task/worker'].result.exitCode,0);
+      const history=await f.runtime.call(f.kb.id,'get',{id:old1.id,includeLearning:true});
+      const cited=history.learning.history[0].evidence['learning/task/worker'];
+      assert.match(cited.digest.result,/"exitCode":0/);
+      assert.equal((await f.runtime.call(f.storage.id,'get',{key:`evidence:${cited.hash}`})).result.exitCode,0);
       assert.equal(history.learning.history[0].input.evidence,d.context.evidence);
     }finally{await f.stop();}
   });
@@ -130,7 +132,7 @@ for(const native of [true]) {
       const d=await f.decision([{action:'record_pattern_application',id,applicationRef,verdict:'harmful',evidence:'This application restored stale values over newer edits',outcome:'success'}]);
       assert.equal((await f.apply(d)).success,true);
       await f.restartKnowledge(); assert.equal((await f.apply(d)).duplicate,true);
-      const current=await f.runtime.call(f.kb.id,'get',{id});
+      const current=await f.runtime.call(f.kb.id,'get',{id,includeLearning:true});
       assert.equal(current.pattern.learning.applications.length,1);
       assert.equal(current.pattern.learning.applications[0].patternRevision,1);
       assert.equal(current.pattern.learning.applications[0].verdict,'harmful');
@@ -288,7 +290,9 @@ test('legacy partial proposals are journaled once and recover as focused work wi
     await (f.reviewer as any).recoverLegacyReviews(); await (f.reviewer as any).recoverLegacyReviews();
     const pending=await f.runtime.call(f.goals.id,'pendingLearningDecisions'); assert.equal(pending.length,1); assert.equal(pending[0].effects.length,2);
     assert(pending[0].effects.every((e:any)=>e.state==='needs_repair'&&!e.input.evidence));
-    assert.equal(pending[0].evidence['learning/task/worker'].result.passed,198);
+    const cited=pending[0].evidence['learning/task/worker'];
+    assert.match(cited.digest.result,/"passed":198/);
+    assert.equal((await f.runtime.call(f.storage.id,'get',{key:`evidence:${cited.hash}`})).result.passed,198);
     assert.equal((await f.runtime.call(f.kb.id,'get',{id:a.id})).archived,false);
   }finally{await f.stop();}
 });
@@ -352,7 +356,10 @@ test('unfinished learning restores from its owner journal without the old goal i
     await f.runtime.call(f.storage.id,'set',{key:'goals:index',value:[]});
     await f.restartOwners();
     const pending=await f.runtime.call(f.goals.id,'pendingLearningDecisions');
-    assert.equal(pending[0].id,d.id); assert.equal(pending[0].evidence['learning/task/worker'].result.passed,198);
+    assert.equal(pending[0].id,d.id);
+    const cited=pending[0].evidence['learning/task/worker'];
+    assert.match(cited.digest.result,/"passed":198/);
+    assert.equal((await f.runtime.call(f.storage.id,'get',{key:`evidence:${cited.hash}`})).result.passed,198);
   }finally{await f.stop();}
 });
 

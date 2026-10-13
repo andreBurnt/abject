@@ -13,12 +13,18 @@
  * BrowserWindowHost opens the windows the pages live in, so the app carries
  * no second browser. Either way every page is a Playwright Page, and all the
  * page methods below work on it the same.
+ *
+ * A page may be signed in as the person, so an action that submits a form or
+ * activates a button asks PermissionBroker first (type `web_action`, scope the
+ * site's origin) on behalf of the object that asked for it. See "Consent for
+ * consequential actions" below.
  */
 
 import { AbjectId, AbjectMessage, MethodDeclaration } from '../../core/types.js';
 import { Abject, DEFERRED_REPLY } from '../../core/abject.js';
 import { error, request } from '../../core/message.js';
 import { require as requireContract } from '../../core/contracts.js';
+import { PermissionDenied, refusalMessage, type PermissionReceipt } from '../../core/permission-outcome.js';
 import { Log } from '../../core/timed-log.js';
 import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
@@ -104,16 +110,26 @@ type PlaywrightPage = {
   setContent: (html: string) => Promise<void>;
   setViewportSize: (size: { width: number; height: number }) => Promise<void>;
   on: (event: string, fn: () => void) => void;
+  frames: () => PlaywrightFrame[];
+  mainFrame: () => PlaywrightFrame;
   // ARIA snapshot for AI (private Playwright API, stable since ~1.49)
   _snapshotForAI: (opts: { track: string }) => Promise<{ full: string; incremental?: string }>;
   // Locator-based interaction
   locator: (selector: string) => PlaywrightLocator;
 };
 
+type PlaywrightFrame = {
+  evaluate: (script: string) => Promise<unknown>;
+  childFrames: () => PlaywrightFrame[];
+  frameElement: () => Promise<{ getAttribute: (name: string) => Promise<string | null>; dispose: () => Promise<void> }>;
+  url: () => string;
+};
+
 type PlaywrightLocator = {
   count: () => Promise<number>;
+  first: () => PlaywrightLocator;
   isVisible: () => Promise<boolean>;
-  evaluate: (fn: (el: Element) => unknown) => Promise<unknown>;
+  evaluate: <A>(fn: (el: Element, arg: A) => unknown, arg?: A) => Promise<unknown>;
   click: (opts?: unknown) => Promise<void>;
   fill: (value: string, opts?: unknown) => Promise<void>;
   type: (text: string, opts?: unknown) => Promise<void>;
@@ -132,6 +148,234 @@ interface PointTarget {
   type?: string;
   text?: string;
 }
+
+// ---------------------------------------------------------------------------
+// Consequential actions
+// ---------------------------------------------------------------------------
+
+/** How an action reaches an element: a click, a key that activates or submits, a form submit. */
+type ActionKind = 'click' | 'enter' | 'space' | 'submit';
+
+/** What an action on one element would do, judged in the page at action time. */
+interface ActionVerdict {
+  /** True when it submits a form or activates a button-like control. */
+  consequential: boolean;
+  /** The action as the person reads it: `click button "Accept"`. */
+  action: string;
+  /** What it does: `activates a button`, `submits form "login" to https://… (POST)`. */
+  effect: string;
+  /** The control it lands on: `button "Accept"`. */
+  control: string;
+  /** The URL of the document the control lives in (a frame's own, inside a frame). */
+  url: string;
+}
+
+/**
+ * Judge what an action on an element would do, from the element's own
+ * properties as the page has them now: tag, type, role, disabled state and
+ * form membership. Never from words on the page, which say what a site wants
+ * a person to think rather than what the control does.
+ *
+ * Consequential: activating a button-like control (button, input
+ * submit/image/button, role button or menuitem, a link with nothing to follow),
+ * submitting a form, and Enter in a form's field (implicit submission), or
+ * Enter/Space on a button. Not: following a link, a GET form with a declared
+ * action (that is a link with fields), opening a menu or disclosure
+ * (aria-haspopup, aria-expanded), a reset button, a disabled control, and
+ * anything typed or toggled in a field.
+ *
+ * Plain page JavaScript in a string, run by Playwright in the page (a compiled
+ * function would carry bundler helpers the page does not have). Takes
+ * `(element, { kind, mark })`; `mark`, when given, is set as
+ * `data-abjects-consent` on the element when the verdict is consequential, so
+ * the caller can act on exactly that element once the person approves.
+ */
+const CLASSIFY_ACTION_SOURCE = String.raw`(el, opts) => {
+  const kind = opts && opts.kind, mark = opts && opts.mark;
+  const clip = (s, n) => {
+    const t = String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+    return t.length > n ? t.slice(0, n - 1) + '…' : t;
+  };
+  const up = (n) => {
+    if (n.parentElement) return n.parentElement;
+    const root = n.getRootNode ? n.getRootNode() : null;
+    return root && root.host ? root.host : null;
+  };
+  const tagOf = (n) => (n && n.tagName ? n.tagName.toLowerCase() : '');
+  const roleOf = (n) => (n && n.getAttribute ? (n.getAttribute('role') || '').trim().toLowerCase().split(/\s+/)[0] : '');
+  const CONTROL_TAGS = ['a', 'button', 'input', 'select', 'textarea', 'summary', 'label', 'option'];
+  const CONTROL_ROLES = ['button', 'link', 'menuitem', 'menuitemcheckbox', 'menuitemradio', 'tab', 'checkbox',
+    'radio', 'switch', 'option', 'combobox', 'textbox', 'searchbox', 'slider', 'spinbutton', 'treeitem'];
+  const BUTTON_INPUTS = ['submit', 'image', 'button', 'reset'];
+  const isControl = (n) => CONTROL_TAGS.includes(tagOf(n)) || CONTROL_ROLES.includes(roleOf(n));
+
+  const target = el && el.nodeType === 1 ? el : (el && el.parentElement) || null;
+  if (!target) return null;
+  const doc = target.ownerDocument || document;
+  const url = doc.location ? doc.location.href : '';
+
+  const nameOf = (n) => {
+    const t = tagOf(n), ty = String(n.type || '').toLowerCase();
+    const by = (n.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean)
+      .map((id) => { const l = doc.getElementById(id); return l ? (l.innerText || l.textContent || '') : ''; }).join(' ');
+    const own = t === 'input' && BUTTON_INPUTS.includes(ty) ? (n.value || n.getAttribute('alt') || '') : '';
+    const label = n.labels && n.labels.length ? (n.labels[0].innerText || '') : '';
+    const text = t === 'input' || t === 'textarea' || t === 'select' ? '' : (n.innerText || n.textContent || '');
+    return clip(n.getAttribute('aria-label') || by || own || label || text || n.getAttribute('title')
+      || n.getAttribute('alt') || n.getAttribute('placeholder') || n.getAttribute('name') || '', 80);
+  };
+  const kindOf = (n) => {
+    const t = tagOf(n), r = roleOf(n), ty = String(n.type || '').toLowerCase();
+    if (r) return r;
+    if (t === 'input') return BUTTON_INPUTS.includes(ty) ? 'button' : 'field';
+    if (t === 'a') return 'link';
+    if (t === 'textarea' || t === 'select' || n.isContentEditable) return 'field';
+    return t;
+  };
+  const describe = (n) => {
+    const name = nameOf(n).replace(/"/g, "'");
+    return name ? kindOf(n) + ' "' + name + '"' : kindOf(n);
+  };
+  const formName = (f) => {
+    const name = clip(f.getAttribute('aria-label') || f.getAttribute('name') || f.id || '', 60);
+    return name ? 'form "' + name + '"' : 'a form';
+  };
+  const verdict = (consequential, action, effect, control) => {
+    if (consequential && mark) target.setAttribute('data-abjects-consent', mark);
+    return { consequential, action, effect, control, url };
+  };
+  // What submitting this form does. A GET form that names where it goes is a
+  // link with fields (a search box), the same as following a link.
+  const submission = (form, submitter) => {
+    const sub = submitter && submitter.getAttribute ? submitter : null;
+    const method = String((sub && sub.getAttribute('formmethod')) || form.getAttribute('method') || 'get').toLowerCase();
+    if (method === 'dialog') return { consequential: false, effect: 'closes a dialog' };
+    const declared = sub && sub.hasAttribute('formaction') ? sub.getAttribute('formaction') : form.getAttribute('action');
+    const to = sub && sub.hasAttribute('formaction') ? sub.formAction : form.action;
+    const named = declared != null && declared.trim() !== '' && !/^\s*javascript:/i.test(declared);
+    if (method === 'get' && named) return { consequential: false, effect: 'loads ' + clip(to, 100) + ' like a link (GET form)' };
+    return { consequential: true,
+      effect: 'submits ' + formName(form) + (named ? ' to ' + clip(to, 100) : '') + (method === 'post' ? ' (POST)' : '') };
+  };
+
+  if (kind === 'submit' && tagOf(target) === 'form') {
+    const s = submission(target, null);
+    return verdict(s.consequential, 'submit ' + formName(target), s.effect, formName(target));
+  }
+
+  let c = target;
+  while (c && !isControl(c)) c = up(c);
+  if (!c) c = target;
+  if (tagOf(c) === 'label' && c.control) c = c.control;
+  const tag = tagOf(c), role = roleOf(c);
+  const type = tag === 'input' || tag === 'button' ? String(c.type || '').toLowerCase() : '';
+  const form = ['button', 'input', 'select', 'textarea'].includes(tag) ? c.form : null;
+  const opensUi = () => {
+    const popup = (c.getAttribute('aria-haspopup') || '').toLowerCase();
+    return (popup !== '' && popup !== 'false') || c.hasAttribute('aria-expanded');
+  };
+  const buttonish = tag === 'button' || (tag === 'input' && BUTTON_INPUTS.includes(type)) || role === 'button' || role === 'menuitem';
+  // What activating the control does: a click, or Enter/Space on it.
+  const activation = () => {
+    if (c.disabled === true) return { consequential: false, effect: 'disabled, does nothing' };
+    if (tag === 'a' && role !== 'button' && role !== 'menuitem') {
+      const href = (c.getAttribute('href') || '').trim();
+      if (href !== '' && href !== '#' && !/^javascript:/i.test(href)) return { consequential: false, effect: 'follows a link' };
+      return opensUi() ? { consequential: false, effect: 'opens a menu or panel' }
+        : { consequential: true, effect: 'activates a link that leads nowhere but its script' };
+    }
+    if (tag === 'button' || (tag === 'input' && BUTTON_INPUTS.includes(type))) {
+      if (type === 'reset') return { consequential: false, effect: 'resets a form' };
+      if ((type === 'submit' || type === 'image') && form) return submission(form, c);
+      return opensUi() ? { consequential: false, effect: 'opens a menu or panel' } : { consequential: true, effect: 'activates a button' };
+    }
+    if (role === 'button' || role === 'menuitem') {
+      return opensUi() ? { consequential: false, effect: 'opens a menu or panel' } : { consequential: true, effect: 'activates a ' + role };
+    }
+    return { consequential: false, effect: 'no button or form here' };
+  };
+
+  if (kind === 'click') {
+    const a = activation();
+    return verdict(a.consequential, 'click ' + describe(c), a.effect, describe(c));
+  }
+  if (kind === 'space') {
+    if (!buttonish) return verdict(false, 'press Space in ' + describe(c), 'types or toggles', describe(c));
+    const a = activation();
+    return verdict(a.consequential, 'press Space on ' + describe(c), a.effect, describe(c));
+  }
+  if (kind === 'enter') {
+    if (tag === 'textarea' || (tag !== 'input' && !buttonish && c.isContentEditable)) {
+      return verdict(false, 'press Enter in ' + describe(c), 'starts a new line', describe(c));
+    }
+    if (tag === 'input' && !BUTTON_INPUTS.includes(type)) {
+      if (!form || ['checkbox', 'radio', 'file', 'range', 'color', 'hidden'].includes(type)) {
+        return verdict(false, 'press Enter in ' + describe(c), 'not in a form', describe(c));
+      }
+      const fallback = Array.from(form.elements).find((e) =>
+        (e.tagName === 'BUTTON' || e.tagName === 'INPUT') && (e.type === 'submit' || e.type === 'image')) || null;
+      const s = submission(form, fallback);
+      return verdict(s.consequential, 'press Enter in ' + describe(c), s.effect, describe(c));
+    }
+    const a = activation();
+    return verdict(a.consequential, 'press Enter on ' + describe(c), a.effect, describe(c));
+  }
+  const s = form ? submission(form, null) : { consequential: false, effect: 'no form' };
+  return verdict(s.consequential, 'submit ' + (form ? formName(form) : describe(c)), s.effect, describe(c));
+}`;
+
+/** The classifier as a function Playwright can hand an element to. */
+const classifyAction = new Function(`return ${CLASSIFY_ACTION_SOURCE}`)() as
+  (el: Element, opts: { kind: ActionKind; mark?: string }) => ActionVerdict | null;
+
+/**
+ * Which activation a key press is: Enter (any modifiers, the numpad's too)
+ * submits a form field or activates a button; Space activates a button.
+ * Anything else (Tab, arrows, letters) is typing or moving, and is not asked
+ * about.
+ */
+function keyKind(key: string): ActionKind | undefined {
+  if (typeof key !== 'string' || key.length === 0) return undefined;
+  if (key === ' ') return 'space';
+  const parts = key.split('+');
+  const base = parts[parts.length - 1] || '+';
+  if (base === 'Enter' || base === 'NumpadEnter') return 'enter';
+  if (base === 'Space' || base === ' ') return 'space';
+  return undefined;
+}
+
+/** The site a URL belongs to, as a remembered answer names it: an origin. */
+function siteOf(url: string): string {
+  try {
+    const u = new URL(url);
+    return u.origin && u.origin !== 'null' ? u.origin : u.protocol;
+  } catch {
+    return url.slice(0, 60) || 'this page';
+  }
+}
+
+/** A URL as the person needs it to judge an action: no query or fragment, which may hold tokens. */
+function pageOf(url: string): string {
+  try {
+    const u = new URL(url);
+    const shown = u.origin && u.origin !== 'null' ? `${u.origin}${u.pathname}` : `${u.protocol}${u.pathname.slice(0, 40)}`;
+    return shown.length > 120 ? `${shown.slice(0, 119)}…` : shown;
+  } catch {
+    return url.slice(0, 120);
+  }
+}
+
+/** Whether two verdicts name the same control on the same site (nothing moved while the person decided). */
+function sameControl(a: ActionVerdict, b: ActionVerdict | null): boolean {
+  return !!b && b.consequential && a.action === b.action && a.control === b.control && siteOf(a.url) === siteOf(b.url);
+}
+
+/**
+ * How long an action waits on PermissionBroker. The dialog heartbeats while
+ * the person decides, which resets this and every caller's timer behind it,
+ * so it fires only when the broker itself is gone (as for ShellExecutor).
+ */
+const PERMISSION_WAIT_MS = 31 * 60 * 1000;
 
 interface TrackedPage {
   page: PlaywrightPage;
@@ -347,7 +591,7 @@ const STATEFUL_METHODS: MethodDeclaration[] = [
   // -- Interaction --
   {
     name: 'click',
-    description: 'Click an element on a persistent page.',
+    description: 'Click an element on a persistent page. A click that submits a form or activates a button may wait for the person\'s approval and can come back declined (PERMISSION_DENIED).',
     parameters: [
       {
         name: 'pageId',
@@ -478,7 +722,7 @@ const STATEFUL_METHODS: MethodDeclaration[] = [
   },
   {
     name: 'press',
-    description: 'Press a keyboard key (e.g. "Enter", "Tab", "ArrowDown").',
+    description: 'Press a keyboard key (e.g. "Enter", "Tab", "ArrowDown"). Enter in a form field or on a button may wait for the person\'s approval and can come back declined (PERMISSION_DENIED).',
     parameters: [
       {
         name: 'pageId',
@@ -733,7 +977,7 @@ const STATEFUL_METHODS: MethodDeclaration[] = [
   },
   {
     name: 'refAction',
-    description: 'Perform an action on an element identified by its ARIA snapshot ref.',
+    description: 'Perform an action on an element identified by its ARIA snapshot ref. A click or key that submits a form or activates a button may wait for the person\'s approval and can come back declined (PERMISSION_DENIED).',
     parameters: [
       { name: 'pageId', type: { kind: 'primitive', primitive: 'string' }, description: 'Page handle' },
       { name: 'ref', type: { kind: 'primitive', primitive: 'string' }, description: 'Element ref from ARIA snapshot (e.g. "e5")' },
@@ -820,7 +1064,7 @@ const STATEFUL_METHODS: MethodDeclaration[] = [
   },
   {
     name: 'viewerInput',
-    description: 'Dispatch a batch of raw human input events (mouse move/down/up, wheel, key press, text insertion) to any page by pageId, in order. Events go through the browser input pipeline so pages see trusted input with real mouse trails. No ownership check — viewer takeover method.',
+    description: 'Dispatch a batch of raw human input events (mouse move/down/up, wheel, key press, text insertion) to any page by pageId, in order. Events go through the browser input pipeline so pages see trusted input with real mouse trails. No ownership check: a viewer takeover method, taken only from the built-in WebBrowserViewer (it is the person\'s own input, so it is never asked about).',
     parameters: [
       {
         name: 'pageId',
@@ -856,7 +1100,7 @@ const STATEFUL_METHODS: MethodDeclaration[] = [
   },
   {
     name: 'evaluate',
-    description: 'Execute a JavaScript expression in the context of a persistent page and return the result.',
+    description: 'Execute a JavaScript expression in the context of a persistent page and return the result. A click or submit the script makes on a button or form pauses the script for the person\'s approval; declined, the call fails (PERMISSION_DENIED), approved, that one action runs and the result says the script stopped there.',
     parameters: [
       {
         name: 'pageId',
@@ -879,7 +1123,7 @@ const STATEFUL_METHODS: MethodDeclaration[] = [
   // -- Pointer and keyboard: real input at viewport coordinates --
   {
     name: 'clickAt',
-    description: 'Click at a point of the visible viewport with real mouse input, as a person would. Coordinates are CSS pixels from the viewport\'s top-left, the same pixels as screenshotPage with scale "css". Returns the element that was under the pointer.',
+    description: 'Click at a point of the visible viewport with real mouse input, as a person would. Coordinates are CSS pixels from the viewport\'s top-left, the same pixels as screenshotPage with scale "css". Returns the element that was under the pointer. A click that submits a form or activates a button may wait for the person\'s approval and can come back declined (PERMISSION_DENIED).',
     parameters: [
       { name: 'pageId', type: { kind: 'primitive', primitive: 'string' }, description: 'Page handle' },
       { name: 'x', type: { kind: 'primitive', primitive: 'number' }, description: 'Viewport x in CSS pixels' },
@@ -1007,6 +1251,15 @@ export class WebBrowser extends Abject {
   /** Pages that live in app windows (desktop app), as opposed to launched browsers. */
   private electronPages: WeakSet<object> = new WeakSet();
 
+  /** PermissionBroker, verified built-in; asked before a consequential action. */
+  private permissionBrokerId?: AbjectId;
+  /**
+   * Where a page script's guard lives on `window` while the script runs (see
+   * evaluateGuarded). Random per run of this object so a script cannot name
+   * it without searching for it.
+   */
+  private readonly guardKey = `__abjectsGuard_${randomUUID().replace(/-/g, '')}`;
+
   /** Storage key for the profile metadata index ({name, createdAt, lastUsed}). */
   private static readonly PROFILES_INDEX_KEY = 'web-browser:profiles';
 
@@ -1015,7 +1268,8 @@ export class WebBrowser extends Abject {
       manifest: {
         name: 'WebBrowser',
         description:
-          'Low-level headless browser engine. Provides raw page operations: navigate, click, fill forms, take screenshots, extract HTML, and query elements via a stateful page API (open, navigate, interact, read, close).',
+          'Low-level headless browser engine. Provides raw page operations: navigate, click, fill forms, take screenshots, extract HTML, and query elements via a stateful page API (open, navigate, interact, read, close). ' +
+          'Actions that submit a form or activate a button ask the person first, through PermissionBroker.',
         version: '2.0.0',
         interface: {
             id: WEB_BROWSER_INTERFACE,
@@ -1088,6 +1342,12 @@ export class WebBrowser extends Abject {
         fn(tracked, payload, msg).then(
           (result) => this.sendDeferredReply(msg, result),
           (err) => {
+            // A refusal keeps its own code and receipt, so the caller can tell
+            // "the person said no" from a page that broke.
+            if (err instanceof PermissionDenied) {
+              this.send(error(msg, err.code, err.message, err.details));
+              return;
+            }
             this.send(error(msg, 'BROWSER_ERROR',
               err instanceof Error ? err.message : String(err)
             ));
@@ -1100,6 +1360,290 @@ export class WebBrowser extends Abject {
       }
       return DEFERRED_REPLY;
     });
+  }
+
+  // ===========================================================================
+  // Consent for consequential actions
+  // ===========================================================================
+  //
+  // A page here may be signed in as the person (a persistent profile), so a
+  // click that submits or activates something acts in their name. Those go to
+  // PermissionBroker (type `web_action`) for the object that asked, before
+  // they happen; reading, scrolling, hovering, following links and typing
+  // into a field never do. What counts is judged in the page at action time
+  // (CLASSIFY_ACTION_SOURCE). The broker and the rules the person set are the
+  // whole policy: this object only asks and honours the answer.
+
+  /**
+   * Return when the person (or a rule they set) allows this action; throw
+   * PermissionDenied with a sentence the calling agent can act on when not.
+   * A verdict that is not consequential passes without asking.
+   */
+  private async requireConsent(requesterId: AbjectId, verdict: ActionVerdict | null | undefined): Promise<void> {
+    if (!verdict?.consequential) return;
+    requireContract(typeof verdict.action === 'string' && verdict.action.length > 0, 'a consequential action names itself');
+    const site = siteOf(verdict.url);
+    const resource = `${site}: ${verdict.action}`;
+    const what = `${verdict.action} on ${site}`;
+    const receipt = (source: PermissionReceipt['source'], reason: string, decision = 'deny'): PermissionReceipt => ({
+      authority: this.id, callerId: requesterId, operation: 'web_action', resource, decision, source, reason,
+    });
+    const refuse = (permission: PermissionReceipt): never => {
+      log.info(`not done: ${resource} (${permission.source}: ${permission.reason})`);
+      throw new PermissionDenied(permission, refusalMessage(permission, what));
+    };
+
+    const brokerId = await this.permissionBroker();
+    if (!brokerId) return refuse(receipt('unavailable', 'no permission broker is running'));
+    let response: { decision?: string; receipt?: PermissionReceipt } | undefined;
+    try {
+      response = await this.request<{ decision?: string; receipt?: PermissionReceipt }>(
+        request(this.id, brokerId, 'requestPermission', {
+          type: 'web_action', scope: site, resource, callerId: requesterId,
+          description: verdict.action,
+          detail: [`Page       ${pageOf(verdict.url)}`, `Effect     ${verdict.effect}`],
+        }),
+        PERMISSION_WAIT_MS,
+      );
+    } catch (err) {
+      // A broker that stopped answering may come back under a new id.
+      this.permissionBrokerId = undefined;
+      return refuse(receipt('unavailable', err instanceof Error ? err.message : String(err)));
+    }
+    if (response?.decision?.startsWith('accept')) {
+      log.info(`approved: ${resource}`);
+      return;
+    }
+    return refuse(response?.receipt ?? receipt('policy', 'refused by PermissionBroker', response?.decision));
+  }
+
+  /**
+   * The built-in PermissionBroker, found once. A registered name proves
+   * nothing by itself, so the id is accepted only from a built-in
+   * registration: an object that merely calls itself PermissionBroker never
+   * gets to answer here. Absent one, consequential actions are refused.
+   */
+  private async permissionBroker(): Promise<AbjectId | undefined> {
+    if (this.permissionBrokerId) return this.permissionBrokerId;
+    const id = await this.discoverDep('PermissionBroker').catch(() => null);
+    if (!id || !(await this.isBuiltInCaller(id, ['PermissionBroker']))) return undefined;
+    this.permissionBrokerId = id;
+    return id;
+  }
+
+  /** What an action on the element a locator resolves to would do. */
+  private async locatorVerdict(locator: PlaywrightLocator, kind: ActionKind, mark?: string): Promise<ActionVerdict | null> {
+    return await locator.evaluate(classifyAction, { kind, mark }) as ActionVerdict | null;
+  }
+
+  /**
+   * What a key would do to whatever has keyboard focus, in whichever frame
+   * holds it (shadow roots included). Null when focus is on nothing.
+   */
+  private async focusedVerdict(page: PlaywrightPage, kind: ActionKind): Promise<ActionVerdict | null> {
+    const script = `(() => {
+      let el = document.activeElement;
+      while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;
+      if (!el || el === document.body || el === document.documentElement) return null;
+      if (el.tagName === 'IFRAME' || el.tagName === 'FRAME') return null;
+      return { focus: document.hasFocus(), verdict: (${CLASSIFY_ACTION_SOURCE})(el, ${JSON.stringify({ kind })}) };
+    })()`;
+    let unfocused: ActionVerdict | null = null;
+    for (const frame of page.frames()) {
+      const r = await frame.evaluate(script).catch(() => null) as { focus: boolean; verdict: ActionVerdict | null } | null;
+      if (!r?.verdict) continue;
+      if (r.focus) return r.verdict;
+      unfocused ??= r.verdict;
+    }
+    return unfocused;
+  }
+
+  /**
+   * What a click at a viewport point would do. A point over a frame is
+   * followed into it (up to a few levels), since that is where the click
+   * lands; a frame that cannot be entered counts as consequential, because
+   * nobody can see what it holds.
+   */
+  private async pointVerdict(page: PlaywrightPage, x: number, y: number): Promise<ActionVerdict | null> {
+    let frame = page.mainFrame();
+    let px = x;
+    let py = y;
+    for (let depth = 0; depth < 4; depth++) {
+      const token = randomUUID();
+      const hit = await frame.evaluate(`(() => {
+        const el = document.elementFromPoint(${px}, ${py});
+        if (!el) return null;
+        if (el.tagName === 'IFRAME' || el.tagName === 'FRAME') {
+          const b = el.getBoundingClientRect();
+          el.setAttribute('data-abjects-probe', ${JSON.stringify(token)});
+          return { frame: true, x: ${px} - b.left - el.clientLeft, y: ${py} - b.top - el.clientTop, src: el.src || '' };
+        }
+        return { verdict: (${CLASSIFY_ACTION_SOURCE})(el, { kind: 'click' }) };
+      })()`).catch(() => null) as { verdict?: ActionVerdict | null; frame?: boolean; x?: number; y?: number; src?: string } | null;
+      if (!hit) return null;
+      if (!hit.frame) return hit.verdict ?? null;
+
+      let inner: PlaywrightFrame | undefined;
+      for (const child of frame.childFrames()) {
+        const handle = await child.frameElement().catch(() => undefined);
+        const probe = handle ? await handle.getAttribute('data-abjects-probe').catch(() => null) : null;
+        await handle?.dispose().catch(() => {});
+        if (probe === token) { inner = child; break; }
+      }
+      await frame.evaluate(`document.querySelectorAll('[data-abjects-probe]').forEach((e) => e.removeAttribute('data-abjects-probe'))`).catch(() => {});
+      if (!inner) {
+        return { consequential: true, action: 'click inside an embedded frame', effect: 'what the frame holds cannot be seen',
+          control: 'frame', url: hit.src || frame.url() };
+      }
+      frame = inner;
+      px = Number(hit.x);
+      py = Number(hit.y);
+    }
+    return { consequential: true, action: 'click inside nested embedded frames', effect: 'what the frames hold cannot be seen',
+      control: 'frame', url: frame.url() };
+  }
+
+  /**
+   * Ask about a marked element, then act on exactly that element. A page that
+   * re-rendered while the person decided must not turn their yes into a click
+   * on a different control under the same selector; a vanished mark ends the
+   * action instead.
+   */
+  private async actOnMarked(
+    page: PlaywrightPage,
+    requesterId: AbjectId,
+    verdict: ActionVerdict,
+    mark: string,
+    act: (selector: string) => Promise<void>,
+  ): Promise<void> {
+    const selector = `[data-abjects-consent="${mark}"]`;
+    try {
+      await this.requireConsent(requesterId, verdict);
+      if (await page.locator(selector).count() === 0) {
+        throw new Error('The control changed while waiting for approval; look at the page again before acting');
+      }
+      await act(selector);
+    } finally {
+      await page.evaluate(`document.querySelectorAll('[data-abjects-consent="${mark}"]').forEach((e) => e.removeAttribute('data-abjects-consent'))`)
+        .catch(() => { /* navigated away: the mark went with the document */ });
+    }
+  }
+
+  /**
+   * Run a caller's page script with consequential DOM calls held for the
+   * person.
+   *
+   * A script is how an agent reads a page, and also the easiest way around
+   * every check above: `button.click()` or `form.submit()` in a loop. While
+   * the script runs, element.click(), form.submit(), form.requestSubmit() and
+   * a dispatched click, submit or Enter are judged like any other action; the
+   * first consequential one is held (it throws inside the script, so neither
+   * it nor anything after it runs), and the script's guard is removed. Then
+   * the held action alone goes to PermissionBroker. Approved, exactly that
+   * one runs; declined, the call fails with the refusal. Nothing is re-run,
+   * so one yes never becomes five clicks. Reads and ordinary DOM edits pass
+   * untouched; a direct fetch from the script is not seen here.
+   */
+  private async evaluateGuarded(page: PlaywrightPage, requesterId: AbjectId, script: string): Promise<unknown> {
+    await page.evaluate(this.guardScript('install'));
+    let result: unknown;
+    let failure: unknown;
+    let failed = false;
+    try {
+      result = await this.evaluateScript(page, script);
+    } catch (err) {
+      failed = true;
+      failure = err;
+    }
+    const held = await page.evaluate(this.guardScript('finish')).catch(() => null) as ActionVerdict | null;
+    if (held?.consequential) {
+      try {
+        await this.requireConsent(requesterId, held);
+      } catch (err) {
+        await page.evaluate(this.guardScript('discard')).catch(() => {});
+        throw err;
+      }
+      const ran = await page.evaluate(this.guardScript('perform'))
+        .then(() => ({ performed: true }), (err: unknown) => ({ performed: false, error: err instanceof Error ? err.message : String(err) }));
+      return {
+        stoppedAt: held.action,
+        site: siteOf(held.url),
+        ...ran,
+        note: 'The script stopped at this action to wait for the person. They approved it and it ran; the rest of the script did not run.',
+      };
+    }
+    if (failed) throw failure;
+    return result;
+  }
+
+  /**
+   * The page-side steps of evaluateGuarded. Prototypes are patched only for
+   * the script's run and restored after it, so the page's own code and its
+   * fingerprinting checks see native methods the rest of the time.
+   */
+  private guardScript(step: 'install' | 'finish' | 'perform' | 'discard'): string {
+    const key = JSON.stringify(this.guardKey);
+    switch (step) {
+      case 'install':
+        return `(() => {
+          const KEY = ${key};
+          if (window[KEY]) { try { window[KEY].restore(); } catch (e) {} delete window[KEY]; }
+          const classify = ${CLASSIFY_ACTION_SOURCE};
+          const P = HTMLElement.prototype, F = HTMLFormElement.prototype, E = EventTarget.prototype;
+          const orig = { click: P.click, submit: F.submit, requestSubmit: F.requestSubmit, dispatchEvent: E.dispatchEvent };
+          const g = { held: null, perform: null, restore: null };
+          const hold = (el, kind, perform) => {
+            if (g.held) throw new Error('Held for the person to approve: ' + g.held.action);
+            let v = null;
+            try { v = classify(el, { kind }); } catch (e) { v = null; }
+            if (!v || !v.consequential) return;
+            g.held = v;
+            g.perform = perform;
+            throw new Error('Held for the person to approve: ' + v.action);
+          };
+          P.click = function () { hold(this, 'click', () => orig.click.call(this)); return orig.click.call(this); };
+          F.submit = function () { hold(this, 'submit', () => orig.submit.call(this)); return orig.submit.call(this); };
+          if (orig.requestSubmit) {
+            F.requestSubmit = function (s) {
+              hold(s || this, s ? 'click' : 'submit', () => orig.requestSubmit.call(this, s));
+              return orig.requestSubmit.call(this, s);
+            };
+          }
+          E.dispatchEvent = function (ev) {
+            if (ev && this instanceof Element) {
+              const t = ev.type;
+              if (t === 'click') hold(this, 'click', () => orig.dispatchEvent.call(this, ev));
+              else if (t === 'submit' && this instanceof HTMLFormElement) hold(this, 'submit', () => orig.dispatchEvent.call(this, ev));
+              else if ((t === 'keydown' || t === 'keypress') && ev.key === 'Enter') hold(this, 'enter', () => orig.dispatchEvent.call(this, ev));
+            }
+            return orig.dispatchEvent.call(this, ev);
+          };
+          g.restore = () => {
+            P.click = orig.click; F.submit = orig.submit; E.dispatchEvent = orig.dispatchEvent;
+            if (orig.requestSubmit) F.requestSubmit = orig.requestSubmit;
+          };
+          Object.defineProperty(window, KEY, { value: g, configurable: true, enumerable: false });
+          return true;
+        })()`;
+      case 'finish':
+        return `(() => {
+          const g = window[${key}];
+          if (!g) return null;
+          g.restore();
+          if (!g.held) { delete window[${key}]; return null; }
+          return g.held;
+        })()`;
+      case 'perform':
+        return `(() => {
+          const g = window[${key}];
+          delete window[${key}];
+          if (!g || !g.perform) throw new Error('The held action is gone (the page changed)');
+          g.perform();
+          return true;
+        })()`;
+      case 'discard':
+        return `(() => { delete window[${key}]; return true; })()`;
+    }
   }
 
   // ===========================================================================
@@ -1205,11 +1749,20 @@ export class WebBrowser extends Abject {
     });
 
     // -- click --
-    this.deferredPageHandler('click', async (tracked, payload) => {
+    // A click that submits or activates something waits for the person
+    // (requireConsent); a link, a field, a menu opener goes straight through.
+    this.deferredPageHandler('click', async (tracked, payload, msg) => {
       const selector = payload.selector as string;
+      requireContract(typeof selector === 'string' && selector.length > 0, 'click needs a selector');
       const options = payload.options as Record<string, unknown> | undefined;
       const t0 = Date.now();
-      await tracked.page.click(selector, options);
+      const mark = randomUUID();
+      const verdict = await this.locatorVerdict(tracked.page.locator(selector).first(), 'click', mark);
+      if (verdict?.consequential) {
+        await this.actOnMarked(tracked.page, msg.routing.from, verdict, mark, (marked) => tracked.page.click(marked, options));
+      } else {
+        await tracked.page.click(selector, options);
+      }
       log.info(`click (${payload.pageId}) selector="${selector}" [${Date.now() - t0}ms]`);
       return { success: true };
     });
@@ -1223,9 +1776,22 @@ export class WebBrowser extends Abject {
     });
 
     // -- type --
-    this.deferredPageHandler('type', async (tracked, payload) => {
+    // Typing is never asked about, except a line break, which presses Enter:
+    // in a form's field that submits the form.
+    this.deferredPageHandler('type', async (tracked, payload, msg) => {
       const t0 = Date.now();
-      await tracked.page.type(payload.selector as string, payload.text as string);
+      const selector = payload.selector as string;
+      const text = payload.text as string;
+      requireContract(typeof selector === 'string' && selector.length > 0 && typeof text === 'string', 'type needs a selector and text');
+      const mark = randomUUID();
+      const verdict = /[\r\n]/.test(text)
+        ? await this.locatorVerdict(tracked.page.locator(selector).first(), 'enter', mark)
+        : null;
+      if (verdict?.consequential) {
+        await this.actOnMarked(tracked.page, msg.routing.from, verdict, mark, (marked) => tracked.page.type(marked, text));
+      } else {
+        await tracked.page.type(selector, text);
+      }
       log.info(`type (${payload.pageId}) selector="${payload.selector}" [${Date.now() - t0}ms]`);
       return { success: true };
     });
@@ -1250,9 +1816,21 @@ export class WebBrowser extends Abject {
     });
 
     // -- press: uses page.keyboard.press, no selector --
-    this.deferredPageHandler('press', async (tracked, payload) => {
+    // Enter in a form's field submits it and Enter/Space on a button activates
+    // it, so those wait for the person; every other key goes straight through.
+    this.deferredPageHandler('press', async (tracked, payload, msg) => {
       const t0 = Date.now();
-      await tracked.page.keyboard.press(payload.key as string);
+      const key = payload.key as string;
+      requireContract(typeof key === 'string' && key.length > 0, 'press needs a key');
+      const kind = keyKind(key);
+      const verdict = kind ? await this.focusedVerdict(tracked.page, kind) : null;
+      if (verdict?.consequential) {
+        await this.requireConsent(msg.routing.from, verdict);
+        if (!sameControl(verdict, await this.focusedVerdict(tracked.page, kind!))) {
+          throw new Error('Keyboard focus moved while waiting for approval; look at the page again before pressing');
+        }
+      }
+      await tracked.page.keyboard.press(key);
       log.info(`press (${payload.pageId}) key="${payload.key}" [${Date.now() - t0}ms]`);
       return { success: true };
     });
@@ -1361,7 +1939,7 @@ export class WebBrowser extends Abject {
     });
 
     // -- refAction --
-    this.deferredPageHandler('refAction', async (tracked, payload) => {
+    this.deferredPageHandler('refAction', async (tracked, payload, msg) => {
       if (payload.expectedGeneration !== undefined
         && payload.expectedGeneration !== await this.documentId(tracked.page)) {
         throw new Error('Page navigated since observation; get a fresh snapshot before acting');
@@ -1395,6 +1973,25 @@ export class WebBrowser extends Abject {
         }
       }
       const opts = { timeout: WebBrowser.REF_ACTION_TIMEOUT_MS };
+
+      // A click, an activating key, or a line break typed into a form's field
+      // waits for the person when it would submit or activate something. The
+      // ref names one element, so the answer applies to exactly that element;
+      // if it (or the document) went away meanwhile, the action stops there.
+      const kind: ActionKind | undefined = action === 'click' ? 'click'
+        : action === 'press' ? keyKind(value ?? '')
+        : action === 'type' && /[\r\n]/.test(value ?? '') ? 'enter' : undefined;
+      const verdict = kind ? await this.locatorVerdict(locator, kind) : null;
+      if (verdict?.consequential) {
+        await this.requireConsent(msg.routing.from, verdict);
+        if (payload.expectedGeneration !== undefined
+          && payload.expectedGeneration !== await this.documentId(tracked.page)) {
+          throw new Error('Page navigated while waiting for approval; get a fresh snapshot before acting');
+        }
+        if (await locator.count() === 0) {
+          throw new Error(`Ref ${ref} left the page while waiting for approval; get a fresh snapshot before acting`);
+        }
+      }
 
       switch (action) {
         case 'click':
@@ -1430,9 +2027,12 @@ export class WebBrowser extends Abject {
     });
 
     // -- evaluate --
-    this.deferredPageHandler('evaluate', async (tracked, payload) => {
+    // Consequential DOM calls the script makes are held for the person
+    // (evaluateGuarded); everything else runs as written.
+    this.deferredPageHandler('evaluate', async (tracked, payload, msg) => {
       const t0 = Date.now();
-      const result = await this.evaluateScript(tracked.page, (payload.script as string).trim());
+      requireContract(typeof payload.script === 'string', 'evaluate needs a script');
+      const result = await this.evaluateGuarded(tracked.page, msg.routing.from, (payload.script as string).trim());
       log.info(`evaluate (${payload.pageId}) [${Date.now() - t0}ms]`);
       return { result };
     });
@@ -1442,11 +2042,20 @@ export class WebBrowser extends Abject {
     // accessibility snapshot cannot name: unlabeled tiles, icon buttons,
     // canvas, custom widgets. Each reports what it landed on, so a caller
     // aiming from a screenshot can tell a hit from a near miss.
-    this.deferredPageHandler('clickAt', async (tracked, payload) => {
+    this.deferredPageHandler('clickAt', async (tracked, payload, msg) => {
       const { x, y } = WebBrowser.requirePoint(payload.x, payload.y);
       const button = WebBrowser.requireButton(payload.button);
       const clickCount = payload.clickCount === undefined ? 1 : Number(payload.clickCount);
       requireContract([1, 2, 3].includes(clickCount), 'clickAt clickCount must be 1, 2 or 3');
+      // Only the left button activates; the others open menus or new tabs.
+      const verdict = button === 'left' ? await this.pointVerdict(tracked.page, x, y) : null;
+      if (verdict?.consequential) {
+        await this.requireConsent(msg.routing.from, clickCount > 1
+          ? { ...verdict, action: `${verdict.action} (${clickCount} clicks)` } : verdict);
+        if (!sameControl(verdict, await this.pointVerdict(tracked.page, x, y))) {
+          throw new Error('The page changed under the pointer while waiting for approval; look again before clicking');
+        }
+      }
       const target = await this.elementAt(tracked.page, x, y);
       await tracked.page.mouse.click(x, y, { button, clickCount });
       tracked.lastActivity = Date.now();
@@ -1462,9 +2071,14 @@ export class WebBrowser extends Abject {
       return { target };
     });
 
-    this.deferredPageHandler('drag', async (tracked, payload) => {
+    this.deferredPageHandler('drag', async (tracked, payload, msg) => {
       const from = WebBrowser.requirePoint(payload.fromX, payload.fromY);
       const to = WebBrowser.requirePoint(payload.toX, payload.toY);
+      // Pressed and released on the same button is a click on it.
+      const pressed = await this.pointVerdict(tracked.page, from.x, from.y);
+      if (pressed?.consequential && sameControl(pressed, await this.pointVerdict(tracked.page, to.x, to.y))) {
+        await this.requireConsent(msg.routing.from, pressed);
+      }
       const fromTarget = await this.elementAt(tracked.page, from.x, from.y);
       const mouse = tracked.page.mouse;
       await mouse.move(from.x, from.y, { steps: 5 });
@@ -1498,7 +2112,7 @@ export class WebBrowser extends Abject {
       return position;
     });
 
-    this.deferredPageHandler('typeText', async (tracked, payload) => {
+    this.deferredPageHandler('typeText', async (tracked, payload, msg) => {
       const text = payload.text;
       requireContract(typeof text === 'string' && text.length > 0, 'typeText needs non-empty text');
       // Keystrokes with no field focused go to the page itself, where many
@@ -1506,6 +2120,18 @@ export class WebBrowser extends Abject {
       // for a field; a deliberate shortcut is a press.
       if (!(await tracked.page.evaluate(WebBrowser.EDITABLE_FOCUS_SCRIPT).catch(() => false))) {
         throw new Error('Nothing editable has keyboard focus; click the field first (keys meant as shortcuts go through press)');
+      }
+      // Typed key by key, a line break is an Enter press, which submits a
+      // form's field; that waits for the person. (A long body is inserted as
+      // text, where a line break is only a line break.)
+      if (text.length <= WebBrowser.KEY_BY_KEY_MAX_CHARS && /[\r\n]/.test(text)) {
+        const verdict = await this.focusedVerdict(tracked.page, 'enter');
+        if (verdict?.consequential) {
+          await this.requireConsent(msg.routing.from, verdict);
+          if (!sameControl(verdict, await this.focusedVerdict(tracked.page, 'enter'))) {
+            throw new Error('Keyboard focus moved while waiting for approval; look at the page again before typing');
+          }
+        }
       }
       // Key-by-key fires every listener a person's typing would (autocomplete,
       // validation); a long body goes in as one insertion so it is not slow.
@@ -1618,9 +2244,22 @@ export class WebBrowser extends Abject {
         this.send(error(msg, 'BROWSER_ERROR', `Unknown page handle: ${pageId}`));
         return DEFERRED_REPLY;
       }
-      this.dispatchViewerInput(tracked, events).then(
+      // This is the person's own mouse and keyboard, so it is never asked
+      // about; that is exactly why only the built-in viewer may send it.
+      // Anything else would be a way around every consent check above.
+      this.isBuiltInCaller(msg.routing.from, ['WebBrowserViewer']).then((viewer) => {
+        if (!viewer) throw new PermissionDenied({
+          authority: this.id, callerId: msg.routing.from, operation: 'viewerInput', resource: pageId,
+          decision: 'deny', source: 'policy', reason: 'raw input is taken only from the built-in WebBrowserViewer',
+        }, 'viewerInput is the person\'s takeover channel and is taken only from WebBrowserViewer; act on the page with click, press, clickAt or typeText');
+        return this.dispatchViewerInput(tracked, events);
+      }).then(
         (dispatched) => this.sendDeferredReply(msg, { dispatched }),
         (err) => {
+          if (err instanceof PermissionDenied) {
+            this.send(error(msg, err.code, err.message, err.details));
+            return;
+          }
           this.send(error(msg, 'BROWSER_ERROR',
             err instanceof Error ? err.message : String(err)
           ));
@@ -2719,9 +3358,10 @@ Waiting:       waitForSelector(pageId, selector, options?) — returns {found: f
 Reading:       getContent, screenshotPage, getAttribute, getTextContent, getUrl, getTitle
 Pointer/keys:  clickAt(pageId, x, y, button?, clickCount?), hoverAt(pageId, x, y), drag(pageId, fromX, fromY, toX, toY), scroll(pageId, deltaY, deltaX?, x?, y?), typeText(pageId, text) — real mouse and keyboard input at viewport CSS-pixel coordinates (screenshotPage with options.scale "css" gives an image in the same pixels); each reports the element it landed on
 Escape hatch:  evaluate(pageId, script) — run arbitrary JS in page context
-Viewer:        viewerScreenshot(pageId), viewerInput(pageId, events), viewerNavigate(pageId, nav) — no ownership check; used by the visual browser monitor for live view, human takeover (raw mouse/keyboard replay), and back/forward/reload
+Viewer:        viewerScreenshot(pageId), viewerInput(pageId, events), viewerNavigate(pageId, nav): no ownership check; used by the visual browser monitor for live view, human takeover (raw mouse/keyboard replay, taken only from WebBrowserViewer), and back/forward/reload
 
 ### IMPORTANT
+- A click, key or script action that submits a form or activates a button may wait for the person's approval and can come back declined with PERMISSION_DENIED and a sentence saying who declined; report that and choose another way forward. Reading, scrolling, hovering, following links and typing into fields go straight through.
 - ALWAYS close pages when done (closePage or closeAllPages). Leaked pages consume memory.
 - Pages are automatically cleaned up if the owning object is unregistered.
 - press(pageId, key) sends a keyboard key (e.g. "Enter", "Tab") — no selector needed.

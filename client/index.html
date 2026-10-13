@@ -292,6 +292,73 @@
         outline-offset: 3px;
       }
 
+      /* What went wrong when the desktop renderer cannot start. */
+      #connecting-detail {
+        max-width: 34rem;
+        margin: 1.5rem 1.5rem 0;
+        padding: 0.9rem 1.1rem;
+        font-family: var(--body);
+        font-size: 0.95rem;
+        line-height: 1.5;
+        text-align: center;
+        color: var(--ink);
+        background: var(--card);
+        border: 2px solid var(--rule);
+        box-shadow: 4px 4px 0 var(--shade);
+      }
+      /* The desktop is drawn in software: a dismissible notice. */
+      #render-notice {
+        position: fixed;
+        left: 1.25rem;
+        bottom: 1.25rem;
+        z-index: 9000;
+        max-width: 26rem;
+        padding: 1rem 1.1rem 0.9rem;
+        font-family: var(--body);
+        font-size: 0.9rem;
+        line-height: 1.45;
+        color: var(--ink);
+        background: var(--card);
+        border: 2px solid var(--rule);
+        box-shadow: 4px 4px 0 var(--shade);
+      }
+      #render-notice::before {
+        content: '';
+        position: absolute;
+        top: -2px;
+        left: -2px;
+        width: 44px;
+        height: 10px;
+        background: var(--red);
+      }
+      .render-notice-title {
+        font-family: var(--display);
+        font-size: 0.85rem;
+        font-weight: 500;
+        text-transform: uppercase;
+        letter-spacing: 0.18em;
+      }
+      #render-notice p {
+        margin: 0.5rem 0 0.75rem;
+        color: var(--ink-soft);
+      }
+      .render-notice-close {
+        padding: 0.35rem 0.8rem;
+        font-family: var(--display);
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.14em;
+        color: var(--ink);
+        background: var(--card);
+        border: 2px solid var(--rule);
+        border-radius: 0;
+        cursor: pointer;
+      }
+      .render-notice-close:hover {
+        color: var(--paper);
+        background: var(--ink);
+      }
+
       /* Pair prompt overlay (shown for p2p-default builds with no pairing) */
       #pair-prompt-overlay {
         display: none;
