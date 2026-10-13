@@ -918,11 +918,43 @@ clean result I did not observe.`;
     const snapshotNote = !before.complete || !after.complete
       ? `Snapshot coverage was incomplete: ${[...(before.issues ?? []), ...(after.issues ?? [])].slice(0, 5).join('; ') || 'not all project inputs could be read'}.`
       : !stable ? `Project inputs changed during the command${after.changed?.length ? `: ${after.changed.slice(0, 8).join(', ')}` : ''}. The exit status is valid, but it does not establish an unchanged input revision.` : undefined;
-    const counts: Record<string, number> = {};
-    for (const match of output.matchAll(/^(?:ℹ|#)\s+(tests|pass|fail)\s+(\d+)\s*$/gm)) counts[match[1]] = Number(match[2]);
-    const testSummary = Object.keys(counts).length ? { tests: counts.tests, passed: counts.pass, failed: counts.fail } : undefined;
+    const testSummary = ExternalCreator.testSummaryOf(output);
     return { command, taskId: extra.taskId, workRoot: extra.workRoot, testSummary, revision: after.revision, stable, snapshotNote, exitCode: r.exitCode, outputObjectId: r.outputObjectId, outputTruncated: r.truncated,
       signatures: r.exitCode === 0 ? [] : ExternalCreator.signaturesOf(output, extra.workRoot), failureCount: ExternalCreator.failureCountOf(output), at: Date.now(), output };
+  }
+
+  /** The Node test runner's own totals (`ℹ tests N` / `ℹ pass N` / `ℹ fail N`), when it printed them. */
+  private static testSummaryOf(output: string): CheckOutcome['testSummary'] {
+    const counts: Record<string, number> = {};
+    for (const match of output.matchAll(/^(?:ℹ|#)\s+(tests|pass|fail)\s+(\d+)\s*$/gm)) counts[match[1]] = Number(match[2]);
+    return Object.keys(counts).length ? { tests: counts.tests, passed: counts.pass, failed: counts.fail } : undefined;
+  }
+
+  /** How much of a command's retained log is read back to find its runner's totals. */
+  private static readonly FULL_OUTPUT_SCAN_BYTES = 4 * 1024 * 1024;
+
+  /**
+   * A failing run's preview keeps only the tail, and a runner that recaps its
+   * failures after its totals (the Node test runner does) pushes the totals
+   * out of it. Without them the failure count falls back to counting
+   * signature lines, which mixes test names with their error lines. Read the
+   * retained log back from the process that owns it and count there.
+   */
+  private async countFromFullOutput(outcome: CheckOutcome, r: { truncated?: unknown; outputObjectId?: AbjectId }): Promise<void> {
+    if (outcome.exitCode === 0 || outcome.failureCount !== undefined || !r.truncated || !r.outputObjectId) return;
+    try {
+      let text = '';
+      for (let offset = 0; offset < ExternalCreator.FULL_OUTPUT_SCAN_BYTES;) {
+        const page = await this.call<{ text: string; nextOffset: number; totalBytes: number }>(r.outputObjectId, 'readOutput', { offset, length: 65536 });
+        text += page.text;
+        if (page.nextOffset <= offset || page.nextOffset >= page.totalBytes) break;
+        offset = page.nextOffset;
+      }
+      outcome.failureCount = ExternalCreator.failureCountOf(text);
+      outcome.testSummary ??= ExternalCreator.testSummaryOf(ExternalCreator.stripAnsi(text));
+    } catch (err) {
+      log.info(`Full output of "${outcome.command}" could not be read back for its failure count: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   private async captureOutcome(extra: TaskExtra, command: string, timeoutMs: number): Promise<CheckOutcome> {
@@ -933,7 +965,9 @@ clean result I did not observe.`;
       const before = await this.verificationSnapshot(extra);
       const r = await this.runCommand(extra, command, timeoutMs);
       const after = await this.verificationSnapshot(extra);
-      return this.checkOutcome(extra, command, r, before, after);
+      const outcome = this.checkOutcome(extra, command, r, before, after);
+      await this.countFromFullOutput(outcome, r);
+      return outcome;
     })();
     this.verificationRuns.set(key, run);
     try { return await run; } finally { if (this.verificationRuns.get(key) === run) this.verificationRuns.delete(key); }
@@ -1033,13 +1067,13 @@ clean result I did not observe.`;
     }
     if (v.passed) {
       return `${head}, but every failure was already there before this task ` +
-        `(${v.preExisting} pre-existing). Nothing new was introduced by you.${foreign}`;
+        `(${v.outcome.failureCount !== undefined ? `${v.outcome.failureCount} failing` : `${v.preExisting} failure line(s)`}, all pre-existing). Nothing new was introduced by you.${foreign}`;
     }
     const lines = v.newFailures.slice(0, 25).map(s => `  ${s}`).join('\n');
     const more = v.newFailures.length > 25 ? `\n  … and ${v.newFailures.length - 25} more` : '';
     const caveat = v.unbaselined
       ? ' (no baseline was captured, so these may or may not predate this task)'
-      : ` (${v.preExisting} other failures predate this task and are not yours)`;
+      : ` (${v.preExisting} other failure line(s) predate this task and are not yours)`;
     return `${head} — ${v.newFailures.length} failure(s) attributable to this task${caveat}:\n${lines}${more}${foreign}`;
   }
 
@@ -1148,7 +1182,7 @@ clean result I did not observe.`;
       this.reportProgress(extra, 'observing', `baseline: ${project.checkCommand}`);
       try {
         baseline.check = await this.captureOutcome(extra, project.checkCommand, VERIFY_TIMEOUT_MS);
-        this.audit(extra, `baseline check exit=${baseline.check.exitCode} (${baseline.check.signatures.length} known failures)`);
+        this.audit(extra, `baseline check exit=${baseline.check.exitCode} (${baseline.check.failureCount ?? 'no stated'} failure count, ${baseline.check.signatures.length} failure lines)`);
       } catch (err) {
         this.audit(extra, `baseline check could not run: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -1173,7 +1207,7 @@ clean result I did not observe.`;
             this.audit(extra, 'baseline verify discarded — this task wrote files while it ran');
           } else if (extra.baseline) {
             extra.baseline.verify = outcome;
-            this.audit(extra, `baseline verify exit=${outcome.exitCode} (${outcome.signatures.length} known failures)`);
+            this.audit(extra, `baseline verify exit=${outcome.exitCode} (${outcome.failureCount ?? 'no stated'} failure count, ${outcome.signatures.length} failure lines)`);
             await this.writeGoalData(extra, BASELINE_KEY, extra.baseline);
           }
         } catch (err) {
@@ -1200,8 +1234,13 @@ clean result I did not observe.`;
         : 'Baseline: this project declares no commands, so there is nothing to run and nothing to compare against.';
     }
     const bits: string[] = [];
-    if (b.check) bits.push(`${b.check.command} → exit ${b.check.exitCode}, ${(b.check.exitCode === 0 ? 0 : b.check.failureCount ?? b.check.signatures.length)} known failure(s)`);
-    if (b.verify) bits.push(`${b.verify.command} → exit ${b.verify.exitCode}, ${(b.verify.exitCode === 0 ? 0 : b.verify.failureCount ?? b.verify.signatures.length)} known failure(s)`);
+    // The runner's own count when it stated one; signature lines mix test
+    // names with their error lines, so they are never presented as a count.
+    const failures = (o: CheckOutcome) => o.exitCode === 0 ? '0 known failure(s)'
+      : o.failureCount !== undefined ? `${o.failureCount} known failure(s)`
+      : 'failing before this task (the runner stated no failure count)';
+    if (b.check) bits.push(`${b.check.command} → exit ${b.check.exitCode}, ${failures(b.check)}`);
+    if (b.verify) bits.push(`${b.verify.command} → exit ${b.verify.exitCode}, ${failures(b.verify)}`);
     return bits.length > 0
       ? `Baseline at task start (you are NOT accountable for these): ${bits.join('; ')}`
       : 'Baseline: nothing could be captured.';
@@ -2118,7 +2157,9 @@ clean result I did not observe.`;
       ok: true,
       note:
         `${changed} file(s) changed; \`${latest.outcome.command}\` exited ${latest.outcome.exitCode}` +
-        (latest.preExisting > 0 ? ` with ${latest.preExisting} pre-existing failure(s) untouched` : '') +
+        (latest.outcome.exitCode !== 0 && latest.preExisting > 0
+          ? latest.outcome.failureCount !== undefined ? ` with ${latest.outcome.failureCount} pre-existing failure(s) untouched` : ' with its pre-existing failures untouched'
+          : '') +
         `, no new failures in files this task wrote.${foreign}${latest.outcome.snapshotNote ? ` Verification limitation: ${latest.outcome.snapshotNote}` : ''}`,
     };
   }

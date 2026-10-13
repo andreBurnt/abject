@@ -2853,7 +2853,8 @@ My work is internal maintenance of this workspace's memory. When invited to cont
             if (!extra.goalId || !this.goalManagerId || !(action.key === 'learning/plans' || action.key === 'learning/reviewOutcome' || action.key === 'scrum/plan' || action.key.startsWith('learning/observation/') || action.key.startsWith('learning/assessment/') || action.key.startsWith('verification/'))) throw new Error('Key is outside the review learning evidence; readable keys are learning/plans, learning/reviewOutcome, scrum/plan, learning/observation/*, learning/assessment/* and verification/*');
             text = JSON.stringify(await this.request(request(this.id, this.goalManagerId, 'readGoalData', { goalId: extra.goalId, key: action.key }))) ?? 'null';
           }
-          if (typeof action.taskId === 'string') {
+          // A named key is the more specific request; a taskId beside it only repeats which task.
+          if (typeof action.taskId === 'string' && typeof action.key !== 'string') {
             const record = extra.records?.find(r => r.taskId === action.taskId);
             if (!record) {
               const held = extra.records?.map(r => r.taskId) ?? [];
