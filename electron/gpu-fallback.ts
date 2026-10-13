@@ -101,12 +101,19 @@ export function setupGpuFallback(): GpuFallback {
 
   // A GPU that starts but gives no WebGL (blocklisted, or acceleration off)
   // never crashes; its feature status says so once the GPU process reports.
-  void app.whenReady().then(() => app.getGPUInfo('basic')).then(() => {
+  // Read it only on gpu-info-update: until the GPU process has initialized,
+  // Chromium answers `disabled_off` for every feature, even on a healthy GPU.
+  // `*_software` means WebGL already runs in SwiftShader, so only `*_off` counts,
+  // and only on the update that turns it off (no repeated asking mid-session).
+  let lastWebgl = '';
+  app.on('gpu-info-update', () => {
     const webgl = app.getGPUFeatureStatus().webgl;
-    if (/^(disabled|unavailable)/.test(webgl)) {
+    const wasOff = /^(disabled|unavailable)_off/.test(lastWebgl);
+    lastWebgl = webgl;
+    if (!wasOff && /^(disabled|unavailable)_off/.test(webgl)) {
       void fallBack(`WebGL is ${webgl.startsWith('unavailable') ? 'unavailable' : 'turned off'} for this graphics card`);
     }
-  }).catch(() => { /* the crash handler covers a GPU process that never reports */ });
+  });
 
   return { windowOpened: () => { windowOpenedAt ??= Date.now(); } };
 }
