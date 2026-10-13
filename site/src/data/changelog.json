@@ -1,5 +1,28 @@
 [
   {
+    "version": "0.15.4",
+    "date": "2026-10-13",
+    "title": "Asks Before Acting, Learns Within Budget",
+    "summary": "Abject now asks you before a click, form submission or tool call that would change something, and you can set a daily dollar limit on what it spends learning. Learned knowledge takes far less space, chat messages show when they were sent, goal progress shows only real work, and the remote link reconnects on its own.",
+    "highlights": [
+      "Asks before consequential actions: the web browser works out what a click, key press or form submit would do and asks your permission first; an MCP tool its server marks as destructive runs only after you approve it.",
+      "Daily learning budget: Settings → AI has a daily learning budget in US dollars. Abject tracks what each part of the system spends on models each day, and reviews hold off as the day's budget runs low. Settings also gain a number field type, editable in the window and from the `abject` command.",
+      "Leaner learning: evidence such as task records and observations is stored once and cited by reference, so a single belief no longer carries copies of other goals' transcripts. KnowledgeBase 3.8.0 compacts older learning history and no longer rewrites an entry each time it is recalled.",
+      "The Knowledge browser has a new Learning tab that shows how observations become knowledge.",
+      "Chat messages show when they were sent: \"now\" for the first minute, the clock time for today and the date and time for earlier days. Replayed history groups by send time.",
+      "Goal progress shows real work: a collaborator's goal shows its latest progress line, phase and agent instead of a generic placeholder. Watchdog heartbeats and repeated reasoning no longer fill the progress feed.",
+      "The remote link heals itself: it checks its signaling connection every minute and rebuilds a client that has been down for longer than its retries cover.",
+      "The desktop app falls back when the graphics card fails to start, and the client shows a notice when it cannot reach its backend."
+    ],
+    "fixes": [
+      "Test failure counts now come from the test runner's full output, not a truncated preview that mixed test names with error lines.",
+      "Knowledge updates repeated in a review's correction round are no longer written twice, and a repair or curation pass no longer overwrites the verdict a goal review shows you.",
+      "Learning waits until a workspace has finished starting before calling a model, keeps settling decisions after the first repair starts and drops repairs aimed at knowledge entries that no longer exist.",
+      "When a model sends its reading of a prediction as a separate action, that reading now rides on the next action instead of disrupting batching.",
+      "OpenRouter attribution headers now default to abject.world and \"Abject\" instead of placeholder values."
+    ]
+  },
+  {
     "version": "0.15.3",
     "date": "2026-10-12",
     "title": "The whole desktop, on a machine with no screen",
