@@ -1332,6 +1332,7 @@ class TuiApp {
     switch (field.type) {
       case 'secret': return `type the new ${field.label} (hidden as you type); Enter saves, Esc cancels, none clears`;
       case 'boolean': return 'on or off, Enter saves, Esc cancels';
+      case 'number': return `a number${field.min !== undefined ? ` from ${field.min}` : ''}${field.max !== undefined ? ` to ${field.max}` : ''}; Enter saves, Esc cancels`;
       case 'enum': return `one of ${field.options?.join(', ')}; Enter saves, Esc cancels`;
       case 'list': return 'comma-separated, none for empty; Enter saves, Esc cancels';
       case 'model': return `<provider> <model> [effort], or none; providers: ${field.options?.join(', ')}`;

@@ -208,6 +208,15 @@ export function buildUpdate(target: ResolvedPath, text: string, current: Record<
       else throw new Error(`${field.key} takes on or off`);
       break;
     }
+    case 'number': {
+      const n = Number(raw.replace(/^\$/, ''));
+      const lo = field.min ?? -Infinity, hi = field.max ?? Infinity;
+      if (!raw || !Number.isFinite(n) || n < lo || n > hi) {
+        throw new Error(`${field.key} takes a number${Number.isFinite(lo) ? ` from ${lo}` : ''}${Number.isFinite(hi) ? ` to ${hi}` : ''}`);
+      }
+      value = n;
+      break;
+    }
     case 'enum':
       if (!field.options?.includes(raw)) throw new Error(`${field.key} takes one of: ${field.options?.join(', ')}`);
       value = raw;

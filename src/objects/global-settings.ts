@@ -308,6 +308,11 @@ export class GlobalSettings extends Abject {
   // cached-read pings to avoid full re-prefills).
   private cacheKeepaliveEnabled = false;
   private cacheKeepaliveCheckboxId?: AbjectId;
+  // Daily learning budget (USD): what TaskReviewer may spend on models per
+  // day across all workspaces. SettingsManager owns the value and its bounds.
+  private learningBudget = 3;
+  private learningBudgetInputId?: AbjectId;
+  private learningBudgetHintId?: AbjectId;
 
   // Tier presets: a named bundle of tier routing + vision fallback. Built-in
   // presets are derived from each provider's defaultTierModels; user-saved
@@ -571,6 +576,7 @@ The settings themselves live in SettingsManager, which this window loads from an
       Object.entries(m.ai.credentials).filter(([, v]) => v.value).map(([id, v]) => [id, v.value!]));
     this.decisionGates = m.ai.decisionGates;
     this.cacheKeepaliveEnabled = m.ai.cacheKeepalive;
+    if (typeof m.ai.learningBudgetUsdPerDay === 'number') this.learningBudget = m.ai.learningBudgetUsdPerDay;
     this.fsAllowedPaths = [...m.filesystem.allowedPaths];
     this.fsReadOnly = m.filesystem.readOnly;
     this.shellEnabled = m.shell.enabled;
@@ -766,6 +772,15 @@ The settings themselves live in SettingsManager, which this window loads from an
           await this.onTierEffortChanged(tier);
           return;
         }
+      }
+
+      // Learning budget typed: keep the monthly hint in step (saved on Save)
+      if (fromId === this.learningBudgetInputId && aspect === 'change') {
+        const perDay = Number(String(value ?? '').trim().replace(/^\$/, ''));
+        if (this.learningBudgetHintId) {
+          try { this.send(event(this.id, this.learningBudgetHintId, 'update', { text: this.learningBudgetHint(String(value ?? '').trim() === '' ? NaN : perDay) })); } catch { /* widget gone */ }
+        }
+        return;
       }
 
       // Cache keepalive checkbox toggled (persisted + applied on Save)
@@ -2456,6 +2471,7 @@ The settings themselves live in SettingsManager, which this window loads from an
         preferredSize: { height: 28 },
       }));
     }
+    await this.renderLearningBudgetRow(tiersCard);
 
     // Save button row (HBox: spacer + button)
     const saveRowId = await this.request<AbjectId>(
@@ -2682,6 +2698,8 @@ The settings themselves live in SettingsManager, which this window loads from an
       this.auxRows[key] = { desiredModelId: this.auxRows[key].desiredModelId };
     }
     this.cacheKeepaliveCheckboxId = undefined;
+    this.learningBudgetInputId = undefined;
+    this.learningBudgetHintId = undefined;
     this.decisionGatesSelectId = undefined;
     this.presetSelectId = undefined;
     this.presetNameInputId = undefined;
@@ -3640,6 +3658,54 @@ The settings themselves live in SettingsManager, which this window loads from an
    * Whether built-in decision sites run: on (each at its own mode, advising
    * or acting) or off (explicit decide calls still run).
    */
+  /** "About $X a month" for a daily budget, or what 0 means. */
+  private learningBudgetHint(perDay: number): string {
+    if (!Number.isFinite(perDay) || perDay < 0) return 'Enter dollars per day, 0 or more';
+    if (perDay === 0) return 'Learning reviews and repairs are off';
+    return `USD a day, about $${Math.round(perDay * 30)} a month. Reviews and repairs of what agents learn pause for the day once it is spent.`;
+  }
+
+  /**
+   * Daily learning budget: what reviewing finished work and repairing what
+   * agents learned may spend on models per day, across all workspaces.
+   * Applied on Save with the rest of the AI tab.
+   */
+  private async renderLearningBudgetRow(tiersCard: AbjectId): Promise<void> {
+    const rowId = await this.request<AbjectId>(
+      request(this.id, this.widgetManagerId!, 'createNestedHBox', {
+        parentLayoutId: tiersCard,
+        margins: { top: 0, right: 0, bottom: 0, left: 0 },
+        spacing: 8,
+      })
+    );
+    await this.request(request(this.id, tiersCard, 'addLayoutChild', {
+      widgetId: rowId,
+      sizePolicy: { vertical: 'fixed', horizontal: 'expanding' },
+      preferredSize: { height: 32 },
+    }));
+    const { widgetIds: [labelId, inputId, hintId] } = await this.request<{ widgetIds: AbjectId[] }>(
+      request(this.id, this.widgetManagerId!, 'create', { specs: [
+        { type: 'label', windowId: this.windowId, text: 'Learning budget',
+          style: { color: this.theme.textHeading, fontSize: 13 } },
+        { type: 'textInput', windowId: this.windowId, placeholder: '3', text: String(this.learningBudget) },
+        { type: 'label', windowId: this.windowId, text: this.learningBudgetHint(this.learningBudget),
+          style: { color: this.theme.textSecondary, fontSize: 12 } },
+      ]})
+    );
+    this.learningBudgetInputId = inputId;
+    this.learningBudgetHintId = hintId;
+    await this.request(request(this.id, inputId, 'addDependent', {}));
+    await this.request(request(this.id, rowId, 'addLayoutChild', {
+      widgetId: labelId, sizePolicy: { horizontal: 'fixed' }, preferredSize: { width: 120, height: 32 },
+    }));
+    await this.request(request(this.id, rowId, 'addLayoutChild', {
+      widgetId: inputId, sizePolicy: { horizontal: 'fixed' }, preferredSize: { width: 72, height: 32 },
+    }));
+    await this.request(request(this.id, rowId, 'addLayoutChild', {
+      widgetId: hintId, sizePolicy: { horizontal: 'expanding' }, preferredSize: { height: 32 },
+    }));
+  }
+
   private async renderDecisionGatesRow(tiersCard: AbjectId): Promise<void> {
     const rowId = await this.request<AbjectId>(
       request(this.id, this.widgetManagerId!, 'createNestedHBox', {
@@ -4945,16 +5011,30 @@ The settings themselves live in SettingsManager, which this window loads from an
       if (this.credentialValues[desc.id] !== undefined) credentials[desc.id] = this.credentialValues[desc.id] || null;
     }
 
+    // The learning budget as typed; SettingsManager checks its bounds.
+    let learningBudgetUsdPerDay: unknown = this.learningBudget;
+    if (this.learningBudgetInputId) {
+      const typed = String(await this.request<string>(request(this.id, this.learningBudgetInputId, 'getValue', {})) ?? '').trim().replace(/^\$/, '');
+      learningBudgetUsdPerDay = typed === '' ? NaN : Number(typed);
+    }
+    if (typeof learningBudgetUsdPerDay !== 'number' || !Number.isFinite(learningBudgetUsdPerDay)) {
+      await this.rejectWith('The learning budget must be a number of dollars per day (0 turns learning reviews off).');
+      await this.setSaveControlsDisabled(false);
+      return;
+    }
+
     const error = await this.saveSection('ai', {
       credentials, tiers, ...aux,
       decisionGates: this.decisionGates,
       cacheKeepalive: this.cacheKeepaliveEnabled,
+      learningBudgetUsdPerDay,
     });
     if (error) {
       await this.rejectWith(error);
       await this.setSaveControlsDisabled(false);
       return;
     }
+    this.learningBudget = learningBudgetUsdPerDay;
     // The window's own view state: which provider's panel was open.
     try {
       await this.request(request(this.id, this.storageId!, 'set', { key: STORAGE_KEY_AI_ACTIVE_PROVIDER, value: this.activeAiProvider }));

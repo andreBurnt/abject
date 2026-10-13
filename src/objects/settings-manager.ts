@@ -73,6 +73,12 @@ export interface AiSettings {
   decision: ModelRef | null;
   decisionGates: DecisionGates;
   cacheKeepalive: boolean;
+  /**
+   * What learning (TaskReviewer's reviews of finished work and repairs of
+   * stuck corrections) may spend on model calls per day, in US dollars,
+   * across all workspaces. 0 turns learning model work off.
+   */
+  learningBudgetUsdPerDay: number;
 }
 export interface AuthSettings { enabled: boolean; username: string; password: SecretValue }
 export interface FilesystemSettings { allowedPaths: string[]; readOnly: boolean }
@@ -110,9 +116,12 @@ export interface SettingField {
    * or null; `options` are the providers), rules (object name to allow/deny
    * program lists), grants (skill name to commands).
    */
-  type: 'string' | 'secret' | 'boolean' | 'enum' | 'list' | 'model' | 'rules' | 'grants';
+  type: 'string' | 'secret' | 'boolean' | 'number' | 'enum' | 'list' | 'model' | 'rules' | 'grants';
   description?: string;
   options?: string[];
+  /** Bounds of a number field. */
+  min?: number;
+  max?: number;
   /** Whether null (unset) is accepted. */
   nullable?: boolean;
 }
@@ -151,6 +160,10 @@ const AUX_ROWS: Record<AuxRowKey, { label: string; storageProvider: string; stor
   decision: { label: 'Decision model', storageProvider: 'global-settings:decisionProvider', storageModel: 'global-settings:decisionModel', decision: true },
 };
 const STORAGE_KEY_CACHE_KEEPALIVE = 'global-settings:cacheKeepalive';
+const STORAGE_KEY_LEARNING_BUDGET = 'global-settings:learningBudgetUsdPerDay';
+/** About 90 to 100 dollars a month; the AI tab changes it. */
+export const DEFAULT_LEARNING_BUDGET_USD_PER_DAY = 3;
+const MAX_LEARNING_BUDGET_USD_PER_DAY = 1000;
 const STORAGE_KEY_DECISION_GATES = 'global-settings:decisionGates';
 const STORAGE_KEY_TIER_PRESETS = 'global-settings:tierPresets';
 // Legacy keys, migrated once at boot
@@ -219,6 +232,7 @@ export class SettingsManager extends Abject {
   private aux = emptyAux();
   private decisionGates: DecisionGates = 'on';
   private cacheKeepalive = false;
+  private learningBudgetUsdPerDay = DEFAULT_LEARNING_BUDGET_USD_PER_DAY;
   private savedPresets: Record<string, TierPreset> = {};
 
   // Auth (applied over the environment's only once saved here)
@@ -547,6 +561,7 @@ export class SettingsManager extends Abject {
           vision: this.aux.vision, fallback: this.aux.fallback, decision: this.aux.decision,
           decisionGates: this.decisionGates,
           cacheKeepalive: this.cacheKeepalive,
+          learningBudgetUsdPerDay: this.learningBudgetUsdPerDay,
         } as SettingsBySection[S];
       }
       case 'auth':
@@ -595,6 +610,8 @@ export class SettingsManager extends Abject {
           { key: 'decision', label: 'Decision model', type: 'model', options: allProviders, nullable: true, description: 'Unset is Auto: a keyed decision provider, else emulation on the Fast tier.' },
           { key: 'decisionGates', label: 'Decision gates', type: 'enum', options: DECISION_GATES, description: 'on: built-in decision sites advise and act live; off: they do not run.' },
           { key: 'cacheKeepalive', label: 'Prompt-cache keepalive', type: 'boolean', description: 'Pings large prompt prefixes between agent steps to keep provider caches warm (costs cached reads).' },
+          { key: 'learningBudgetUsdPerDay', label: 'Daily learning budget (USD)', type: 'number', min: 0, max: MAX_LEARNING_BUDGET_USD_PER_DAY,
+            description: 'What reviewing finished work and repairing what agents learned may spend on models per day, across all workspaces. 3 is about 90 to 100 a month; 0 turns learning reviews off.' },
         ],
       },
       {
@@ -678,7 +695,7 @@ export class SettingsManager extends Abject {
   }
 
   private async setAi(values: Record<string, unknown>): Promise<void> {
-    this.knownKeys(values, ['credentials', 'tiers', 'vision', 'fallback', 'decision', 'decisionGates', 'cacheKeepalive'], 'AI');
+    this.knownKeys(values, ['credentials', 'tiers', 'vision', 'fallback', 'decision', 'decisionGates', 'cacheKeepalive', 'learningBudgetUsdPerDay'], 'AI');
     const providerOf = (ref: unknown): string | undefined =>
       ref && typeof ref === 'object' ? (ref as { provider?: unknown }).provider as string | undefined : undefined;
     await this.knowProviders([
@@ -724,6 +741,13 @@ export class SettingsManager extends Abject {
       precondition(typeof values.cacheKeepalive === 'boolean', 'cacheKeepalive must be true or false');
       cacheKeepalive = values.cacheKeepalive as boolean;
     }
+    let learningBudgetUsdPerDay = this.learningBudgetUsdPerDay;
+    if (values.learningBudgetUsdPerDay !== undefined) {
+      const v = values.learningBudgetUsdPerDay;
+      precondition(typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= MAX_LEARNING_BUDGET_USD_PER_DAY,
+        `The daily learning budget must be a number of dollars from 0 to ${MAX_LEARNING_BUDGET_USD_PER_DAY}`);
+      learningBudgetUsdPerDay = Math.round((v as number) * 100) / 100;
+    }
 
     // The result must work: a tier configured, and a key for every provider
     // that needs one. A local-URL provider gets its default address.
@@ -752,6 +776,7 @@ export class SettingsManager extends Abject {
     this.aux = aux;
     this.decisionGates = decisionGates;
     this.cacheKeepalive = cacheKeepalive;
+    this.learningBudgetUsdPerDay = learningBudgetUsdPerDay;
 
     for (const desc of this.providerDescriptions) {
       if (desc.credentialMode === 'cli' || desc.credentialMode === 'none') continue;
@@ -771,6 +796,7 @@ export class SettingsManager extends Abject {
       }
     }
     await this.store('set', STORAGE_KEY_CACHE_KEEPALIVE, this.cacheKeepalive);
+    await this.store('set', STORAGE_KEY_LEARNING_BUDGET, this.learningBudgetUsdPerDay);
     await this.store('set', STORAGE_KEY_DECISION_GATES, this.decisionGates);
     await this.configureProviders();
     log.info('Saved provider settings');
@@ -912,6 +938,9 @@ export class SettingsManager extends Abject {
     const gates = await this.fetch<string>(STORAGE_KEY_DECISION_GATES);
     if (gates && DECISION_GATES.includes(gates as DecisionGates)) this.decisionGates = gates as DecisionGates;
     this.cacheKeepalive = (await this.fetch<boolean>(STORAGE_KEY_CACHE_KEEPALIVE)) === true;
+    const budget = await this.fetch<number>(STORAGE_KEY_LEARNING_BUDGET);
+    this.learningBudgetUsdPerDay = typeof budget === 'number' && Number.isFinite(budget) && budget >= 0 && budget <= MAX_LEARNING_BUDGET_USD_PER_DAY
+      ? budget : DEFAULT_LEARNING_BUDGET_USD_PER_DAY;
     await this.migrateLegacyAi();
   }
 

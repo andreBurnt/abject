@@ -612,6 +612,19 @@ export class LLMObject extends Abject {
   private static readonly LEDGER_TEXT_PREFIX = 'llm:ledger:text:';
   private static readonly LEDGER_INDEX_KEY = 'llm:ledger:days';
   private static readonly RETENTION_STORAGE_KEY = 'llm:ledgerRetention';
+
+  // ── Daily spend ────────────────────────────────────────────────────
+  //
+  // What each requester spent today, in USD, kept across restarts in one
+  // small record. Budgets read it (TaskReviewer's daily learning budget):
+  // the ledger cannot serve them, since it lives in memory unless Storage
+  // was up when this object started, and it holds every call's text.
+  // Storage is found when first needed, for this record only.
+  private static readonly DAILY_SPEND_KEY = 'llm:daily-spend';
+  private dailySpend: { day: string; byCaller: Record<string, number> } = { day: '', byCaller: {} };
+  private dailySpendLoad?: Promise<void>;
+  private dailySpendStorageId?: AbjectId;
+  private dailySpendSaveTimer?: ReturnType<typeof setTimeout>;
   private static readonly PRICING_STORAGE_KEY = 'llm:pricingOverrides';
 
   private _paused = false;
@@ -846,6 +859,18 @@ export class LLMObject extends Abject {
                 description: 'Get spend broken down by provider and model, rolled up from the call ledger. Returns { models, totals, todayCostUsd, sessionCostUsd, sessionStartedAt, days, pricingOverrides, retention, entryCount, windowStart, windowEnd }. Costs are the provider-reported charge where the provider reports one, otherwise an estimate from published list prices; calls with neither are counted in unpricedRequests rather than as free. The totals cover the retained ledger window, not necessarily all time — widen retention to widen the window. Session figures cover this process only.',
                 parameters: [],
                 returns: { kind: 'reference', reference: 'LLMSpendReport' },
+              },
+              {
+                name: 'getDailySpend',
+                description: "Today's model spend in USD (local day), kept across restarts: the total, each requester's share, and with callerName that requester's spentUsd. Daily budgets read it.",
+                parameters: [
+                  { name: 'callerName', type: { kind: 'primitive', primitive: 'string' }, description: 'A requester as the ledger names it, e.g. TaskReviewer', optional: true },
+                ],
+                returns: { kind: 'object', properties: {
+                  day: { kind: 'primitive', primitive: 'string' },
+                  totalUsd: { kind: 'primitive', primitive: 'number' },
+                  spentUsd: { kind: 'primitive', primitive: 'number' },
+                } },
               },
               {
                 name: 'setModelPricing',
@@ -1536,6 +1561,18 @@ export class LLMObject extends Abject {
 
     this.on('getSpend', async () => {
       return this.buildSpendReport();
+    });
+
+    // Today's spend (local day), kept across restarts: in total, by
+    // requester, and for one requester when `callerName` is given.
+    this.on('getDailySpend', async (m: AbjectMessage) => {
+      const { callerName } = (m.payload ?? {}) as { callerName?: string };
+      await this.loadDailySpend();
+      const today = LLMObject.dayKey(Date.now());
+      if (this.dailySpend.day !== today) this.dailySpend = { day: today, byCaller: {} };
+      const byCaller = { ...this.dailySpend.byCaller };
+      const totalUsd = Object.values(byCaller).reduce((a, b) => a + b, 0);
+      return { day: today, totalUsd, byCaller, ...(typeof callerName === 'string' ? { spentUsd: byCaller[callerName] ?? 0 } : {}) };
     });
 
     this.on('setModelPricing', async (m: AbjectMessage) => {
@@ -2812,6 +2849,7 @@ Only output the code, no explanations. Use proper formatting and comments.`;
 
     const cost = this.priceCall(entry.provider, entry.model, usage);
     entry.costUsd = cost.costUsd;
+    if (typeof cost.costUsd === 'number' && cost.costUsd > 0) this.countDailySpend(entry.callerName ?? 'unknown', cost.costUsd, now);
     // Left undefined when the call is unpriced. `false` has to mean exactly
     // "the provider billed us this", or an unpriced call is indistinguishable
     // from a billed one and re-pricing would skip it forever.
@@ -2831,6 +2869,42 @@ Only output the code, no explanations. Use proper formatting and comments.`;
       costUsd: entry.costUsd,
       costEstimated: entry.costEstimated,
     });
+  }
+
+  /** Add one call's cost to today's total for its requester. */
+  private countDailySpend(callerName: string, costUsd: number, at: number): void {
+    const day = LLMObject.dayKey(at);
+    if (this.dailySpend.day !== day) this.dailySpend = { day, byCaller: {} };
+    this.dailySpend.byCaller[callerName] = (this.dailySpend.byCaller[callerName] ?? 0) + costUsd;
+    void this.loadDailySpend().then(() => this.scheduleDailySpendSave());
+  }
+
+  /** Merge today's saved totals in once (spend counted before the load is kept). */
+  private loadDailySpend(): Promise<void> {
+    this.dailySpendLoad ??= (async () => {
+      this.dailySpendStorageId = await this.discoverDep('Storage') ?? undefined;
+      if (!this.dailySpendStorageId) { this.dailySpendLoad = undefined; return; }
+      const saved = await this.request<{ day?: string; byCaller?: Record<string, number> } | null>(
+        msg.request(this.id, this.dailySpendStorageId, 'get', { key: LLMObject.DAILY_SPEND_KEY })).catch(() => null);
+      const today = LLMObject.dayKey(Date.now());
+      if (this.dailySpend.day !== today) this.dailySpend = { day: today, byCaller: {} };
+      if (saved?.day === today && saved.byCaller && typeof saved.byCaller === 'object') {
+        for (const [caller, usd] of Object.entries(saved.byCaller)) {
+          if (typeof usd === 'number' && Number.isFinite(usd) && usd > 0) this.dailySpend.byCaller[caller] = (this.dailySpend.byCaller[caller] ?? 0) + usd;
+        }
+      }
+    })();
+    return this.dailySpendLoad;
+  }
+
+  private scheduleDailySpendSave(): void {
+    if (this.dailySpendSaveTimer || !this.dailySpendStorageId) return;
+    this.dailySpendSaveTimer = this.setTimer(async () => {
+      this.dailySpendSaveTimer = undefined;
+      await this.request(msg.request(this.id, this.dailySpendStorageId!, 'set', {
+        key: LLMObject.DAILY_SPEND_KEY, value: { day: this.dailySpend.day, byCaller: { ...this.dailySpend.byCaller } },
+      })).catch(() => undefined);
+    }, 2000);
   }
 
   /** Close a ledger entry that failed. A failed call has no cost to price. */

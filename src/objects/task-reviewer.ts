@@ -62,8 +62,24 @@ const TASK_REVIEWER_INTERFACE = 'abjects:task-reviewer' as InterfaceId;
  * judging what worked has to wait for the goal's real outcome.
  */
 const REVIEW_EVERY_N = 4;
-/** Reviews are cheap but not free: cap them per day. */
-const MAX_REVIEWS_PER_DAY = 24;
+/**
+ * Learning runs on a daily dollar budget (Settings, AI tab: what reviews and
+ * repairs may spend on models per day across all workspaces), measured from
+ * the LLM's own daily spend for this requester. A fixed count was wrong in
+ * both directions: too few reviews on a cheap model, too much spend on an
+ * expensive one. The count below is only a backstop for unpriced models.
+ */
+const DEFAULT_LEARNING_BUDGET_USD = 3;
+const MAX_TASKS_PER_DAY = 100;
+/** The last quarter of the day's budget waits for reviews judged valuable. */
+const RESERVE_SHARE = 0.25;
+/** Repairs of stuck corrections may use at most this share of the day's budget, one at a time, spaced out. */
+const REPAIR_SHARE = 0.25;
+const REPAIR_SPACING_MS = 2 * 60 * 1000;
+/** How long a read of the budget and the day's spend is reused. */
+const BUDGET_REFRESH_MS = 15 * 1000;
+/** Workspace Storage key of this reviewer's day: tasks started, repair spend, last repair. */
+const DAILY_KEY = 'task-reviewer:daily';
 /** Transcripts shorter than this hold nothing worth learning. */
 const MIN_TRANSCRIPT_CHARS = 600;
 /** Safety valve: clear a stuck in-flight review after this long. */
@@ -93,8 +109,6 @@ const MAX_PENDING_GOAL_REVIEWS = 5;
 // Decision-model thresholds (sites reviewer.*; see src/core/decision-sites.ts).
 /** reviewer.worth (act): a `routine` verdict this sure settles a review without the model pass. */
 const ROUTINE_MIN_P = 0.85;
-/** reviewer.worth (act): the day's last review slots wait for reviews judged valuable. */
-const RESERVED_REVIEW_SLOTS = 6;
 /** Worth verdicts kept per goal, so a deferred review is not judged again on every drain. */
 const WORTH_CACHE_MAX = 50;
 /** reviewer.predictions (act): below this, an automated assessment records unresolved. */
@@ -582,6 +596,14 @@ export class TaskReviewer extends Abject {
   private taskCounters = new Map<string, number>();
   private reviewsToday = 0;
   private reviewsDay = '';
+  /** The day's budget and what this requester has spent of it (from the LLM, all workspaces). */
+  private budget = { limitUsd: DEFAULT_LEARNING_BUDGET_USD, spentUsd: 0, fetchedAt: 0 };
+  private repairUsdToday = 0;
+  private lastRepairAt = 0;
+  /** Spend when the running repair started, to measure what it cost. */
+  private repairSpendBaseline?: number;
+  private dailyLoaded = false;
+  private budgetSpentLoggedDay = '';
 
   /** One review or curation at a time; excess completions just tick counters. */
   private inFlight?: { ticketId: string; startedAt: number };
@@ -608,6 +630,7 @@ export class TaskReviewer extends Abject {
    */
   private async drainDurableReviews(recoverLegacy = true, startModels = true): Promise<void> {
     if (!this.goalManagerId || this.inFlight || this.preparingReview) return;
+    await this.refreshBudget();
     // At boot the workspace is still registering, and a model call made now
     // fails the LLM's spend accounting (it finds the caller's GoalManager
     // through WorkspaceManager). So the first pass only settles and delivers;
@@ -809,6 +832,7 @@ My work is internal maintenance of this workspace's memory. When invited to cont
         await this.request(request(this.id, this.goalManagerId, 'ackReview', { goalId: extra.goalId, report: this.learningReport(extra, !succeeded || extra.cancelled === true) }));
       }
       this.inFlight = undefined; this.taskExtras.delete(ticketId);
+      if (extra?.kind === 'repair') void this.settleRepairSpend().catch(() => undefined);
       for (const taskId of succeeded ? extra?.reviewedTaskIds ?? [] : []) {
         // The transcripts have served their purpose; free them.
         this.send(request(this.id, this.agentAbjectId!, 'releaseTask', { taskId }));
@@ -842,6 +866,7 @@ My work is internal maintenance of this workspace's memory. When invited to cont
 
     this.on('getReviewStatus', async () => ({
       reviewsToday: this.reviewsToday,
+      budget: { limitUsd: this.budget.limitUsd, spentUsd: this.budget.spentUsd, repairUsd: this.repairUsdToday },
       busy: !!this.inFlight || this.preparingReview,
       pending: this.pendingGoalReviews.length,
       counters: Object.fromEntries(this.taskCounters),
@@ -1185,7 +1210,7 @@ My work is internal maintenance of this workspace's memory. When invited to cont
       for (const pending of decisions.slice(0, TaskReviewer.DECISIONS_PER_PASS)) {
         const decision = await this.applyDecision(pending);
         if (!allowRepair || repairStarted || this.inFlight) continue;
-        if (decision.paused || !decision.effects.some(e => e.state === 'needs_repair') || decision.repairAttempts || !this.underDailyCap()) continue;
+        if (decision.paused || !decision.effects.some(e => e.state === 'needs_repair') || decision.repairAttempts || !this.repairAllowed()) continue;
         const claim = await this.request<{ success: boolean; decision: LearningDecision }>(request(this.id, this.goalManagerId, 'claimLearningRepair', { goalId: decision.goalId, decisionId: decision.id }));
         if (!claim.success) continue;
         const taskId = `learning-repair-${decision.id}-${Date.now()}`;
@@ -1212,6 +1237,9 @@ My work is internal maintenance of this workspace's memory. When invited to cont
             config: { maxSteps: 3, timeout: 90000, budgetGoalId: decision.goalId, knowledgeScope },
           }), 15000);
           this.reviewsToday++;
+          this.lastRepairAt = Date.now();
+          this.repairSpendBaseline = this.budget.spentUsd;
+          await this.saveDaily();
         } catch (err) { this.inFlight = undefined; this.taskExtras.delete(taskId); log.warn(`Focused learning repair could not start: ${String(err)}`); }
         repairStarted = true;
       }
@@ -1598,13 +1626,87 @@ My work is internal maintenance of this workspace's memory. When invited to cont
     }
   }
 
+  /**
+   * Whether model work may start: the day's spend is under the budget and
+   * the backstop count is not reached. Reads the snapshot refreshBudget keeps.
+   */
   private underDailyCap(): boolean {
-    const today = new Date().toDateString();
-    if (this.reviewsDay !== today) {
-      this.reviewsDay = today;
-      this.reviewsToday = 0;
+    const open = this.budget.limitUsd > 0 && this.budget.spentUsd < this.budget.limitUsd && this.reviewsToday < MAX_TASKS_PER_DAY;
+    if (!open && this.budgetSpentLoggedDay !== this.reviewsDay) {
+      this.budgetSpentLoggedDay = this.reviewsDay;
+      log.info(this.budget.limitUsd === 0
+        ? 'Learning reviews are off (daily learning budget is 0)'
+        : `Learning budget for today is used ($${this.budget.spentUsd.toFixed(2)} of $${this.budget.limitUsd.toFixed(2)}, ${this.reviewsToday} tasks); reviews resume tomorrow`);
     }
-    return this.reviewsToday < MAX_REVIEWS_PER_DAY;
+    return open;
+  }
+
+  /** A repair may start: within budget, within the repair share, and spaced from the last one. */
+  private repairAllowed(): boolean {
+    return this.underDailyCap()
+      && this.repairUsdToday < this.budget.limitUsd * REPAIR_SHARE
+      && Date.now() - this.lastRepairAt >= REPAIR_SPACING_MS;
+  }
+
+  /**
+   * Read the budget (SettingsManager) and today's spend by this requester
+   * (the LLM, across workspaces), at most every BUDGET_REFRESH_MS. A new day
+   * resets the count, the repair share and the spacing.
+   */
+  private async refreshBudget(force = false): Promise<void> {
+    if (!force && Date.now() - this.budget.fetchedAt < BUDGET_REFRESH_MS) return;
+    const [settings, spend] = await Promise.all([
+      this.discoverDep('SettingsManager').then(id => id
+        ? this.request<{ learningBudgetUsdPerDay?: number }>(request(this.id, id, 'getSettings', { section: 'ai' }), 5000) : null).catch(() => null),
+      this.discoverDep('LLM').then(id => id
+        ? this.request<{ day: string; spentUsd?: number }>(request(this.id, id, 'getDailySpend', { callerName: this.manifest.name }), 5000) : null).catch(() => null),
+    ]);
+    const limit = settings?.learningBudgetUsdPerDay;
+    if (typeof limit === 'number' && Number.isFinite(limit) && limit >= 0) this.budget.limitUsd = limit;
+    if (spend && typeof spend.spentUsd === 'number') this.budget.spentUsd = spend.spentUsd;
+    this.budget.fetchedAt = Date.now();
+    await this.loadDaily();
+    const day = spend?.day ?? new Date().toDateString();
+    if (this.reviewsDay !== day) {
+      this.reviewsDay = day;
+      this.reviewsToday = 0;
+      this.repairUsdToday = 0;
+      this.lastRepairAt = 0;
+      await this.saveDaily();
+    }
+  }
+
+  /** This reviewer's day survives restarts (the count used to reset with every one). */
+  private async loadDaily(): Promise<void> {
+    if (this.dailyLoaded) return;
+    this.dailyLoaded = true;
+    const storage = await this.discoverDep('Storage');
+    if (!storage) return;
+    const saved = await this.request<{ day?: string; tasks?: number; repairUsd?: number; lastRepairAt?: number } | null>(
+      request(this.id, storage, 'get', { key: DAILY_KEY })).catch(() => null);
+    if (!saved?.day) return;
+    this.reviewsDay = saved.day;
+    this.reviewsToday = Math.max(this.reviewsToday, Number(saved.tasks) || 0);
+    this.repairUsdToday = Math.max(this.repairUsdToday, Number(saved.repairUsd) || 0);
+    this.lastRepairAt = Math.max(this.lastRepairAt, Number(saved.lastRepairAt) || 0);
+  }
+
+  private async saveDaily(): Promise<void> {
+    const storage = await this.discoverDep('Storage');
+    if (!storage) return;
+    await this.request(request(this.id, storage, 'set', { key: DAILY_KEY, value: {
+      day: this.reviewsDay, tasks: this.reviewsToday, repairUsd: this.repairUsdToday, lastRepairAt: this.lastRepairAt,
+    } })).catch(() => undefined);
+  }
+
+  /** A repair finished: add what it cost to the repair share. */
+  private async settleRepairSpend(): Promise<void> {
+    if (this.repairSpendBaseline === undefined) return;
+    const baseline = this.repairSpendBaseline;
+    this.repairSpendBaseline = undefined;
+    await this.refreshBudget(true);
+    this.repairUsdToday += Math.max(0, this.budget.spentUsd - baseline);
+    await this.saveDaily();
   }
 
   private async onStandaloneTaskCompleted(ev: TaskCompletedEvent): Promise<void> {
@@ -1620,6 +1722,7 @@ My work is internal maintenance of this workspace's memory. When invited to cont
 
     this.clearStuckReview();
     if (this.inFlight) return;         // keep the counter; review the next one
+    await this.refreshBudget();
     if (!this.underDailyCap()) return;
 
     const record = await this.fetchTranscript(ev.taskId);
@@ -1693,6 +1796,7 @@ My work is internal maintenance of this workspace's memory. When invited to cont
       this.queueGoalReview(review);
       return;
     }
+    await this.refreshBudget();
     if (!this.underDailyCap()) return;
     // Judged low in value and deferred already: it waits out the day's
     // reserved slots without fetching its evidence again (reviewer.worth, act).
@@ -1842,9 +1946,10 @@ My work is internal maintenance of this workspace's memory. When invited to cont
     return { ...(goalId ? { goalId } : {}), ...(taskId ? { taskId } : {}), onBehalfOf: this.manifest.name };
   }
 
-  /** Inside the day's last review slots, which wait for reviews judged valuable. */
+  /** Inside the last quarter of the day's budget (or count), which waits for reviews judged valuable. */
   private inReserveZone(): boolean {
-    return this.reviewsToday >= MAX_REVIEWS_PER_DAY - RESERVED_REVIEW_SLOTS;
+    return this.budget.spentUsd >= this.budget.limitUsd * (1 - RESERVE_SHARE)
+      || this.reviewsToday >= MAX_TASKS_PER_DAY * (1 - RESERVE_SHARE);
   }
 
   private markDeferred(goalId: string): void {
@@ -1941,7 +2046,7 @@ My work is internal maintenance of this workspace's memory. When invited to cont
   private logWorth(subject: string, worth: WorthVerdict, plan: ReturnType<TaskReviewer['worthPlan']>): void {
     const what = {
       routine: 'settle as routine without the full review',
-      defer: `defer while the day's last ${RESERVED_REVIEW_SLOTS} review slots wait for valuable reviews`,
+      defer: 'defer while the last quarter of the day\'s learning budget waits for valuable reviews',
       priority: 'review ahead of routine work',
       review: 'review',
     }[plan];
@@ -2634,7 +2739,8 @@ My work is internal maintenance of this workspace's memory. When invited to cont
         15000,
       );
       this.reviewsToday++;
-      log.info(`Review started: "${task.slice(0, 80)}" over ${reviewedTaskIds.length} task(s) (${this.reviewsToday}/${MAX_REVIEWS_PER_DAY} today)`);
+      void this.saveDaily();
+      log.info(`Review started: "${task.slice(0, 80)}" over ${reviewedTaskIds.length} task(s) (${this.reviewsToday} today, $${this.budget.spentUsd.toFixed(2)} of $${this.budget.limitUsd.toFixed(2)} spent)`);
     } catch (err) {
       this.inFlight = undefined; this.taskExtras.delete(taskId);
       log.warn(`launchReview failed: ${err instanceof Error ? err.message : String(err)}`);

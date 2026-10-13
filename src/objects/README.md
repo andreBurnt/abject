@@ -248,7 +248,7 @@ Per-workspace UI.
 |------|--------|------|------|
 | `registry.ts` | Registry | global, main | Directory of objects by id, name, interface, capability, tags and typeId; `ask`, `findCapable`, `search` for discovery; filters what remote callers see |
 | `factory.ts` | Factory | global, main | Spawns, kills, clones and respawns objects; picks constructor, ScriptableAbject, Organism or WasmAbject; places worker-eligible types in the pool |
-| `llm-object.ts` | LLM (class `LLMObject`) | global, worker | Provider-agnostic LLM service: `complete`, `stream`, tier routing, built-in and abject-backed providers, call ledger and spend, speech |
+| `llm-object.ts` | LLM (class `LLMObject`) | global, worker | Provider-agnostic LLM service: `complete`, `stream`, tier routing, built-in and abject-backed providers, call ledger and spend, speech. `getDailySpend` gives today's spend by requester, kept across restarts in one small Storage record (`llm:daily-spend`; daily budgets read it) |
 | `proxy-generator.ts` | ProxyGenerator | global, worker | LLM-generated protocol-translation proxies (JavaScript handler maps spawned as ScriptableAbjects) for the Negotiator |
 | `object-catalog.ts` | ObjectCatalog | global, worker | Cached snapshot of every registry source (system, local and remote workspaces), refreshed on timers, for browsers and agents |
 | `cassette-recorder.ts` | CassetteRecorder | global, worker | Records HttpClient exchanges per caller typeId as replayable evidence |
@@ -284,7 +284,7 @@ The KnowledgeBase in `INFRA_OBJECTS` is the C++/WASM package in `native/knowledg
 | `tuple-space.ts` | TupleSpace | workspace, worker | Task tuples over SharedState (last writer wins), one namespace per top-level goal; a stale claim becomes reclaimable after 5 minutes |
 | `goal-observer.ts` | GoalObserver | workspace, worker | Watchdog: sweeps goals every minute, fails one with no progress for 30 minutes |
 | `task-session.ts` | TaskSession | workspace, worker | Durable task sessions: checkpoint, resume, fork, reconcile, result delivery |
-| `task-reviewer.ts` | TaskReviewer | workspace, worker | Reviews finished work into the KnowledgeBase, judges which knowledge helped, proposes skills, and writes the workspace's patterns. Shows each miss with the beliefs in its task's prompt (ids and sources) so it can be blamed on an entry or pattern; attributes runtime faults to `runtime` and tells the person (NotificationCenter) instead of learning from them; settles stuck learning effects without a model before draining actionable ones |
+| `task-reviewer.ts` | TaskReviewer | workspace, worker | Reviews finished work into the KnowledgeBase, judges which knowledge helped, proposes skills, and writes the workspace's patterns. Shows each miss with the beliefs in its task's prompt (ids and sources) so it can be blamed on an entry or pattern; attributes runtime faults to `runtime` and tells the person (NotificationCenter) instead of learning from them; settles stuck learning effects without a model before draining actionable ones. Model work (reviews, repairs) runs on the daily learning budget from Settings, measured with LLM `getDailySpend` across workspaces: the last quarter waits for reviews judged valuable, repairs use at most a quarter and start at most every 2 minutes, 100 tasks a day is a backstop for unpriced models, and the day's count survives restarts (`task-reviewer:daily`) |
 | `agent-evaluation.ts` | AgentEvaluation | workspace, worker | Evaluation runs of an agent (driver) checked by an independent verifier, with durable reports |
 | `agent-creator.ts` | AgentCreator | workspace, worker | Advisory agent for designing agents, schedules and watchers; answers through `ask` and declines tasks |
 | `object-creator.ts` | ObjectCreator | workspace, worker | Creates and modifies Abjects through one ReAct loop whose primitive is `call(target, method, payload)` |
@@ -308,7 +308,7 @@ ChatBrowser, the roster window, is under Per-workspace UI.
 
 | File | Object | Runs | Role |
 |------|--------|------|------|
-| `settings-manager.ts` | SettingsManager | global, worker | Owns the global settings: load, validate, persist, apply, `settingsChanged`; presets; admits writers |
+| `settings-manager.ts` | SettingsManager | global, worker | Owns the global settings: load, validate, persist, apply, `settingsChanged`; presets; admits writers. AI section includes `learningBudgetUsdPerDay` (default 3, about $90 to $100 a month; 0 turns learning model work off), shown in the AI tab and the `abject` command |
 | `permission-broker.ts` | PermissionBroker | global, worker | Decides capability permissions by rules, project autonomy, workspace access mode and prompt mode; asks through DialogBroker |
 | `dialog-broker.ts` | DialogBroker | global, worker | Holds every open question to a person; presenters and responders answer; sealed at boot |
 | `global-settings.ts` | GlobalSettings | global, desktop, worker | The Settings window over SettingsManager (plus Skills, Packages, Updates tabs); presenter for permission dialogs; opens itself on first boot |
