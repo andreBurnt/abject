@@ -2605,7 +2605,9 @@ The registered object must implement these handlers to participate in the agent 
     const now = Date.now();
     if (now - (entry.lastCallerKeepAliveTs ?? 0) < 1000) return;
     entry.lastCallerKeepAliveTs = now;
-    this.send(event(this.id, entry.callerId, 'progress', { taskId: entry.state.id, phase, message }));
+    // keepAlive: a heartbeat for the watchdog, not news for the goal's
+    // progress (the phase changes and actions already report that).
+    this.send(event(this.id, entry.callerId, 'progress', { taskId: entry.state.id, phase, message, keepAlive: true }));
   }
 
   private emitIntermediateAction(entry: TaskEntry): void {

@@ -2473,11 +2473,12 @@ clean result I did not observe.`;
 
     this.onTaskMessage('progress', (msg: AbjectMessage) => {
       this.resetPendingTicketTimeouts((msg.payload as { taskId?: string } | undefined)?.taskId);
-      // Progress arrives untagged, so it cannot be attributed to one task by
-      // inspection. With several running, every live goal is genuinely being
-      // worked on and each needs its timer reset, so all of them hear about it
-      // — but the message itself belongs to whichever task emitted it, so it
-      // is only quoted when there is no ambiguity about whose it is.
+      // A runtime keep-alive only feeds the watchdog; the goal's progress
+      // already shows the phase and action it accompanies.
+      if ((msg.payload as { keepAlive?: boolean } | undefined)?.keepAlive) return;
+      // AgentAbject tags progress with the task's id, so only that task's
+      // watchdog resets. The goal line quotes the message only when it can
+      // be attributed to one task.
       if (this.goalManagerId) {
         const payload = msg.payload as { taskId?: string; phase?: string; message?: string } | undefined;
         const goals = new Set<string>();

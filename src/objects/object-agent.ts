@@ -343,6 +343,9 @@ When asked about a task, describe which objects you would message and what you w
     // at JobManager (no upstream during job execution).
     this.on('progress', (msg: AbjectMessage) => {
       this.resetPendingTicketTimeouts((msg.payload as { taskId?: string } | undefined)?.taskId);
+      // A runtime keep-alive only feeds the watchdog; the goal's progress
+      // already shows the phase and action it accompanies.
+      if ((msg.payload as { keepAlive?: boolean } | undefined)?.keepAlive) return;
       // AgentAbject tags its keep-alives with the task's id (streaming, each
       // think, a running submit_job), so only that task's watchdog resets.
       // Untagged progress bubbling up from a sub-call is covered by the

@@ -1047,7 +1047,8 @@ My work is internal maintenance of this workspace's memory. When invited to cont
    *   at most MAX_DELIVERY_RESUMES times, then abandoned;
    * - learning paused by a stopped goal or a cancelled review and not
    *   resumed within PAUSED_SETTLE_MS is abandoned, so the goal can archive;
-   * - a retirement whose replacement was abandoned is abandoned with it.
+   * - a retirement whose replacement was abandoned is abandoned with it,
+   *   and an effect whose target entry no longer exists is abandoned.
    */
   private async settleLearningDecision(initial: LearningDecision, budget: { changes: number }): Promise<LearningDecision> {
     let decision = initial;
@@ -1072,6 +1073,11 @@ My work is internal maintenance of this workspace's memory. When invited to cont
           && /Invalid pattern usefulness verdict/.test(error)) {
           decision = await this.changeEffect(decision, effect, { repair: { ...effect.input, verdict: TaskReviewer.usefulnessVerdict(effect.input.verdict) },
             error: 'Verdict mapped to a usefulness verdict; awaiting delivery' });
+        } else if (effect.state === 'needs_repair' && /^(Pattern not found|Knowledge target unavailable)/.test(error)) {
+          // The entry it was about has since been merged or deleted (or is not
+          // a pattern at all); no repair can supply the target it lacks.
+          const reason = error.startsWith('Pattern') ? 'Its target is gone or is not a pattern entry' : 'Its target no longer exists';
+          decision = await this.changeEffect(decision, effect, { state: 'abandoned', error: `${reason} (${error})` });
         } else if (effect.state === 'needs_repair' && effect.input.action === 'record_pattern_application' && /Conflicting application feedback/.test(error)) {
           // This use already carries another review's verdict. A second
           // reading that disagrees is still evidence about the pattern, so it
