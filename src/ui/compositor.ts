@@ -875,6 +875,9 @@ export class Compositor {
   /** Optional hook: relay client-side compositor diagnostics to the backend
    *  (clientDiagnostic path — the browser console never reaches the log). */
   onDiagnostic?: (gate: string, detail: string) => void;
+  /** Optional hook: these surfaces were re-allocated at a new dpr and hold
+   *  only their old pixels, scaled; ask the backend to replay their content. */
+  onSurfacesReallocated?: (surfaceIds: string[]) => void;
   /** A camera flight in progress (focus, fly out, keyboard pan). */
   private mobileFlight?: { from: MobileCam; to: MobileCam; start: number; duration: number };
   /** A one-finger pan released with speed: the camera glides (screen px/s). */
@@ -961,14 +964,40 @@ export class Compositor {
     // Handle resize
     this.handleResize();
     window.addEventListener('resize', () => this.handleResize());
+    this.watchDevicePixelRatio();
 
     // Start render loop
     this.startRenderLoop();
   }
 
-  /** Window backing-store dpr before the per-surface size cap: the screen's dpr, clamped to [1, 2]. */
+  /**
+   * Window backing-store dpr before the per-surface size cap: the screen's
+   * dpr, clamped to [1, 2]. The phone keeps 1x: it holds every window's
+   * surface while showing one at a time, and a 2x store is four times the
+   * memory on the device with the least of it.
+   */
   private baseSurfaceDpr(): number {
+    if (this.mobileMode) return 1;
     return Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+  }
+
+  /**
+   * Re-allocate every window surface when the base dpr has changed (zoom, a
+   * move to another display, entering or leaving mobile mode), so none is
+   * left at the old resolution, then ask for their content again: a surface
+   * re-allocated at another dpr holds only its old pixels, scaled.
+   */
+  private reallocateSurfacesForDpr(): void {
+    const surfaceDpr = this.baseSurfaceDpr();
+    if (this.lastSurfaceDpr !== 0 && surfaceDpr !== this.lastSurfaceDpr) {
+      const ids: string[] = [];
+      for (const s of this.surfaces.values()) {
+        this.resizeSurface(s.id, s.rect.width, s.rect.height);
+        ids.push(s.id);
+      }
+      if (ids.length > 0) this.onSurfacesReallocated?.(ids);
+    }
+    this.lastSurfaceDpr = surfaceDpr;
   }
 
   /**
@@ -981,6 +1010,20 @@ export class Compositor {
     return Math.max(1, Math.min(this.baseSurfaceDpr(), maxTex / width, maxTex / height));
   }
 
+  /**
+   * A devicePixelRatio change can come without a resize: moving the window to
+   * a display of another density keeps its CSS size. A media query on the
+   * current resolution flips when the ratio changes; re-arm it on the new one.
+   */
+  private watchDevicePixelRatio(): void {
+    if (typeof window.matchMedia !== 'function') return;
+    const query = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+    query.addEventListener('change', () => {
+      this.handleResize();
+      this.watchDevicePixelRatio();
+    }, { once: true });
+  }
+
   /** baseSurfaceDpr() at the last handleResize; a change re-allocates every window surface. */
   private lastSurfaceDpr = 0;
 
@@ -991,13 +1034,8 @@ export class Compositor {
     const dpr = window.devicePixelRatio || 1;
     const rect = this.canvas.getBoundingClientRect();
 
-    // Zoom or a move to another display changed the dpr: re-allocate every
-    // window surface so none is left at the old backing-store resolution.
-    const surfaceDpr = this.baseSurfaceDpr();
-    if (this.lastSurfaceDpr !== 0 && surfaceDpr !== this.lastSurfaceDpr) {
-      for (const s of this.surfaces.values()) this.resizeSurface(s.id, s.rect.width, s.rect.height);
-    }
-    this.lastSurfaceDpr = surfaceDpr;
+    // Zoom or a move to another display may have changed the dpr.
+    this.reallocateSurfacesForDpr();
 
     this.renderer.setSize(rect.width, rect.height, dpr);
     this.renderer.cssWidth = rect.width;
@@ -3308,6 +3346,7 @@ export class Compositor {
       state.texture = this.renderer.createTexture();
       surface.dirty = true;
     }
+    const minified = this.slabMinified(surface, model, opts.viewProj ?? this.viewProj);
     if (surface.dirty && !surface.tainted) {
       const ok = this.renderer.uploadTexture(state.texture, surface.canvas);
       surface.dirty = false;
@@ -3323,11 +3362,11 @@ export class Compositor {
         this.onDiagnostic?.('surface-tainted', taintDetail);
       }
       // A fresh upload replaced level 0; any mip chain now describes old pixels.
-      if (state.slabMips) this.syncSlabMips(state, true);
+      if (state.slabMips) this.syncSlabMips(state, minified);
     }
-    // A phone camera zoomed out minifies slabs: sample a mip chain so window
-    // text stays steady instead of shimmering. (The desktop draws at 1:1.)
-    if (this.mobileMode && this.viewZoom < 0.999 && !state.slabMips) this.syncSlabMips(state, false);
+    // A minified slab samples a mip chain so window text stays steady
+    // instead of shimmering.
+    if (minified && !state.slabMips) this.syncSlabMips(state, true);
     this.renderer.drawSurface({
       model,
       viewProj: opts.viewProj ?? this.viewProj,
@@ -3344,17 +3383,40 @@ export class Compositor {
   }
 
   /**
-   * Match a slab texture's filtering to the phone camera: zoomed out, it
-   * samples a freshly generated mip chain (trilinear); otherwise plain
-   * linear. Called after every upload of a mipmapped slab, since a stale
-   * chain beside a new level 0 would leave the texture incomplete.
+   * Whether a slab is drawn small enough against its texture that plain
+   * linear sampling shimmers. The phone keeps its rule: any zoomed-out
+   * camera. Elsewhere it is measured: a window drawn at 1:1 maps one texel
+   * to one device pixel at any dpr, while Exposé, a pushed-back or tilted
+   * window, or a 2x backing store on a 1x display all squeeze more than
+   * SLAB_MIP_MINIFICATION texels into a device pixel along some axis.
    */
-  private syncSlabMips(state: SurfaceGlState, _reuploaded: boolean): void {
+  private slabMinified(surface: Surface, model: Mat4, viewProj: Mat4): boolean {
+    if (this.mobileMode) return this.viewZoom < 0.999;
+    const box = projectUnitQuadToCss(model, viewProj, this.width, this.height);
+    if (!box) return false;
+    const devicePx = this.canvas.width / Math.max(1, this.width);
+    const texelsPerPx = Math.max(
+      surface.canvas.width / Math.max(1, box.width * devicePx),
+      surface.canvas.height / Math.max(1, box.height * devicePx),
+    );
+    return texelsPerPx > Compositor.SLAB_MIP_MINIFICATION;
+  }
+
+  /** Texels per device pixel above which a slab samples a mip chain. */
+  private static readonly SLAB_MIP_MINIFICATION = 1.25;
+
+  /**
+   * Set a slab texture's filtering: minified, it samples a freshly generated
+   * mip chain (trilinear); otherwise plain linear. Called after every upload
+   * of a mipmapped slab, since a stale chain beside a new level 0 would leave
+   * the texture incomplete.
+   */
+  private syncSlabMips(state: SurfaceGlState, minified: boolean): void {
     const tex = state.texture;
     if (!tex) return;
     const gl = this.renderer.context;
     gl.bindTexture(gl.TEXTURE_2D, tex);
-    if (this.mobileMode && this.viewZoom < 0.999) {
+    if (minified) {
       gl.generateMipmap(gl.TEXTURE_2D);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
       state.slabMips = true;
@@ -7731,6 +7793,8 @@ void main() { fragColor = vec4(0.0); }`));
     // The phone starts fitted to the used desktop; the desktop is 1:1.
     this.mobileAutoFit = enabled;
     if (!enabled) this.viewZoom = 1;
+    // The phone keeps window surfaces at 1x (baseSurfaceDpr).
+    this.reallocateSurfacesForDpr();
     this.needsRender = true;
   }
 

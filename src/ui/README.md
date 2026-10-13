@@ -151,6 +151,16 @@ referenced as `abx:sha256:<hash>` resolve through `setBlobResolver`.
   owner goes. UIServer keeps each surface's and layer's draw log for
   reconnect replay and compacts it at `clear` boundaries (a log with no clear
   is capped, oldest commands first), so begin each repaint with a `clear`.
+- **Window surfaces are drawn at the screen's pixel ratio.** Each window's
+  backing store is `round(css * dpr)` with `dpr = min(2, devicePixelRatio)`,
+  lowered to fit the GPU's texture limit (the phone keeps 1x: it holds every
+  window while showing one). Drawing goes through a dpr base transform, so
+  owners still draw in CSS px. A ratio change (zoom, a move to another
+  display, a media-query watch catches the move) or a mobile-mode switch
+  re-allocates every window and asks the backend to replay their draw logs
+  (`repaintSurfaces`). A slab drawn smaller than its texture (Exposé, a
+  pushed-back or tilted window) samples a mip chain so text does not
+  shimmer. Canvas-node layers stay at 1x.
 - **y points down.** The world is x right, y down, +z toward the viewer, in
   px. The projection bakes in the y flip and face culling is off.
 - **Visual only.** Slab effects, tilts and lift never change a window's rect

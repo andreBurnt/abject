@@ -732,6 +732,17 @@ export interface FrontendFocusMsg extends WsEnvelope {
   raise?: boolean;
 }
 
+/**
+ * The client re-allocated these surfaces at a new device pixel ratio (zoom,
+ * a move to another display, entering or leaving mobile mode). A
+ * re-allocated surface holds only its old pixels, scaled, so the backend
+ * replays each one's retained draw log to this client.
+ */
+export interface RepaintSurfacesMsg extends WsEnvelope {
+  type: 'repaintSurfaces';
+  surfaceIds: string[];
+}
+
 /** P6: client handshake — identifies which bundle is running. */
 export interface HelloMsg extends WsEnvelope {
   type: 'hello';
@@ -895,6 +906,7 @@ export type FrontendToBackendMsg =
   | FontMetricsMsg
   | ClientDiagnosticMsg
   | FrontendFocusMsg
+  | RepaintSurfacesMsg
   | HelloMsg
   | GlobalShortcutMsg
   | AudioEventMsg

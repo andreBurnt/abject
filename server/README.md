@@ -250,7 +250,8 @@ Desktop only; the headless bundle check forbids all three.
   connected client, and routes their input back to surface owners. It
   retains enough state (surfaces, draw logs, scene nodes, theme, motion,
   scene library) to replay the whole display to a client that connects or
-  reconnects. Frames are binary (`src/network/wire-codec.ts`), images go out
+  reconnects, and replays single surfaces' draw logs to a client that
+  re-allocated them at a new pixel ratio (`repaintSurfaces`). Frames are binary (`src/network/wire-codec.ts`), images go out
   once per client as content-addressed blobs (`abx:sha256:`), and each client
   has its own send queue with flow control (`frameAck`), coalescing, and a
   hard cap that drops a stalled client.

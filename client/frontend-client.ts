@@ -335,6 +335,9 @@ export class FrontendClient {
     // backend log via the clientDiagnostic message — the browser console is
     // invisible in abject.log.
     this.compositor.onDiagnostic = (gate, detail) => this.sendDiagnostic(gate, detail);
+    // A dpr change re-allocates window surfaces; their content is replayed
+    // from the backend's draw logs rather than waiting for each owner to draw.
+    this.compositor.onSurfacesReallocated = (surfaceIds) => this.sendRaw({ type: 'repaintSurfaces', surfaceIds });
     // Model nodes name their bytes by content ref; they come from the same
     // blob cache as images (a missing blob is requested; the model waits).
     this.compositor.setBlobResolver((hash) => this.resolveContentBlob(hash));

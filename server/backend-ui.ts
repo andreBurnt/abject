@@ -23,6 +23,7 @@ import type {
   FontMetricsMsg,
   ClientDiagnosticMsg,
   FrontendFocusMsg,
+  RepaintSurfacesMsg,
   HelloMsg,
   InputMsg,
   EndWindowDragMsg,
@@ -3881,6 +3882,20 @@ IMPORTANT:
         break;
       }
 
+      case 'repaintSurfaces': {
+        // The client re-allocated these surfaces at a new dpr; repaint them
+        // from their draw logs, for this client only.
+        const { surfaceIds } = msg as RepaintSurfacesMsg;
+        if (!Array.isArray(surfaceIds)) break;
+        const states: SurfaceState[] = [];
+        for (const id of surfaceIds.slice(0, 1000)) {
+          const state = typeof id === 'string' ? this.surfaces.get(id) : undefined;
+          if (state) states.push(state);
+        }
+        this.replaySurfaceDraws(clientId, states);
+        break;
+      }
+
       case 'frontendFocus': {
         // Phone Exposé pick: the user explicitly selected a surface
         // client-side. Sync server-side focus (and owner focus events) with
@@ -4228,6 +4243,21 @@ IMPORTANT:
    * Replay all current surface state to a specific client.
    * Called when a client sends 'ready' (initial connect or reconnect).
    */
+  /**
+   * Send each surface's retained root draw log to one client, queuing the
+   * image bytes it references first. The log restarts at its last
+   * clear/reset, so a replay repaints the surface whole.
+   */
+  private replaySurfaceDraws(clientId: string, states: Iterable<SurfaceState>): void {
+    const client = this.clients.get(clientId);
+    for (const state of states) {
+      const rootLog = state.drawLogs.get('');
+      if (!rootLog || rootLog.length === 0) continue;
+      if (client) this.queueBlobsForClient(client, this.blobHashesIn(rootLog));
+      this.sendToClient({ type: 'draw', commands: rootLog }, clientId);
+    }
+  }
+
   private replayStateToClient(clientId: string): void {
     // 1. Recreate all surfaces
     for (const state of this.surfaces.values()) {
@@ -4250,18 +4280,7 @@ IMPORTANT:
     // reconnecting client starts with an empty blob cache). Canvas-node
     // layer logs replay later, AFTER scene nodes exist client-side.
     const replayClient = this.clients.get(clientId);
-    for (const state of this.surfaces.values()) {
-      const rootLog = state.drawLogs.get('');
-      if (rootLog && rootLog.length > 0) {
-        if (replayClient) {
-          this.queueBlobsForClient(replayClient, this.blobHashesIn(rootLog));
-        }
-        this.sendToClient({
-          type: 'draw',
-          commands: rootLog,
-        }, clientId);
-      }
-    }
+    this.replaySurfaceDraws(clientId, this.surfaces.values());
 
     // 3. Replay workspace assignments
     for (const state of this.surfaces.values()) {
