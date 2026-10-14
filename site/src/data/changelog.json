@@ -1,5 +1,23 @@
 [
   {
+    "version": "0.15.8",
+    "date": "2026-10-14",
+    "title": "Remote MCP servers, with sign-in",
+    "summary": "Abject can now connect to MCP servers hosted on the web, not only ones it launches on your own machine, and handles the sign-in those servers ask for. Images that tools return now show up in chat as pictures.",
+    "highlights": [
+      "Connect to a remote MCP server by its URL: Abject speaks the Streamable HTTP transport and falls back to the older HTTP+SSE transport when a server needs it, and a session restarts cleanly if the server forgets it",
+      "OAuth sign-in for servers that require it: Abject finds the server's sign-in details, opens the approval page in your browser and listens for the reply on your machine (or lets you paste the code). It caches the token and refreshes it; only the connection that asked for a token can read it",
+      "Skills can describe remote servers with new fields (mcp-url, mcp-headers, mcp-oauth-client-id); header values like ${API_KEY} are read from your environment, so secrets stay out of SKILL.md",
+      "The catalog can now install hosted MCP servers. If a server needs you to approve access, the catalog shows 'Sign in to finish' and the skill list shows that it is waiting for you to sign in",
+      "Host MCP import now finds remote servers you have already set up in other tools, along with local ones",
+      "Images returned by MCP tools now appear in chat: they are saved to the workspace's files and shown inline"
+    ],
+    "fixes": [
+      "MCP tool results that contained images lost them and showed only a '[image: image/png]' placeholder (this is why requests like 'show the QR code' failed)",
+      "Long dialog messages, such as a sign-in address, were cut off and could not be selected; dialogs now size themselves to the message, scroll when it is very long, and let you select and copy the text"
+    ]
+  },
+  {
     "version": "0.15.7",
     "date": "2026-10-13",
     "title": "Fewer Ghost Messages, Windows You Can Close",
