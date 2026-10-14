@@ -336,12 +336,18 @@ All but `file-edit.ts` and `tool-output.ts` import Node built-ins (`fs`,
 - **skill-types.ts**: `SkillInfo`, `MCPServerMeta`, `SkillConfig`,
   `EnabledSkillSummary`.
 - **skill-parser.ts**: `parseSkillMd()` for SKILL.md files (YAML frontmatter
-  plus instructions), detecting Claude Code, OpenClaw and MCP flavors.
-- **skill-synth.ts**: turns an MCP registry package into a local SKILL.md
-  (`packageToMcpCommand`, `sanitiseSkillName`, `buildMcpSkillMd`).
+  plus instructions), detecting Claude Code, OpenClaw and MCP flavors. An MCP
+  skill is local (`mcp-command`, `mcp-args`) or remote (`mcp-url`, optional
+  `mcp-headers` with `${VAR}` values from the skill's env, optional
+  `mcp-oauth-client-id`).
+- **skill-synth.ts**: turns an MCP registry entry into a SKILL.md: a package
+  becomes a local server, a hosted endpoint a remote one (`packageToMcpCommand`,
+  `remoteMcpUrl`, `sanitiseSkillName`, `buildMcpSkillMd`).
 - **host-mcp-import.ts**: finds MCP servers already configured on the host
-  (mcporter for commands, openclaw for credentials) and synthesizes SKILL.md
-  files for them (`discoverHostMcpServers`, `synthesizeHostSkillMd`).
+  (mcporter for commands and remote endpoints, openclaw for credentials) and
+  synthesizes SKILL.md files for them (`discoverHostMcpServers`,
+  `synthesizeHostSkillMd`). Remote headers move into env vars so their values
+  stay out of the file.
 - **mcp-types.ts**: JSON-RPC 2.0 and MCP request/response types.
 - **mcp-format.ts**: renders MCP tool definitions as prompt text
   (`formatMCPTool`, `formatMCPToolList`, `formatMCPInputSchema`).

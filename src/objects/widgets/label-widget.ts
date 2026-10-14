@@ -8,7 +8,8 @@
  * When href is set, renders with theme link color and underline; clicking
  * opens the URL in the user's browser (via the base class openUrl protocol).
  * When style.selectable is true, additionally enables click-drag, double-click
- * word select, Shift+click, Ctrl+A, and Ctrl+C for read-only selection.
+ * word select, triple-click line select, Shift+click, Ctrl+A, and Ctrl+C for
+ * read-only selection.
  * When style.markdown is true, parses text as markdown and renders with
  * rich formatting (bold, italic, code, headings, bullets, blockquotes).
  */
@@ -47,6 +48,8 @@ export class LabelWidget extends WidgetAbject {
   private dragging = false;
   private lastClickTime = 0;
   private lastClickPos = 0;
+  /** Clicks in quick succession at one spot: 2 selects a word, 3 a line. */
+  private clickCount = 0;
   private lastSurfaceId = '';  // cached from render for use in processInput
 
   constructor(config: WidgetConfig) {
@@ -245,6 +248,17 @@ export class LabelWidget extends WidgetAbject {
       }
     }
     return lo;
+  }
+
+  /**
+   * The line (between newlines in the text, not a wrapped row) around a
+   * position, for triple-click selection: an address or a command on a line
+   * of its own copies whole.
+   */
+  private lineBoundaries(pos: number): { start: number; end: number } {
+    const start = pos === 0 ? 0 : this.text.lastIndexOf('\n', pos - 1) + 1;
+    const next = this.text.indexOf('\n', pos);
+    return { start, end: next === -1 ? this.text.length : next };
   }
 
   /**
@@ -675,11 +689,18 @@ export class LabelWidget extends WidgetAbject {
       const clickPos = await this.posFromClick(x, y, surfaceId, 0, 0);
 
       const now = Date.now();
-      const isDoubleClick = (now - this.lastClickTime) < 400 && Math.abs(clickPos - this.lastClickPos) <= 1;
+      const repeated = (now - this.lastClickTime) < 400 && Math.abs(clickPos - this.lastClickPos) <= 1;
+      this.clickCount = repeated ? this.clickCount + 1 : 1;
       this.lastClickTime = now;
       this.lastClickPos = clickPos;
 
-      if (isDoubleClick) {
+      if (this.clickCount >= 3) {
+        // Triple-click: select the line
+        const { start, end } = this.lineBoundaries(clickPos);
+        this.selAnchor = start;
+        this.cursorPos = end;
+        await this.notifySelectionChanged();
+      } else if (this.clickCount === 2) {
         // Double-click: select word
         const { start, end } = this.wordBoundaries(clickPos);
         this.selAnchor = start;

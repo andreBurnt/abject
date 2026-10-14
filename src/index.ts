@@ -256,8 +256,10 @@ export type { HostMcpServer } from './core/host-mcp-import.js';
 export type { SkillInfo, SkillConfig, EnabledSkillSummary, MCPServerMeta } from './core/skill-types.js';
 export { MCPBridge, MCP_BRIDGE_ID } from './objects/mcp-bridge.js';
 export type { MCPBridgeConfig, MCPBridgeStatus } from './objects/mcp-bridge.js';
-export { MCPTransport } from './network/mcp-transport.js';
-export type { MCPTransportState, MCPTransportEvents } from './network/mcp-transport.js';
+export { MCPTransport, shellCommandLine } from './network/mcp-transport.js';
+export type { MCPTransportState, MCPTransportEvents, MCPClientTransport } from './network/mcp-transport.js';
+export { MCPHttpTransport, MCPAuthRequiredError } from './network/mcp-http-transport.js';
+export type { MCPHttpAuth, MCPHttpTransportOptions } from './network/mcp-http-transport.js';
 export type {
   MCPToolDefinition, MCPToolCallResult, MCPContentItem,
   MCPResourceDefinition, MCPInitResult, MCPServerCapabilities,

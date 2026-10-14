@@ -25,6 +25,15 @@ const log = new Log('SkillRegistry');
 const SKILL_REGISTRY_INTERFACE: InterfaceId = 'abjects:skill-registry';
 const STORAGE_KEY = 'skills:states';
 const CONFIG_STORAGE_KEY = 'skills:config';
+/**
+ * How long an enable waits for the person to finish signing in to a remote
+ * MCP server before answering that it is still waiting. The person is not
+ * timed by this: the sign-in carries on and the bridge connects whenever it
+ * completes.
+ */
+const SIGN_IN_WAIT_MS = 15 * 60 * 1000;
+/** Bridge states an enable waits through: a remote server connecting, or waiting on a sign-in. */
+const BRIDGE_SETTLING = new Set(['connecting', 'signing_in']);
 
 interface SkillEntry {
   parsed: ParsedSkill;
@@ -46,6 +55,8 @@ export class SkillRegistry extends Abject {
   private mcpBridgeStates = new Map<string, {
     status: string; error?: string; toolCount: number; stderrTail?: string;
   }>();
+  /** Callers of enableSkill / setSkillConfig waiting for a bridge to settle, keyed by skill name. */
+  private bridgeWaiters = new Map<string, Array<() => void>>();
 
   constructor(skillsDir?: string) {
     super({
@@ -295,6 +306,36 @@ real outcome, so the reply is the diagnosis:
 \`error\` carries the server subprocess's own stderr, which is where MCP servers
 print why they refused to start. Read it before investigating anything else.
 
+A remote server that asks for a sign-in (OAuth) answers 401; its bridge then has
+OAuthHelper ask the person to approve access in their browser, and
+\`enableSkill\` waits until they have:
+
+  { success: true, mcpStatus: 'running', toolCount: 5 }                    // signed in and connected
+  { success: true, mcpStatus: 'signing_in', toolCount: 0, hint: '...' }    // the person has not approved yet
+
+Enabling a skill whose bridge failed (a crashed server, a declined sign-in)
+replaces the bridge, so it is also how to try again.
+
+### Local and remote MCP servers
+
+A local server is started as a process; a remote one is reached at its address:
+
+  ---
+  name: my-local-server
+  mcp-command: npx
+  mcp-args: ["-y", "some-mcp-package"]
+  ---
+
+  ---
+  name: my-remote-server
+  mcp-url: https://example.com/mcp
+  ---
+
+A remote server that wants an API key rather than a sign-in gets it in a header
+filled from the skill's config: \`mcp-headers: { Authorization: "Bearer \${EXAMPLE_KEY}" }\`
+with \`env: { EXAMPLE_KEY: "" }\`. A server without dynamic client registration
+needs \`mcp-oauth-client-id\` naming a client registered with it by hand.
+
 ### Re-scan the skills directory
 
   const result = await call(await dep('SkillRegistry'), 'scanSkills', {});
@@ -334,6 +375,7 @@ When an Abject bridges a specific MCP server (Telegram, Slack, GitHub, etc.), ca
   //   'not_installed' — skill with that name is not on disk
   //   'not_mcp'       — installed but no mcpServer block in SKILL.md
   //   'disabled'      — installed but not enabled; info.hint tells the user/agent to enable it
+  //   'signing_in'    — a remote server waiting for the person to approve access in their browser
   //   'error'         — enabled but spawn or runtime error; info.error has details, info.hint points at credentials
   // Always prefer this over catch-all "bridge not found" errors — surface info.hint so the caller
   // can point the user at the right setting (Installed Skills window, missing env var, etc.).
@@ -414,7 +456,14 @@ whenever the skill set changes.
       // If this is an MCP server, spawn a bridge
       let warning: string | undefined;
       if (entry.parsed.mcpServer) {
+        // Enabling again is how a bridge that failed (a crashed server, a
+        // declined sign-in) gets another try, so a failed one is replaced.
+        if (this.mcpBridges.has(key)) {
+          await this.refreshBridgeState(key).catch(() => {});
+          if (this.mcpBridgeStates.get(key)?.status === 'error') await this.stopMCPBridge(key);
+        }
         await this.spawnMCPBridge(key, entry);
+        await this.waitForBridge(key);
 
         // Report what actually happened. `spawnMCPBridge` has already awaited
         // the subprocess handshake, so the outcome is known here; returning a
@@ -437,6 +486,19 @@ whenever the skill set changes.
             error: state.error,
             missingEnv: missing.length > 0 ? missing : undefined,
             hint,
+          };
+        }
+
+        if (state?.status === 'signing_in' || state?.status === 'connecting') {
+          this.changed('skillsChanged', { reason: 'enabled' });
+          log.info(`Enabled skill "${key}"; its server is still ${state.status === 'signing_in' ? 'waiting for the person to sign in' : 'connecting'}`);
+          return {
+            success: true,
+            mcpStatus: state.status,
+            toolCount: 0,
+            hint: state.error ?? (state.status === 'signing_in'
+              ? 'The server asks the person to sign in; the bridge connects once they approve.'
+              : 'The bridge is still connecting to the server.'),
           };
         }
 
@@ -640,6 +702,7 @@ whenever the skill set changes.
       if (entry?.enabled && entry.parsed.mcpServer && this.mcpBridges.has(key)) {
         await this.stopMCPBridge(key);
         await this.spawnMCPBridge(key, entry);
+        await this.waitForBridge(key);
         restarted = true;
       }
       const state = this.mcpBridgeStates.get(key);
@@ -649,7 +712,7 @@ whenever the skill set changes.
         restarted,
         // Same vocabulary as enableSkill so callers can branch one way.
         ...(restarted ? {
-          mcpStatus: state?.status === 'error' ? 'error' : 'running',
+          mcpStatus: state?.status === 'error' || state?.status === 'signing_in' ? state.status : 'running',
           toolCount: state?.toolCount ?? 0,
           error: state?.error,
         } : {}),
@@ -669,6 +732,53 @@ whenever the skill set changes.
     this.on('getSkillsDir', async () => {
       return { path: path.resolve(this.skillsDir) };
     });
+
+    // A bridge this registry spawned reports a status change (a sign-in
+    // finished, a remote server stopped accepting its token). Taken only
+    // from those bridges.
+    this.on('bridgeStatus', (msg: AbjectMessage) => {
+      const name = [...this.mcpBridges].find(([, id]) => id === msg.routing.from)?.[0];
+      if (!name) return;
+      const { status, error, toolCount } = (msg.payload ?? {}) as { status?: string; error?: string; toolCount?: number };
+      if (typeof status !== 'string') return;
+      const previous = this.mcpBridgeStates.get(name);
+      this.mcpBridgeStates.set(name, { status, error, toolCount: toolCount ?? 0, stderrTail: previous?.stderrTail });
+      const entry = this.skills.get(name);
+      if (entry) entry.error = status === 'error' ? error : undefined;
+      if (!BRIDGE_SETTLING.has(status)) this.releaseBridgeWaiters(name);
+      log.info(`MCPBridge "${name}" is now ${status}${error && status === 'error' ? `: ${error}` : ''}`);
+      this.changed('skillsChanged', { reason: 'mcpStatus' });
+    });
+  }
+
+  /**
+   * Hold an enable (or a config change) open while the bridge settles: a
+   * remote server connecting, or waiting for the person to sign in. The
+   * caller then learns the outcome instead of a half-finished state. The
+   * heartbeat keeps every caller behind this one alive for as long as the
+   * person takes; SIGN_IN_WAIT_MS bounds a sign-in that never settles, and
+   * the caller then hears it is still waiting.
+   */
+  private async waitForBridge(name: string): Promise<void> {
+    if (!BRIDGE_SETTLING.has(this.mcpBridgeStates.get(name)?.status ?? '')) return;
+    const stopBeating = this.awaitingHuman(`the "${name}" MCP server (connecting or signing in)`);
+    try {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, SIGN_IN_WAIT_MS);
+        const waiters = this.bridgeWaiters.get(name) ?? [];
+        waiters.push(() => { clearTimeout(timer); resolve(); });
+        this.bridgeWaiters.set(name, waiters);
+      });
+    } finally {
+      stopBeating();
+    }
+    await this.refreshBridgeState(name).catch(() => {});
+  }
+
+  private releaseBridgeWaiters(name: string): void {
+    const waiters = this.bridgeWaiters.get(name);
+    this.bridgeWaiters.delete(name);
+    for (const release of waiters ?? []) release();
   }
 
   /**
@@ -693,7 +803,7 @@ whenever the skill set changes.
    */
   private getMCPBridgeInfo(serverName: string): {
     found: boolean;
-    status: 'connected' | 'connecting' | 'error' | 'disabled' | 'not_installed' | 'not_mcp';
+    status: 'connected' | 'connecting' | 'signing_in' | 'error' | 'disabled' | 'not_installed' | 'not_mcp';
     bridgeId?: string;
     error?: string;
     stderrTail?: string;
@@ -733,6 +843,16 @@ whenever the skill set changes.
         hint: `Enable/disable the skill again, or inspect SkillRegistry state. Last error: ${entry.error ?? 'none recorded'}`,
       };
     }
+    if (state?.status === 'signing_in') {
+      return {
+        found: false,
+        status: 'signing_in',
+        bridgeId,
+        error: state.error,
+        toolCount: 0,
+        hint: `MCP server "${key}" is waiting for the person to sign in. They have been asked to approve access in their browser; the bridge connects by itself once they do.`,
+      };
+    }
     if (state?.status === 'error') {
       const missing = this.missingEnvKeys(key);
       return {
@@ -743,8 +863,10 @@ whenever the skill set changes.
         stderrTail: state.stderrTail,
         toolCount: state.toolCount,
         hint:
-          `MCPBridge spawned but is in error state: ${state.error ?? 'unknown'}.` +
-          (missing.length > 0
+          `MCPBridge spawned but is in error state: ${(state.error ?? 'unknown').replace(/\.$/, '')}.` +
+          (/^Sign-in to /.test(state.error ?? '')
+            ? ` Enable the skill again (SkillRegistry.enableSkill) to ask the person to sign in again.`
+            : missing.length > 0
             ? ` Declared env vars with no value: ${missing.join(', ')}. Set them with SkillRegistry.setSkillConfig({ name: "${key}", env: { ... }, merge: true }).`
             : ` Check credentials (SkillRegistry.getSkillConfig/setSkillConfig) or the bridge's getStatus handler directly.`),
       };
@@ -1137,7 +1259,7 @@ whenever the skill set changes.
       version: entry.parsed.version,
       source: entry.parsed.source,
       enabled: entry.enabled,
-      error: entry.error ?? bridgeState?.error,
+      error: entry.error ?? (bridgeState?.status === 'error' ? bridgeState.error : undefined),
       allowedTools: entry.parsed.allowedTools,
       requiredBins: entry.parsed.requiredBins,
       requiredEnv: entry.parsed.requiredEnv,
@@ -1147,10 +1269,11 @@ whenever the skill set changes.
     if (entry.parsed.mcpServer) {
       info.isMcpServer = true;
       info.mcpCommand = entry.parsed.mcpServer.command;
+      info.mcpUrl = entry.parsed.mcpServer.url;
       if (!this.mcpBridges.has(entry.parsed.name)) {
         info.mcpStatus = 'idle';
-      } else if (bridgeState?.status === 'error') {
-        info.mcpStatus = 'error';
+      } else if (bridgeState?.status === 'error' || bridgeState?.status === 'signing_in') {
+        info.mcpStatus = bridgeState.status;
       } else {
         info.mcpStatus = 'running';
       }
@@ -1227,6 +1350,9 @@ whenever the skill set changes.
             serverName: name,
             command: entry.parsed.mcpServer.command,
             args: entry.parsed.mcpServer.args,
+            url: entry.parsed.mcpServer.url,
+            headers: entry.parsed.mcpServer.headers,
+            oauthClientId: entry.parsed.mcpServer.oauthClientId,
             env,
             configFile: entry.parsed.configFile,
           },
@@ -1234,6 +1360,10 @@ whenever the skill set changes.
       );
       this.mcpBridges.set(name, result.objectId);
       log.info(`Spawned MCPBridge for "${name}": ${result.objectId}`);
+      // Hear about status changes that come later (a sign-in finishing).
+      try {
+        await this.request(request(this.id, result.objectId, 'addDependent', {}), 5000);
+      } catch { /* status is still read on demand */ }
 
       // Factory.spawn awaits the bridge's onInit, which awaits the MCP
       // handshake, so the outcome is already decided. Read it now rather than
@@ -1287,6 +1417,7 @@ whenever the skill set changes.
 
     this.mcpBridges.delete(name);
     this.mcpBridgeStates.delete(name);
+    this.releaseBridgeWaiters(name);
 
     try {
       // Ask Factory to kill the bridge (Factory handles cleanup via Registry)
@@ -1321,12 +1452,14 @@ whenever the skill set changes.
     description: string;
     tools: Array<{ name: string; description: string; inputSchema?: Record<string, unknown> }>;
     bridgeId: string;
+    status?: string;
   }>> {
     const summaries: Array<{
       name: string;
       description: string;
       tools: Array<{ name: string; description: string; inputSchema?: Record<string, unknown> }>;
       bridgeId: string;
+      status?: string;
     }> = [];
 
     for (const [name, bridgeId] of this.mcpBridges) {
@@ -1346,6 +1479,7 @@ whenever the skill set changes.
             inputSchema: t.inputSchema,
           })),
           bridgeId,
+          status: this.mcpBridgeStates.get(name)?.status,
         });
       } catch (err) {
         log.error(`Failed to list tools from MCPBridge "${name}":`, err instanceof Error ? err.message : String(err));
@@ -1354,6 +1488,7 @@ whenever the skill set changes.
           description: entry.parsed.description,
           tools: [],
           bridgeId,
+          status: this.mcpBridgeStates.get(name)?.status,
         });
       }
     }

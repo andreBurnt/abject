@@ -79,11 +79,21 @@ export interface MCPToolCallParams {
 }
 
 export interface MCPContentItem {
-  type: 'text' | 'image' | 'resource';
+  type: 'text' | 'image' | 'audio' | 'resource' | 'resource_link';
   text?: string;
+  /** Base64 bytes of an image or audio item. */
   data?: string;
   mimeType?: string;
-  resource?: { uri: string; mimeType?: string; text?: string };
+  resource?: { uri: string; mimeType?: string; text?: string; blob?: string };
+  /** A resource_link item points at a resource instead of carrying it. */
+  uri?: string;
+  name?: string;
+}
+
+/** An image a tool returned, as base64 bytes. */
+export interface MCPImage {
+  mimeType: string;
+  data: string;
 }
 
 export interface MCPToolCallResult {

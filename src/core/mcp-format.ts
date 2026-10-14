@@ -7,6 +7,15 @@
  */
 
 /**
+ * The line that stands in a tool result's text for the nth image (counting
+ * from 1) the tool returned; the image itself is `images[n - 1]` of the
+ * result. MCPBridge writes it and SkillAgent replaces it with a picture.
+ */
+export function mcpImageMarker(n: number, mimeType: string): string {
+  return `[image ${n}: ${mimeType}, in images[${n - 1}]]`;
+}
+
+/**
  * Lax shape used by both the MCPBridge (fully-typed MCPToolDefinition) and
  * skill-registry summaries (where inputSchema can be unknown). Keeping the
  * formatter permissive means both callers use the same helper without a

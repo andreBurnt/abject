@@ -179,7 +179,8 @@ which lists it in `listLayoutIssues`.
 ### Display widgets
 
 - **`label-widget.ts`**: `LabelWidget`. Text with alignment, optional word
-  wrap, markdown, read-only selection and `href` links; `click`.
+  wrap, markdown, read-only selection (drag, double-click a word, triple-click
+  a line, Ctrl+A, Ctrl+C) and `href` links; `click`.
 - **`markdown-widget.ts`**: `MarkdownWidget`. A label preset for markdown with
   inline images (`data:`, `abject://`, http(s)).
 - **`content-block-widget.ts`**: `ContentBlockWidget`. Wrapped markdown that
@@ -295,7 +296,9 @@ presenter for `confirm` and `prompt` dialogs: the broker sends
 `presentDialog`, WidgetManager draws it with a ModalDialog
 (`src/objects/modal-dialog.ts`, which heartbeats while it is open) and reports
 the click back with `respond`; `dismissDialog` closes one a terminal answered
-first. `showConfirmDialog` and `showPromptDialog` on WidgetManager remain for
+first. The message is a selectable ContentBlock: the window fits its measured
+height (400x220 at least, wider for long messages) and the message scrolls
+only when it is taller than the display. `showConfirmDialog` and `showPromptDialog` on WidgetManager remain for
 callers and forward to the broker's `askPerson`. WidgetManager accepts
 `presentDialog` and `dismissDialog` only from DialogBroker.
 

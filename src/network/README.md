@@ -6,7 +6,8 @@ the binary wire codec used by the UI protocol and between peers, and the
 peer-to-peer stack
 (signaling client, encrypted WebRTC `PeerTransport`, and `PeerRouter`, which
 makes a remote object addressable by its AbjectId exactly like a local one).
-`MCPTransport`, the stdio link to MCP server processes, lives here too.
+The MCP transports live here too: `MCPTransport`, the stdio link to MCP server
+processes, and `MCPHttpTransport`, the HTTP link to remote MCP servers.
 
 Authentication is not done here. The sockets hand each connection to the
 server, where AuthGate (`server/auth-gate.ts`) and `server/auth.ts` decide
@@ -260,9 +261,33 @@ used by `src/objects/mcp-bridge.ts`. `start(command, args, env)` spawns
 through a shell in its own process group and registers it with
 `src/runtime/child-processes.ts`, so shutdown can signal the whole tree;
 `sendRequest` (30s default timeout), `sendNotification`, `stop()` (process
-group signal on POSIX, `taskkill /T` on Windows). `stderrTail` keeps roughly the
+group signal on POSIX, `taskkill /T` on Windows). `diagnosticTail` keeps roughly the
 last 8192 characters of stderr, minus npm noise, and is appended to errors
 when the server fails or exits.
+
+Node joins a shell command's arguments with bare spaces, so
+`shellCommandLine()` quotes each argument itself; `$NAME`, `${NAME}` and a
+leading `~` are expanded first from the server's environment, since quoting
+stops the shell from doing it. The file also declares `MCPClientTransport`,
+the surface MCPBridge drives, which both transports provide.
+
+### mcp-http-transport.ts
+
+`MCPHttpTransport`, JSON-RPC 2.0 with a remote MCP server. It speaks the
+spec's Streamable HTTP transport (each message a POST; a request answered by
+JSON or by an SSE stream; the `Mcp-Session-Id` the server issues on
+initialize sent back on every request, and the session restarted once when
+the server answers 404). A server that refuses the first POST with 400, 404
+or 405 gets the 2024-11-05 HTTP+SSE transport instead (a GET event stream
+whose `endpoint` event names the POST address). `start()` only arms it.
+
+Authorization is the caller's: `auth.token()` supplies the bearer token,
+`auth.refresh()` is asked once for a fresh one when the server answers 401 (or
+403 `insufficient_scope`), and a refusal that survives that is thrown as
+`MCPAuthRequiredError` with the server's `WWW-Authenticate` challenge.
+MCPBridge answers it by having OAuthHelper sign the person in. Server pings
+are answered; other server-to-client requests get "method not supported".
+There is no standing GET stream for unsolicited notifications.
 
 ### Tests
 

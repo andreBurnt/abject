@@ -172,11 +172,15 @@ waits as long as the person takes, and the first surface to answer decides:
 
 The bootstrap registers both (`registerPresenter`, `registerResponder`) and
 sends `seal` before WorkspaceManager spawns, so no user object can register
-itself and answer its own question. Only the asker can `cancel` its dialog. On
+itself and answer its own question. Only the asker can `cancel` its dialog, by
+dialog id or by the id of its `askPerson` request. On
 a headless instance there are no presenters, and a question waits for a
 terminal. Abjects ask through `this.confirm()` and `this.prompt()` on the
 Abject base class, which fail closed: no broker, a refusal or a withdrawn
-question returns `false` (confirm) or `null` (prompt).
+question returns `false` (confirm) or `null` (prompt). Both take an optional
+`signal`; aborting it withdraws the question, for when the answer arrived
+another way (OAuthHelper's paste-the-address dialog closes when the browser
+reports back on its own).
 
 ### How permissions are decided
 
@@ -290,7 +294,7 @@ The KnowledgeBase in `INFRA_OBJECTS` is the C++/WASM package in `native/knowledg
 | `object-creator.ts` | ObjectCreator | workspace, worker | Creates and modifies Abjects through one ReAct loop whose primitive is `call(target, method, payload)` |
 | `object-agent.ts` | ObjectAgent | workspace, worker | Does tasks by discovering objects (Registry `ask`) and sending them `ask`, `describe` and calls |
 | `web-agent.ts` | WebAgent | workspace, worker | Browser agent over the WebBrowser capability: page observation, screenshots, real input |
-| `skill-agent.ts` | SkillAgent | workspace, worker | Does tasks with the enabled skills, using ShellExecutor, HttpClient, HostFileSystem, WebSearch and WebFetch |
+| `skill-agent.ts` | SkillAgent | workspace, worker | Does tasks with the enabled skills, using ShellExecutor, HttpClient, HostFileSystem, WebSearch and WebFetch; keeps the images an MCP tool returns in the workspace FileSystem (`/mcp/<server>/`) and writes an `![…](abject://…)` line where each one appeared, which a reply copies to show it |
 | `external-creator.ts` | ExternalCreator | workspace, worker | On-disk authoring agent for registered external projects (read, write, edit, bash, grep, find, ls; the project's own checks) |
 | `external-project-registry.ts` | ExternalProjectRegistry | workspace, worker | Named host directories with their commands, trust and autonomy; adds roots to HostFileSystem's allowed paths |
 
@@ -298,7 +302,7 @@ The KnowledgeBase in `INFRA_OBJECTS` is the C++/WASM package in `native/knowledg
 
 | File | Object | Runs | Role |
 |------|--------|------|------|
-| `chat.ts` | Chat | on demand (ChatManager), worker | One conversation as data: routes requests into goals, keeps the transcript, emits `messageAdded`; draws nothing, and `show` returns false with no display |
+| `chat.ts` | Chat | on demand (ChatManager), worker | One conversation as data: routes requests into goals, keeps the transcript, emits `messageAdded`; draws nothing, and `show` returns false with no display. An `![…](abject://…)` image in a reply goes to listeners as the image itself (a view cannot reach the FileSystem); the transcript keeps the reference |
 | `chat-window.ts` | ChatWindow | on demand (Chat `show`), desktop, worker | The desktop view of one Chat: bubbles, activity, composer; sends what the person does back to Chat |
 | `chat-manager.ts` | ChatManager | workspace, worker | The conversation roster and Chat lifecycle: `newConversation({ show })`, `openConversation` (no window, as a terminal does), `showConversation` |
 
@@ -318,12 +322,12 @@ ChatBrowser, the roster window, is under Per-workspace UI.
 
 | File | Object | Runs | Role |
 |------|--------|------|------|
-| `skill-registry.ts` | SkillRegistry | global, worker | SKILL.md skills in the data directory's `skills/`: scan, install, enable, config; spawns an MCPBridge per enabled MCP server |
-| `mcp-bridge.ts` | MCPBridge | on demand (SkillRegistry), worker | Owns one MCP server's transport and exposes its tools as methods (`callTool`, `listTools`, `readResource`); a tool annotated `destructiveHint: true` asks PermissionBroker first and a refusal returns as an `isError` result |
+| `skill-registry.ts` | SkillRegistry | global, worker | SKILL.md skills in the data directory's `skills/`: scan, install, enable, config; spawns an MCPBridge per enabled MCP server. Enabling again replaces a failed bridge, and an enable waits while the person signs in to a remote server |
+| `mcp-bridge.ts` | MCPBridge | on demand (SkillRegistry), worker | Owns one MCP server's transport (stdio for `mcp-command`, HTTP for `mcp-url`) and exposes its tools as methods (`callTool`, `listTools`, `readResource`); `callTool` returns text plus any images as data (`images`, each marked in the text), and names content it cannot pass on; a tool annotated `destructiveHint: true` asks PermissionBroker first and a refusal returns as an `isError` result. A remote server's 401 puts it in `signing_in` while OAuthHelper signs the person in; status changes go to SkillRegistry as `bridgeStatus` |
 | `mcp-registry-client.ts` | MCPRegistryClient | global, worker | Read-only client for the official MCP registry, cached 24 hours |
 | `clawhub-client.ts` | ClawHubClient | global, worker | Client for clawhub.ai skills; downloads bundles for SkillRegistry |
 | `secrets-vault.ts` | SecretsVault | global, worker | Encrypted credentials for skills and MCP servers; values leave only through `bindEnv` and owner-gated `reveal` |
-| `oauth-helper.ts` | OAuthHelper | global, worker | OAuth 2.0 + PKCE flow with a localhost callback; tokens go to SecretsVault |
+| `oauth-helper.ts` | OAuthHelper | global, worker | OAuth 2.0 + PKCE sign-ins: asks the person through DialogBroker, opens the sign-in page, takes the approval on a localhost callback or a pasted address; tokens go to SecretsVault. For MCP bridges it discovers the server's authorization server (RFC 9728/8414), registers a client (RFC 7591), binds tokens to the server (RFC 8707), refreshes them, and gives them only to that skill's built-in bridge for that address |
 | `skill-browser.ts` | SkillBrowser | global, desktop, worker | Window for installed skills |
 | `catalog-browser.ts` | CatalogBrowser | global, desktop, worker | Window to browse and install MCP servers and ClawHub skills through SkillRegistry |
 

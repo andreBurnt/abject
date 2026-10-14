@@ -1,9 +1,13 @@
 /**
  * MCP STDIO Transport -- spawns an MCP server as a child process and
  * communicates via newline-delimited JSON-RPC 2.0 over stdin/stdout.
+ *
+ * Also declares MCPClientTransport, the surface MCPBridge drives, which this
+ * class and the remote MCPHttpTransport both provide.
  */
 
 import { spawn, spawnSync, ChildProcess } from 'child_process';
+import { homedir } from 'os';
 import { createInterface, Interface as ReadlineInterface } from 'readline';
 import type {
   JsonRpcRequest,
@@ -35,16 +39,79 @@ export interface MCPTransportEvents {
   onError?: (error: Error) => void;
 }
 
+/**
+ * A live link to one MCP server, local or remote. `start` differs per kind
+ * (a process to launch, an address to reach), so it is not part of this.
+ */
+export interface MCPClientTransport {
+  readonly currentState: MCPTransportState;
+  readonly isConnected: boolean;
+  /**
+   * What the server last said about a failure: a local server's stderr, a
+   * remote server's error responses. Empty when there is nothing to show.
+   */
+  readonly diagnosticTail: string;
+  on(events: MCPTransportEvents): void;
+  sendRequest(method: string, params?: unknown): Promise<unknown>;
+  sendNotification(method: string, params?: unknown): void;
+  stop(): Promise<void>;
+}
+
 interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
 }
 
+/** `$NAME` or `${NAME}`, the environment references SKILL.md arguments use. */
+const ENV_REFERENCE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g;
+
+/** Arguments a shell passes through unchanged, which need no quotes. */
+const SHELL_SAFE_POSIX = /^[A-Za-z0-9_@%+=:,./-]+$/;
+const SHELL_SAFE_WINDOWS = /^[A-Za-z0-9_@%+=:,./\\-]+$/;
+
+/**
+ * The shell line that starts a server.
+ *
+ * The server starts through a shell (see MCPTransport.start), and Node joins a
+ * shell command's arguments with spaces and nothing else, so an argument
+ * holding a space arrived as several: `--header "Authorization: Bearer x"`
+ * reached the server as `--header Authorization:` and two strays. Each
+ * argument is quoted here instead. Quoting also stops the shell from expanding
+ * `$NAME` and a leading `~`, which SKILL.md arguments use to reach their
+ * credentials and files, so those are expanded here first, from the same
+ * environment the server gets. The command stays as written: some skills put
+ * a whole command line in `mcp-command`.
+ */
+export function shellCommandLine(
+  command: string,
+  args: readonly string[],
+  env: Record<string, string | undefined>,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const windows = platform === 'win32';
+  const quote = (arg: string): string => {
+    if (windows) {
+      if (SHELL_SAFE_WINDOWS.test(arg)) return arg;
+      // Backslashes before a quote, and at the end, are doubled so the quote
+      // they precede still ends the argument.
+      return `"${arg.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')}"`;
+    }
+    if (SHELL_SAFE_POSIX.test(arg)) return arg;
+    return `'${arg.replace(/'/g, `'\\''`)}'`;
+  };
+  const expand = (arg: string): string => {
+    const home = arg === '~' || arg.startsWith('~/') ? (env.HOME || homedir()) + arg.slice(1) : arg;
+    return home.replace(ENV_REFERENCE, (_m, braced: string | undefined, bare: string | undefined) =>
+      env[(braced ?? bare)!] ?? '');
+  };
+  return [command, ...args.map(arg => quote(expand(arg)))].join(' ');
+}
+
 /**
  * Spawns an MCP server process and manages bidirectional JSON-RPC 2.0 over stdio.
  */
-export class MCPTransport {
+export class MCPTransport implements MCPClientTransport {
   private child: ChildProcess | null = null;
   /**
    * The spawned process group's id, kept after `child` is gone.
@@ -85,7 +152,7 @@ export class MCPTransport {
    * stripped when there is anything more informative to show. Empty string
    * when the child never wrote to stderr.
    */
-  get stderrTail(): string {
+  get diagnosticTail(): string {
     const raw = this.stderrChunks.join('');
     if (!raw.trim()) return '';
     const lines = raw.split('\n');
@@ -103,7 +170,7 @@ export class MCPTransport {
 
   /** Append the stderr tail to an error message when there is one. */
   private withStderr(message: string): string {
-    const tail = this.stderrTail;
+    const tail = this.diagnosticTail;
     return tail ? `${message}\nServer stderr:\n${tail}` : message;
   }
 
@@ -127,7 +194,7 @@ export class MCPTransport {
 
     return new Promise<void>((resolve, reject) => {
       try {
-        this.child = spawn(command, args, {
+        this.child = spawn(shellCommandLine(command, args, mergedEnv), [], {
           stdio: ['pipe', 'pipe', 'pipe'],
           env: mergedEnv,
           shell: true,

@@ -227,6 +227,9 @@ pane shows details, configuration, and actions for the selected skill.
               // Enabled, but its MCP server did not start: that is a failure to see.
               this.windowEffect('shake');
               await this.notify(`${skill.name} is enabled but its server failed: ${(result.error ?? 'unknown error').slice(0, 80)}`, 'error');
+            } else if (result?.mcpStatus === 'signing_in') {
+              // Enabled; the server waits for the person to approve access in their browser.
+              await this.notify(`${skill.name} is waiting for you to sign in to its server.`, 'warning');
             } else {
               // The skill is live now: flash in the living light.
               this.windowEffect('flash');
@@ -369,19 +372,24 @@ pane shows details, configuration, and actions for the selected skill.
     if (!this.listWidgetId) return;
 
     const items = this.allSkills.map(s => {
-      const state = !s.enabled ? 'off' : (s.mcpStatus === 'error' ? 'err' : 'on');
+      const state = !s.enabled ? 'off'
+        : s.mcpStatus === 'error' ? 'err'
+        : s.mcpStatus === 'signing_in' ? 'signin'
+        : 'on';
       // Narrow master-detail list: a status badge reads at a glance, while
       // Enable/Disable/Uninstall stay in the detail pane where there is room.
       return {
         label: s.name,
         value: s.name,
         badge: {
-          text: state === 'off' ? 'Off' : state === 'err' ? 'Error' : 'On',
+          text: state === 'off' ? 'Off' : state === 'err' ? 'Error' : state === 'signin' ? 'Sign in' : 'On',
           color: state === 'off'
             ? this.theme.textMeta
             : state === 'err'
               ? this.theme.statusError
-              : this.theme.statusSuccess,
+              : state === 'signin'
+                ? this.theme.statusWarning
+                : this.theme.statusSuccess,
         },
       };
     });
@@ -567,8 +575,12 @@ pane shows details, configuration, and actions for the selected skill.
     await this.addDetailLabel(skill.description || '(no description)', true, undefined, about);
     if (skill.allowedTools?.length) await this.addDetailLabel(`Tools: ${skill.allowedTools.join(', ')}`, true, undefined, about);
     if (skill.requiredBins?.length) await this.addDetailLabel(`Requires: ${skill.requiredBins.join(', ')}`, true, undefined, about);
+    if (skill.mcpUrl) await this.addDetailLabel(`Server: ${skill.mcpUrl}`, true, undefined, about);
     if (skill.mcpStatus === 'error') {
       await this.addDetailLabel(`Status: Error`, true, { color: this.theme.statusErrorBright }, about);
+    } else if (skill.mcpStatus === 'signing_in') {
+      await this.addDetailLabel('Status: Waiting for you to sign in. Approve access in the sign-in page; it connects once you do.', true,
+        { color: this.theme.statusWarning }, about);
     } else {
       await this.addDetailLabel(`Status: ${skill.enabled ? 'Enabled' : 'Disabled'}`, true,
         { color: skill.enabled ? this.theme.statusSuccess : this.theme.textMeta }, about);

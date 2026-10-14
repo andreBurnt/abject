@@ -15,7 +15,7 @@ import { Abject } from '../core/abject.js';
 import { request } from '../core/message.js';
 import type { MCPServerSummary } from './mcp-registry-client.js';
 import type { ClawHubSkillSummary, SkillBundle } from './clawhub-client.js';
-import { buildMcpSkillMd, packageToMcpCommand, sanitiseSkillName } from '../core/skill-synth.js';
+import { buildMcpSkillMd, packageToMcpCommand, remoteMcpUrl, sanitiseSkillName } from '../core/skill-synth.js';
 import { Log } from '../core/timed-log.js';
 import { emptyStateMarkdown, emptyStateStyle } from './ui-kit.js';
 
@@ -580,11 +580,20 @@ Browse and install skills and MCP servers from public registries.
             }
           }
         } else {
-          installable = false;
           const remoteCount = server.remotes?.length ?? 0;
-          if (remoteCount > 0) {
+          const endpoint = remoteMcpUrl(server.remotes);
+          if (endpoint) {
             await this.addDetailLabel(
-              `This is a remote-only MCP server (${remoteCount} endpoint${remoteCount > 1 ? 's' : ''}). Local subprocess install is not possible; remote MCP transport is not yet supported.`,
+              `A hosted MCP server: installing connects to it, and asks you to sign in there if it requires it.`,
+              false,
+              { color: this.theme.textSecondary, wordWrap: true },
+              details,
+            );
+            await this.addDetailLabel(`Endpoint: ${endpoint}`, false, { color: this.theme.textSecondary, wordWrap: true }, details);
+          } else if (remoteCount > 0) {
+            installable = false;
+            await this.addDetailLabel(
+              `This is a remote-only MCP server whose endpoint${remoteCount > 1 ? 's need' : ' needs'} details filled in for your account, so it cannot be installed from here.`,
               false,
               { color: this.theme.textSecondary, wordWrap: true },
               details,
@@ -594,6 +603,7 @@ Browse and install skills and MCP servers from public registries.
               await this.addDetailLabel(`Endpoint: ${firstRemote.url}`, false, { color: this.theme.textSecondary, wordWrap: true }, details);
             }
           } else {
+            installable = false;
             await this.addDetailLabel(
               'This entry has no installable package and no remote endpoints. Nothing to install.',
               false,
@@ -744,12 +754,12 @@ Browse and install skills and MCP servers from public registries.
   private async installMcpServer(server: MCPServerSummary): Promise<void> {
     if (!this.skillRegistryId) return;
     const pkg = server.packages?.find(p => !!p && !!(p.identifier ?? p.name));
-    if (!pkg) return;
-
     const { command, args } = packageToMcpCommand(pkg);
-    if (!command) {
+    // No installable package: a hosted server is reached at its endpoint instead.
+    const url = pkg ? undefined : remoteMcpUrl(server.remotes);
+    if (!command && !url) {
       this.windowEffect('shake');
-      await this.flashInstallStatus('Unsupported package registry');
+      await this.flashInstallStatus(pkg ? 'Unsupported package registry' : 'Nothing to install');
       return;
     }
 
@@ -757,8 +767,7 @@ Browse and install skills and MCP servers from public registries.
     const content = buildMcpSkillMd({
       name: skillName,
       description: server.description ?? `MCP server: ${server.name}`,
-      mcpCommand: command,
-      mcpArgs: args,
+      ...(command ? { mcpCommand: command, mcpArgs: args } : { mcpUrl: url! }),
     });
 
     try {
@@ -769,7 +778,10 @@ Browse and install skills and MCP servers from public registries.
       const enabled = await this.request<{ mcpStatus?: string; error?: string } | undefined>(
         request(this.id, this.skillRegistryId, 'enableSkill', { name: skillName }),
       );
-      if (enabled?.mcpStatus === 'error') {
+      if (enabled?.mcpStatus === 'signing_in') {
+        // Installed; the person still has to approve access in their browser.
+        await this.flashInstallStatus('Sign in to finish');
+      } else if (enabled?.mcpStatus === 'error') {
         // Installed, but the server did not start: ask for attention.
         this.windowEffect('pulse', '$statusWarning');
         await this.flashInstallStatus('Server failed');

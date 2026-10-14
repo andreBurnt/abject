@@ -1,9 +1,15 @@
 /**
- * MCPBridge -- per-server Abject that owns an MCPTransport and exposes
- * the MCP server's tools as Abject method handlers.
+ * MCPBridge -- per-server Abject that owns the link to one MCP server and
+ * exposes the server's tools as Abject method handlers.
  *
  * One MCPBridge instance exists per enabled MCP server. SkillRegistry
  * spawns bridges on enable and stops them on disable.
+ *
+ * A local server (`command`) is a child process spoken to over stdio; a
+ * remote one (`url`) is reached over HTTP. When a remote server answers 401,
+ * the bridge has OAuthHelper sign the person in (status `signing_in` while
+ * it waits for them), then connects with the token it gets, which only this
+ * bridge can read. Status changes go to dependents as `bridgeStatus`.
  *
  * A tool its server annotates `destructiveHint: true` runs only after
  * PermissionBroker approves it (type `mcp_tool`), asked on behalf of the
@@ -13,9 +19,10 @@
 import { AbjectId, AbjectMessage, InterfaceId } from '../core/types.js';
 import { Abject, DEFERRED_REPLY } from '../core/abject.js';
 import { request, error } from '../core/message.js';
-import { require as contractRequire } from '../core/contracts.js';
+import { require as contractRequire, invariant } from '../core/contracts.js';
 import { refusalMessage, type PermissionReceipt } from '../core/permission-outcome.js';
-import { MCPTransport } from '../network/mcp-transport.js';
+import { MCPTransport, type MCPClientTransport } from '../network/mcp-transport.js';
+import { MCPHttpTransport, MCPAuthRequiredError, type MCPHttpAuth } from '../network/mcp-http-transport.js';
 import type {
   MCPToolDefinition,
   MCPResourceDefinition,
@@ -25,19 +32,31 @@ import type {
   MCPToolCallResult,
   MCPReadResourceResult,
   MCPContentItem,
+  MCPImage,
 } from '../core/mcp-types.js';
 import { Log } from '../core/timed-log.js';
 import { validateMCPToolInput, MCPInputValidationError } from './mcp-input-validation.js';
-import { formatMCPToolList } from '../core/mcp-format.js';
+import { formatMCPToolList, mcpImageMarker } from '../core/mcp-format.js';
 
 const log = new Log('MCPBridge');
 
 const MCP_BRIDGE_INTERFACE: InterfaceId = 'abjects:mcp-bridge';
 const MCP_PROTOCOL_VERSION = '2024-11-05';
+/** Remote servers are newer than the stdio ecosystem; HTTP sessions start at this version. */
+const MCP_HTTP_PROTOCOL_VERSION = '2025-06-18';
+/**
+ * How long a sign-in may take: the person has to see the question, agree, and
+ * approve in a browser. OAuthHelper's dialogs heartbeat meanwhile; this only
+ * bounds a sign-in whose helper has gone.
+ */
+const SIGN_IN_WAIT_MS = 20 * 60 * 1000;
+/** A cached access token this close to expiry is fetched again. */
+const TOKEN_SKEW_MS = 60 * 1000;
 
 export const MCP_BRIDGE_ID = 'abjects:mcp-bridge' as AbjectId;
 
-export type MCPBridgeStatus = 'idle' | 'connecting' | 'connected' | 'error';
+/** `signing_in`: a remote server asked for a sign-in and the person has been asked to approve it. */
+export type MCPBridgeStatus = 'idle' | 'connecting' | 'signing_in' | 'connected' | 'error';
 
 /**
  * What a server says about its own tool (MCP tool annotations). They are the
@@ -79,25 +98,40 @@ function summarizeArguments(input: Record<string, unknown>): string {
   return parts.length > 0 ? `(${clip(parts.join(', '), 160)})` : '';
 }
 
+/** Exactly one of `command` (a local server) and `url` (a remote one). */
 export interface MCPBridgeConfig {
   serverName: string;
-  command: string;
+  command?: string;
   args?: string[];
   env?: Record<string, string>;
   configFile?: string;
+  /** Remote server: its MCP endpoint. */
+  url?: string;
+  /** Remote server: headers for every request; `${VAR}` is filled from `env`. */
+  headers?: Record<string, string>;
+  /** Remote server: a pre-registered OAuth client id. */
+  oauthClientId?: string;
 }
 
 export class MCPBridge extends Abject {
   private serverName: string;
-  private command: string;
+  private command?: string;
   private commandArgs: string[];
   private env: Record<string, string>;
   private configFile?: string;
-  private transport: MCPTransport | null = null;
+  private url?: string;
+  private headers: Record<string, string>;
+  private oauthClientId?: string;
+  private transport: MCPClientTransport | null = null;
   private bridgeStatus: MCPBridgeStatus = 'idle';
   private bridgeStatusError?: string;
   /** PermissionBroker, verified built-in; asked before a destructive tool runs. */
   private permissionBrokerId?: AbjectId;
+  /** OAuthHelper, verified built-in; signs the person in and hands out this bridge's tokens. */
+  private oauthHelperId?: AbjectId;
+  /** The last token OAuthHelper gave (or that it had none), so each request does not ask again. */
+  private cachedToken?: { token?: string; expiresAt?: number; fetchedAt: number };
+  private signingIn = false;
 
   private cachedTools: MCPToolDefinition[] = [];
   private cachedResources: MCPResourceDefinition[] = [];
@@ -115,9 +149,11 @@ export class MCPBridge extends Abject {
     super({
       manifest: {
         name,
-        description:
-          `MCP bridge for "${config.serverName}". Spawns the MCP server as a child process ` +
-          'and exposes its tools via message passing.',
+        description: config.url
+          ? `MCP bridge for "${config.serverName}". Connects to the remote MCP server at ${config.url} ` +
+            'and exposes its tools via message passing.'
+          : `MCP bridge for "${config.serverName}". Spawns the MCP server as a child process ` +
+            'and exposes its tools via message passing.',
         version: '1.0.0',
         interface: {
           id: MCP_BRIDGE_INTERFACE,
@@ -126,7 +162,7 @@ export class MCPBridge extends Abject {
           methods: [
             {
               name: 'callTool',
-              description: 'Invoke an MCP tool on the connected server. A tool its server marks destructive waits for the person\'s approval first and may come back declined, as an isError result that says so.',
+              description: 'Invoke an MCP tool on the connected server. Returns { content, isError, images? }: images the tool returns come back in images (base64), each marked in content where it appeared. A tool its server marks destructive waits for the person\'s approval first and may come back declined, as an isError result that says so.',
               parameters: [
                 { name: 'toolName', type: { kind: 'primitive', primitive: 'string' }, description: 'Tool name' },
                 { name: 'input', type: { kind: 'object', properties: {} }, description: 'Tool input arguments' },
@@ -165,13 +201,23 @@ export class MCPBridge extends Abject {
       },
     });
 
+    contractRequire(!!config.command !== !!config.url, 'an MCP bridge needs exactly one of command and url');
     this.serverName = config.serverName;
     this.command = config.command;
     this.commandArgs = config.args ?? [];
     this.env = config.env ?? {};
     this.configFile = config.configFile;
+    this.url = config.url;
+    this.headers = config.headers ?? {};
+    this.oauthClientId = config.oauthClientId;
 
     this.setupHandlers();
+  }
+
+  protected override checkInvariants(): void {
+    super.checkInvariants();
+    invariant(!!this.command !== !!this.url, 'an MCP bridge has exactly one of command and url');
+    invariant(this.bridgeStatus !== 'signing_in' || !!this.url, 'only a remote server signs in');
   }
 
   protected override askPrompt(_question: string): string {
@@ -180,14 +226,23 @@ export class MCPBridge extends Abject {
     prompt += `Owns a single running MCP server subprocess and exposes its tools and resources via message passing. Use this bridge for deterministic, LLM-free tool calls — it is the canonical low-level interface to the server.\n\n`;
 
     prompt += `### Status\n`;
-    prompt += `- Subprocess: \`${this.command} ${this.commandArgs.join(' ')}\`\n`;
+    if (this.url) {
+      prompt += `- Remote server: ${this.url}\n`;
+      const headerNames = Object.keys(this.headers);
+      if (headerNames.length > 0) prompt += `- Request headers: ${headerNames.join(', ')}\n`;
+    } else {
+      prompt += `- Subprocess: \`${this.command} ${this.commandArgs.join(' ')}\`\n`;
+    }
     prompt += `- Bridge state: ${this.bridgeStatus}\n`;
+    if (this.bridgeStatus === 'signing_in') {
+      prompt += `- The server asked for a sign-in; the person has been asked to approve access in their browser, and the bridge connects by itself once they do.\n`;
+    }
     if (this.bridgeStatusError) {
       prompt += `- Last error: ${this.bridgeStatusError}\n`;
     }
-    const stderrTail = this.transport?.stderrTail;
-    if (stderrTail && !this.bridgeStatusError?.includes(stderrTail)) {
-      prompt += `- Subprocess stderr: ${stderrTail}\n`;
+    const diagnostics = this.transport?.diagnosticTail;
+    if (diagnostics && !this.bridgeStatusError?.includes(diagnostics)) {
+      prompt += `- ${this.url ? 'Server responses' : 'Subprocess stderr'}: ${diagnostics}\n`;
     }
     const envKeys = Object.keys(this.env).filter(k => this.env[k]);
     if (envKeys.length > 0) {
@@ -205,8 +260,9 @@ export class MCPBridge extends Abject {
       prompt += 'From inside job code (recommended for scheduled/deterministic flows):\n';
       prompt += '```js\n';
       prompt += `const result = await call(bridgeId, 'callTool', { toolName: '<tool>', input: { /* params */ } });\n`;
-      prompt += `// result: { content: string, isError: boolean }\n`;
+      prompt += `// result: { content: string, isError: boolean, images?: { mimeType: string, data: string }[] }\n`;
       prompt += '```\n\n';
+      prompt += 'An image the tool returns arrives in `images` as base64 bytes, and `content` carries a line such as `[image 1: image/png, in images[0]]` where it appeared.\n\n';
       prompt += 'A tool the server marks destructive waits for the person to approve it, and a declined call returns `isError: true` with content saying who declined; report that and choose another way forward.\n\n';
       prompt += 'Parameter-name aliases are accepted for MCP-standard compatibility: `tool` or `name` for the tool, `arguments` or `args` for the input. Tool names and parameter keys are case-sensitive.\n\n';
       prompt += `### Other methods\n\n`;
@@ -214,7 +270,7 @@ export class MCPBridge extends Abject {
       prompt += `- \`readResource({ uri })\`: returns \`{ content, mimeType? }\`.\n`;
       prompt += `- \`getStatus\`: returns \`{ status, serverName, toolCount, error? }\`.\n\n`;
     } else {
-      prompt += `### Tools\n\nNone yet (subprocess may still be starting or in an error state). Call \`getStatus\` to check, or \`listTools\` once the bridge reaches 'connected'.\n\n`;
+      prompt += `### Tools\n\nNone yet (the server may still be starting, waiting for a sign-in, or in an error state). Call \`getStatus\` to check, or \`listTools\` once the bridge reaches 'connected'.\n\n`;
     }
 
     prompt += `### Choosing between this bridge and SkillAgent\n\n`;
@@ -230,7 +286,32 @@ export class MCPBridge extends Abject {
   // ═══════════════════════════════════════════════════════════════════
 
   protected override async onInit(): Promise<void> {
+    if (this.url) {
+      // A remote server's sign-in and tokens come from OAuthHelper, which
+      // serves only a registered bridge, and the Factory registers this one
+      // only after onInit returns. So the connection starts once registered,
+      // in the background; SkillRegistry follows it through bridgeStatus.
+      this.setStatus('connecting');
+      void this.whenRegistered()
+        .then(() => this.connectToServer())
+        .catch((err) => this.setStatus('error', err instanceof Error ? err.message : String(err)));
+      return;
+    }
     await this.connectToServer();
+  }
+
+  /** Resolves once the Registry knows this bridge (or after a bounded wait). */
+  private async whenRegistered(): Promise<void> {
+    const registryId = this.getRegistryId();
+    if (!registryId) return;
+    for (let delay = 25; delay <= 2000; delay *= 2) {
+      try {
+        const found = await this.request<unknown>(request(this.id, registryId, 'lookup', { objectId: this.id }), 5000);
+        if (found) return;
+      } catch { /* registry busy; try again */ }
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+    log.warn(`[${this.serverName}] not registered after waiting; connecting anyway`);
   }
 
   protected override async onStop(): Promise<void> {
@@ -280,8 +361,9 @@ export class MCPBridge extends Abject {
         serverName: this.serverName,
         toolCount: this.cachedTools.length,
         error: this.bridgeStatusError,
-        stderrTail: this.transport?.stderrTail || undefined,
+        stderrTail: this.transport?.diagnosticTail || undefined,
         configFile: this.configFile,
+        url: this.url,
       };
     });
   }
@@ -291,15 +373,17 @@ export class MCPBridge extends Abject {
   // ═══════════════════════════════════════════════════════════════════
 
   private async connectToServer(): Promise<void> {
-    this.bridgeStatus = 'connecting';
+    this.setStatus('connecting');
 
-    this.transport = new MCPTransport();
-    this.transport.on({
+    const transport: MCPClientTransport = this.url
+      ? new MCPHttpTransport({ url: this.url, headers: this.requestHeaders(), auth: this.oauthAuth() })
+      : new MCPTransport();
+    this.transport = transport;
+    transport.on({
       onStateChange: (state) => {
         if (state === 'error' || state === 'closed') {
-          this.bridgeStatus = 'error';
-          this.bridgeStatusError = this.describeFailure(`Transport ${state}`);
           log.error(`[${this.serverName}] transport ${state}`);
+          this.setStatus('error', this.describeFailure(`Transport ${state}`));
         }
       },
       onNotification: (method, params) => {
@@ -312,61 +396,214 @@ export class MCPBridge extends Abject {
         }
       },
       onError: (err) => {
-        this.bridgeStatus = 'error';
-        this.bridgeStatusError = err.message;
         log.error(`[${this.serverName}] error:`, err.message);
+        this.setStatus('error', err.message);
       },
     });
 
     try {
-      await this.transport.start(this.command, this.commandArgs, this.env);
-
-      // MCP initialization handshake
-      const initResult = await this.transport.sendRequest('initialize', {
-        protocolVersion: MCP_PROTOCOL_VERSION,
-        capabilities: {},
-        clientInfo: { name: 'abjects', version: '1.0.0' },
-      }) as MCPInitResult;
-
-      log.info(`[${this.serverName}] initialized: ${initResult.serverInfo?.name ?? 'unknown'} v${initResult.serverInfo?.version ?? '?'}`);
-      this.serverInfo = {
-        name: initResult.serverInfo?.name,
-        version: initResult.serverInfo?.version,
-      };
-
-      // Send initialized notification (required by MCP spec)
-      this.transport.sendNotification('notifications/initialized');
-
-      // Discover tools and resources
-      await this.refreshTools();
-      await this.refreshResources();
-
-      this.bridgeStatus = 'connected';
-      log.info(`[${this.serverName}] connected with ${this.cachedTools.length} tools, ${this.cachedResources.length} resources`);
-
-      // Publish a manifest that reflects what the server actually exposes.
-      // Registry's catalog reads `manifest.description` — without this
-      // update, it sees only the generic "MCP bridge for foo" line and
-      // never knows the bridge can do email/calendar/etc.
-      //
-      // FIRE-AND-FORGET. We must not block here: `connectToServer` runs
-      // inside onInit, and Factory.spawn registers us in Registry AFTER
-      // onInit returns. If we awaited the publish synchronously, the
-      // updateManifest call would race against a registration that's
-      // waiting for us to finish — a deadlock that exhausted the retry
-      // budget on every spawn. By detaching, onInit returns quickly,
-      // Factory registers us, and the deferred publish (still retrying
-      // in the background) finds Registry knows about us within the
-      // first one or two attempts.
-      this.publishEnrichedManifest().catch((err) => {
-        log.warn(`[${this.serverName}] manifest enrichment failed: ${err instanceof Error ? err.message : String(err)}`);
-      });
+      if (transport instanceof MCPHttpTransport) await transport.start();
+      else await (transport as MCPTransport).start(this.command!, this.commandArgs, this.env);
+      await this.handshake();
     } catch (err) {
-      this.bridgeStatus = 'error';
-      this.bridgeStatusError = this.describeFailure(err instanceof Error ? err.message : String(err));
-      log.error(`[${this.serverName}] initialization failed:`, this.bridgeStatusError);
+      if (err instanceof MCPAuthRequiredError && this.signsInWithOAuth()) {
+        // Don't wait for the person here: onInit must return so the Factory
+        // can register this bridge. The sign-in runs on its own and connects
+        // when it is done.
+        this.beginSignIn(err.challenge);
+        return;
+      }
+      const failure = this.describeFailure(err instanceof Error ? err.message : String(err));
+      log.error(`[${this.serverName}] initialization failed:`, failure);
       // Don't rethrow -- let the bridge exist in error state so it can be inspected
+      this.setStatus('error', failure);
     }
+  }
+
+  /** The MCP handshake, then tool and resource discovery. Leaves the bridge connected. */
+  private async handshake(): Promise<void> {
+    const transport = this.transport;
+    contractRequire(transport !== null, 'handshake needs a transport');
+
+    // MCP initialization handshake
+    const initResult = await transport!.sendRequest('initialize', {
+      protocolVersion: this.url ? MCP_HTTP_PROTOCOL_VERSION : MCP_PROTOCOL_VERSION,
+      capabilities: {},
+      clientInfo: { name: 'abjects', version: '1.0.0' },
+    }) as MCPInitResult;
+
+    log.info(`[${this.serverName}] initialized: ${initResult.serverInfo?.name ?? 'unknown'} v${initResult.serverInfo?.version ?? '?'}`);
+    this.serverInfo = {
+      name: initResult.serverInfo?.name,
+      version: initResult.serverInfo?.version,
+    };
+
+    // Send initialized notification (required by MCP spec)
+    transport!.sendNotification('notifications/initialized');
+
+    // Discover tools and resources
+    await this.refreshTools();
+    await this.refreshResources();
+
+    this.setStatus('connected');
+    log.info(`[${this.serverName}] connected with ${this.cachedTools.length} tools, ${this.cachedResources.length} resources`);
+
+    // Publish a manifest that reflects what the server actually exposes.
+    // Registry's catalog reads `manifest.description` — without this
+    // update, it sees only the generic "MCP bridge for foo" line and
+    // never knows the bridge can do email/calendar/etc.
+    //
+    // FIRE-AND-FORGET. We must not block here: `connectToServer` runs
+    // inside onInit, and Factory.spawn registers us in Registry AFTER
+    // onInit returns. If we awaited the publish synchronously, the
+    // updateManifest call would race against a registration that's
+    // waiting for us to finish — a deadlock that exhausted the retry
+    // budget on every spawn. By detaching, onInit returns quickly,
+    // Factory registers us, and the deferred publish (still retrying
+    // in the background) finds Registry knows about us within the
+    // first one or two attempts.
+    this.publishEnrichedManifest().catch((err) => {
+      log.warn(`[${this.serverName}] manifest enrichment failed: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  }
+
+  /** Record a status change and tell dependents (SkillRegistry) about it. */
+  private setStatus(status: MCPBridgeStatus, error?: string): void {
+    const changed = status !== this.bridgeStatus || error !== this.bridgeStatusError;
+    this.bridgeStatus = status;
+    this.bridgeStatusError = error;
+    if (changed) {
+      // A sign-in can settle after this bridge has been stopped; there is
+      // nobody left to tell then.
+      try {
+        this.changed('bridgeStatus', { status, error, toolCount: this.cachedTools.length });
+      } catch { /* stopped */ }
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // Remote servers: headers and sign-in
+  // ═══════════════════════════════════════════════════════════════════
+
+  /** The configured headers, with `${VAR}` filled from the skill's env. */
+  private requestHeaders(): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const [name, value] of Object.entries(this.headers)) {
+      out[name] = value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_m, key: string) => this.env[key] ?? '');
+    }
+    return out;
+  }
+
+  /**
+   * A remote server signs in with OAuth unless the skill already sends its
+   * own Authorization header (an API key); a refusal of that is a credential
+   * problem for the skill's config, not a sign-in.
+   */
+  private signsInWithOAuth(): boolean {
+    return !!this.url && !Object.keys(this.headers).some(h => h.toLowerCase() === 'authorization');
+  }
+
+  /** The bearer token source handed to the HTTP transport. */
+  private oauthAuth(): MCPHttpAuth | undefined {
+    if (!this.signsInWithOAuth()) return undefined;
+    return {
+      token: async () => {
+        const cached = this.cachedToken;
+        // Fetched again a little before it expires: a minute early, or a
+        // quarter of its life early for a token that lives only minutes.
+        const margin = cached?.expiresAt ? Math.min(TOKEN_SKEW_MS, (cached.expiresAt - cached.fetchedAt) / 4) : 0;
+        const fresh = cached && (!cached.token || !cached.expiresAt || cached.expiresAt - Date.now() > margin);
+        if (fresh) return cached.token;
+        return this.fetchToken(false);
+      },
+      refresh: async () => !!(await this.fetchToken(true)),
+    };
+  }
+
+  /** Ask OAuthHelper for this bridge's token; undefined when there is no usable grant. */
+  private async fetchToken(forceRefresh: boolean): Promise<string | undefined> {
+    const helperId = await this.oauthHelper();
+    if (!helperId) return undefined;
+    try {
+      const got = await this.request<{ token?: string; expiresAt?: number }>(
+        request(this.id, helperId, 'mcpAccessToken', {
+          provider: this.oauthProvider(), serverUrl: this.url, forceRefresh,
+        }),
+        30000,
+      );
+      this.cachedToken = { token: got?.token, expiresAt: got?.expiresAt, fetchedAt: Date.now() };
+      return got?.token;
+    } catch (err) {
+      log.warn(`[${this.serverName}] could not get a token: ${err instanceof Error ? err.message : String(err)}`);
+      this.cachedToken = undefined;
+      return undefined;
+    }
+  }
+
+  private oauthProvider(): string {
+    return `mcp:${this.serverName}`;
+  }
+
+  /**
+   * Have the person sign in, then connect. Runs in the background; the
+   * status says `signing_in` until it settles either way.
+   */
+  private beginSignIn(challenge: string | undefined): void {
+    if (this.signingIn) return;
+    this.signingIn = true;
+    const host = new URL(this.url!).host;
+    this.cachedTools = [];
+    this.setStatus('signing_in', `${host} asks for a sign-in. The person has been asked to approve access in their browser; this bridge connects once they do.`);
+    void this.signIn(challenge, host)
+      .catch((err) => log.warn(`[${this.serverName}] sign-in ended abnormally: ${err instanceof Error ? err.message : String(err)}`))
+      .finally(() => { this.signingIn = false; });
+  }
+
+  private async signIn(challenge: string | undefined, host: string): Promise<void> {
+    const helperId = await this.oauthHelper();
+    if (!helperId) {
+      this.setStatus('error', `${host} asks for a sign-in, but OAuthHelper is not running to do it.`);
+      return;
+    }
+    try {
+      await this.request(
+        request(this.id, helperId, 'authorizeMcp', {
+          provider: this.oauthProvider(),
+          serverUrl: this.url,
+          challenge,
+          clientId: this.oauthClientId,
+        }),
+        SIGN_IN_WAIT_MS,
+      );
+    } catch (err) {
+      const reason = (err instanceof Error ? err.message : String(err)).replace(/^[A-Z_]+: /, '');
+      log.warn(`[${this.serverName}] sign-in did not complete: ${reason}`);
+      this.setStatus('error', `Sign-in to ${host} did not complete: ${reason}. Enabling the skill again asks again.`);
+      return;
+    }
+    if ((this.bridgeStatus as MCPBridgeStatus) !== 'signing_in') return; // stopped meanwhile
+    this.cachedToken = undefined;
+    try {
+      await this.handshake();
+    } catch (err) {
+      const failure = err instanceof MCPAuthRequiredError
+        ? `${host} still refuses access after signing in: ${err.message}`
+        : this.describeFailure(err instanceof Error ? err.message : String(err));
+      log.error(`[${this.serverName}] connecting after sign-in failed:`, failure);
+      this.setStatus('error', failure);
+    }
+  }
+
+  /**
+   * The built-in OAuthHelper, found once. As with PermissionBroker, a name
+   * alone proves nothing, so only a built-in registration is used.
+   */
+  private async oauthHelper(): Promise<AbjectId | undefined> {
+    if (this.oauthHelperId) return this.oauthHelperId;
+    const id = await this.discoverDep('OAuthHelper').catch(() => null);
+    if (!id || !(await this.isBuiltInCaller(id, ['OAuthHelper']))) return undefined;
+    this.oauthHelperId = id;
+    return id;
   }
 
   /**
@@ -376,9 +613,10 @@ export class MCPBridge extends Abject {
    * code throws that away and leaves the caller guessing.
    */
   private describeFailure(message: string): string {
-    if (message.includes('Server stderr:')) return message;
-    const tail = this.transport?.stderrTail;
-    return tail ? `${message}\nServer stderr:\n${tail}` : message;
+    const label = this.url ? 'Server responses:' : 'Server stderr:';
+    if (message.includes(label)) return message;
+    const tail = this.transport?.diagnosticTail;
+    return tail ? `${message}\n${label}\n${tail}` : message;
   }
 
   private async disconnectFromServer(): Promise<void> {
@@ -387,6 +625,7 @@ export class MCPBridge extends Abject {
       this.transport = null;
     }
     this.bridgeStatus = 'idle';
+    this.bridgeStatusError = undefined;
     this.cachedTools = [];
     this.cachedResources = [];
   }
@@ -399,8 +638,8 @@ export class MCPBridge extends Abject {
     toolName: string,
     input: Record<string, unknown>,
     callerId: AbjectId,
-  ): Promise<{ content: string; isError: boolean; permission?: PermissionReceipt }> {
-    contractRequire(this.transport?.isConnected === true, `MCP server "${this.serverName}" is not connected`);
+  ): Promise<{ content: string; isError: boolean; images?: MCPImage[]; permission?: PermissionReceipt }> {
+    this.requireConnected();
 
     // Validate the tool exists
     const tool = this.cachedTools.find(t => t.name === toolName);
@@ -423,16 +662,16 @@ export class MCPBridge extends Abject {
     const refusal = await this.consentFor(tool, input, callerId);
     if (refusal) return refusal;
     // The person may have taken a while; the server may be gone by now.
-    contractRequire(this.transport?.isConnected === true, `MCP server "${this.serverName}" is not connected`);
+    this.requireConnected();
 
-    const result = await this.transport!.sendRequest('tools/call', {
+    const result = await this.remote(() => this.transport!.sendRequest('tools/call', {
       name: toolName,
       arguments: input,
-    }) as MCPToolCallResult;
+    })) as MCPToolCallResult;
 
-    // Flatten content items to a string for agent consumption
-    const text = this.flattenContent(result.content ?? []);
-    return { content: text, isError: result.isError ?? false };
+    // Text for agents; images travel beside it as data.
+    const { text, images } = this.flattenContent(result.content ?? []);
+    return { content: text, isError: result.isError ?? false, ...(images.length > 0 ? { images } : {}) };
   }
 
   /**
@@ -502,17 +741,43 @@ export class MCPBridge extends Abject {
   }
 
   private async readResource(uri: string): Promise<{ content: string; mimeType?: string }> {
-    contractRequire(this.transport?.isConnected === true, `MCP server "${this.serverName}" is not connected`);
+    this.requireConnected();
 
-    const result = await this.transport!.sendRequest('resources/read', {
+    const result = await this.remote(() => this.transport!.sendRequest('resources/read', {
       uri,
-    }) as MCPReadResourceResult;
+    })) as MCPReadResourceResult;
 
     const first = result.contents?.[0];
     return {
       content: first?.text ?? first?.blob ?? '',
       mimeType: first?.mimeType,
     };
+  }
+
+  /** Calls are taken only once the handshake is done and while the link is up. */
+  private requireConnected(): void {
+    const waiting = this.bridgeStatus === 'signing_in'
+      ? ': it is waiting for the person to sign in to the server'
+      : '';
+    contractRequire(this.bridgeStatus === 'connected' && this.transport?.isConnected === true,
+      `MCP server "${this.serverName}" is not connected${waiting}`);
+  }
+
+  /**
+   * Run a call against the server. A remote server that stops accepting this
+   * bridge's token (revoked, or the refresh token expired) sends the bridge
+   * back to signing in, and the call fails saying so.
+   */
+  private async remote<T>(call: () => Promise<T>): Promise<T> {
+    try {
+      return await call();
+    } catch (err) {
+      if (err instanceof MCPAuthRequiredError && this.signsInWithOAuth()) {
+        this.beginSignIn(err.challenge);
+        throw new Error(`${new URL(this.url!).host} needs the person to sign in again. They have been asked to approve access; try again once they have.`);
+      }
+      throw err;
+    }
   }
 
   private async refreshTools(): Promise<void> {
@@ -539,13 +804,33 @@ export class MCPBridge extends Abject {
     }
   }
 
-  private flattenContent(items: MCPContentItem[]): string {
-    return items.map(item => {
+  /**
+   * A tool result as text for agents, with its images as data. Each image
+   * leaves a marker line where it appeared (mcpImageMarker). Content this
+   * bridge cannot pass on is named rather than left out, so a caller never
+   * takes its absence for something it was given.
+   */
+  private flattenContent(items: MCPContentItem[]): { text: string; images: MCPImage[] } {
+    const images: MCPImage[] = [];
+    const image = (mimeType: string, data: string): string => {
+      images.push({ mimeType, data });
+      return mcpImageMarker(images.length, mimeType);
+    };
+    const text = items.map(item => {
       if (item.type === 'text' && item.text) return item.text;
+      if (item.type === 'image' && item.data) return image(item.mimeType ?? 'image/png', item.data);
       if (item.type === 'resource' && item.resource?.text) return item.resource.text;
-      if (item.type === 'image' && item.data) return `[image: ${item.mimeType ?? 'unknown'}]`;
+      if (item.type === 'resource' && item.resource?.blob) {
+        const { uri, mimeType, blob } = item.resource;
+        return mimeType?.startsWith('image/')
+          ? image(mimeType, blob)
+          : `[${uri}: ${mimeType ?? 'binary'} content, not passed on]`;
+      }
+      if (item.type === 'resource_link' && item.uri) return `[${item.name ?? item.uri}](${item.uri})`;
+      if (item.type === 'audio') return `[audio (${item.mimeType ?? 'unknown type'}), not passed on]`;
       return '';
     }).filter(Boolean).join('\n');
+    return { text, images };
   }
 
   /**

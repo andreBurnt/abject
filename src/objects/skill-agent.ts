@@ -15,8 +15,10 @@ import { bulkAwareResult, resultEcho, LARGE_PAYLOAD_CHARS } from './agent-abject
 import type { EnabledSkillSummary } from '../core/skill-types.js';
 import type { MCPServerSummary, MCPServerDetail } from './mcp-registry-client.js';
 import type { ClawHubSkillSummary, SkillBundle } from './clawhub-client.js';
-import { buildMcpSkillMd, packageToMcpCommand, sanitiseSkillName } from '../core/skill-synth.js';
-import { formatMCPToolList } from '../core/mcp-format.js';
+import { buildMcpSkillMd, packageToMcpCommand, remoteMcpUrl, sanitiseSkillName } from '../core/skill-synth.js';
+import { formatMCPToolList, mcpImageMarker } from '../core/mcp-format.js';
+import type { MCPImage } from '../core/mcp-types.js';
+import { buildAbjectUrl } from './widgets/markdown-image-resolver.js';
 import { choiceOf, noulOf } from '../llm/decision.js';
 import type { DecisionQuestion, DecisionText } from '../llm/decision.js';
 import { askScopeQuestions, criterion, instruction } from '../core/decision-questions.js';
@@ -43,6 +45,12 @@ const PERMISSION_AWARE_TIMEOUT = 180000;
  * dozen skills from crowding out the rest of the roster.
  */
 const SKILL_SUMMARY_CHARS = 180;
+
+/** File extension for each image type a chat can show. */
+const IMAGE_EXTENSIONS: Record<string, string> = {
+  'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif',
+  'image/webp': 'webp', 'image/bmp': 'bmp', 'image/svg+xml': 'svg',
+};
 
 /** Show enough of a secret to confirm which value is set, never the value. */
 function maskSecret(value: string): string {
@@ -134,6 +142,9 @@ export class SkillAgent extends Abject {
   private goalManagerId?: AbjectId;
   private mcpRegistryClientId?: AbjectId;
   private clawHubClientId?: AbjectId;
+  /** The workspace's FileSystem and its type id, where tool images are kept. */
+  private fileSystemId?: AbjectId;
+  private fileSystemTypeId?: string;
   private _currentGoalId?: string;
 
   private taskExtras = new Map<string, TaskExtra>();
@@ -279,7 +290,7 @@ When invited to contribute to a Sprint Plan, describe the specific task I could 
       if (allSkills.length > 0) {
         prompt += '\n\nAll installed skills:\n';
         for (const s of allSkills) {
-          const status = s.mcpStatus === 'error' ? 'error' : s.enabled ? 'enabled' : 'disabled';
+          const status = skillStatusLabel(s);
           let line = `- ${s.name} [${status}]${s.error ? ` (${s.error})` : ''}: ${s.description.slice(0, 120)}`;
           if (s.configFile) line += ` [config: ${s.configFile}]`;
           prompt += line + '\n';
@@ -288,8 +299,10 @@ When invited to contribute to a Sprint Plan, describe the specific task I could 
 
       if (servers.length > 0) {
         prompt += '\nConnected MCP servers and tools:\n';
-        for (const s of servers) {
-          prompt += `- ${s.name}: ${s.tools.map(t => t.name).join(', ')}\n`;
+        for (const s of servers as Array<{ name: string; tools: Array<{ name: string }>; status?: string }>) {
+          prompt += s.status === 'signing_in'
+            ? `- ${s.name}: waiting for the person to sign in\n`
+            : `- ${s.name}: ${s.tools.map(t => t.name).join(', ')}\n`;
         }
       }
     }
@@ -629,7 +642,7 @@ When invited to contribute to a Sprint Plan, describe the specific task I could 
         );
         if (skills.length > 0) {
           skillState = '\n\nInstalled skills:\n' + skills.map(s => {
-            const status = s.mcpStatus === 'error' ? 'error' : s.enabled ? 'enabled' : 'disabled';
+            const status = skillStatusLabel(s);
             let line = `- ${s.name} [${status}]${s.error ? ` (${s.error})` : ''}: ${s.description.slice(0, 100)}`;
             if (s.configFile) line += ` [config: ${s.configFile}]`;
             return line;
@@ -639,7 +652,7 @@ When invited to contribute to a Sprint Plan, describe the specific task I could 
 
       try {
         const servers = await this.request<Array<{
-          name: string; tools: Array<{ name: string }>;
+          name: string; tools: Array<{ name: string }>; status?: string;
         }>>(
           request(this.id, this.skillRegistryId, 'getEnabledMCPServers', {}),
         );
@@ -649,6 +662,8 @@ When invited to contribute to a Sprint Plan, describe the specific task I could 
           // this is the only place the agent learns what it can call without
           // reaching for a shell. `list_mcp_tools` gives the full schemas.
           skillState += '\n\nConnected MCP servers (call these with mcp_tool_call):\n' + servers.map(s => {
+            if (s.status === 'signing_in') return `- ${s.name}: waiting for the person to sign in (the bridge connects once they approve)`;
+            if (s.status === 'error') return `- ${s.name}: failed (see the skill's error above)`;
             if (s.tools.length === 0) return `- ${s.name}: 0 tools (server connected but exposes nothing)`;
             const names = s.tools.map(t => t.name);
             const shown = names.slice(0, 25).join(', ');
@@ -883,6 +898,18 @@ When invited to contribute to a Sprint Plan, describe the specific task I could 
             ].filter(Boolean);
             return fail(parts.join('\n'));
           }
+          // The person has been asked to sign in and has not finished. Nothing
+          // here can do it for them; the bridge connects once they approve.
+          if (enabled.mcpStatus === 'connecting') {
+            result = `Enabled skill "${name}"; its bridge is still connecting to the server. Check with list_mcp_tools before using it.`;
+            break;
+          }
+          if (enabled.mcpStatus === 'signing_in') {
+            result = `Enabled skill "${name}". Its server asks the person to sign in: they have been asked to ` +
+              `approve access in their browser and have not finished yet. The bridge connects by itself once they do. ` +
+              `Tell them with reply, then check with list_mcp_tools before using it.`;
+            break;
+          }
 
           result = enabled.mcpStatus
             ? `Enabled skill "${name}" — MCP bridge running with ${enabled.toolCount ?? 0} tools. Call them with mcp_tool_call.`
@@ -918,6 +945,10 @@ When invited to contribute to a Sprint Plan, describe the specific task I could 
             .join(', ');
           if (saved.restarted && saved.mcpStatus === 'error') {
             return fail(`Saved config for "${name}" (${summary}) but the MCP server still fails to start.\n${saved.error ?? ''}`);
+          }
+          if (saved.restarted && saved.mcpStatus === 'signing_in') {
+            result = `Saved config for "${name}" (${summary}). Its server now asks the person to sign in; they have been asked to approve access in their browser.`;
+            break;
           }
           result = `Saved config for "${name}" — ${summary}.`
             + (saved.restarted ? ` MCP bridge restarted: ${saved.toolCount ?? 0} tools available.` : '');
@@ -988,7 +1019,7 @@ When invited to contribute to a Sprint Plan, describe the specific task I could 
           const resolved = await this.resolveBridge(server);
           if (!resolved.bridgeId) return fail(resolved.error ?? `MCP server "${server}" is not available`);
 
-          const toolResult = await this.request<{ content: string; isError: boolean }>(
+          const toolResult = await this.request<{ content: string; isError: boolean; images?: MCPImage[] }>(
             request(this.id, resolved.bridgeId, 'callTool', { toolName: tool, input }),
             120000,
           );
@@ -996,7 +1027,9 @@ When invited to contribute to a Sprint Plan, describe the specific task I could 
           if (toolResult.isError) {
             return fail(`MCP tool error: ${toolResult.content}`);
           } else {
-            result = toolResult.content;
+            result = toolResult.images?.length
+              ? await this.withSavedImages(server, tool, toolResult.content, toolResult.images)
+              : toolResult.content;
           }
           break;
         }
@@ -1058,6 +1091,53 @@ When invited to contribute to a Sprint Plan, describe the specific task I could 
     } catch (err) {
       return fail(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  /**
+   * Keep the images a tool returned in the workspace's files and put a
+   * markdown image line where each one appeared, so a reply can show it. An
+   * image that cannot be kept is named as such in its place.
+   */
+  private async withSavedImages(server: string, tool: string, content: string, images: MCPImage[]): Promise<string> {
+    let text = content;
+    for (const [i, img] of images.entries()) {
+      const ref = await this.saveImage(server, img).catch((err) => {
+        log.warn(`could not keep image ${i + 1} from ${server}/${tool}: ${err instanceof Error ? err.message : String(err)}`);
+        return null;
+      });
+      const line = ref
+        ? `![${tool} image ${i + 1}](${ref})`
+        : `[image ${i + 1} (${img.mimeType}) returned, but it could not be saved, so it cannot be shown]`;
+      const marker = mcpImageMarker(i + 1, img.mimeType);
+      text = text.includes(marker) ? text.replace(marker, line) : `${text}\n${line}`;
+    }
+    return text;
+  }
+
+  /**
+   * Write one image under /mcp/<server>/ in the workspace FileSystem, named
+   * by its content so the same image is kept once, and return its
+   * `abject://` reference. Null for an image type a chat cannot show.
+   */
+  private async saveImage(server: string, img: MCPImage): Promise<string | null> {
+    const ext = IMAGE_EXTENSIONS[img.mimeType];
+    if (!ext) return null;
+    this.fileSystemId = await this.resolveDep('FileSystem', this.fileSystemId);
+    if (!this.fileSystemId) return null;
+    if (!this.fileSystemTypeId) {
+      const registryId = await this.resolveRegistryId();
+      const reg = registryId
+        ? await this.request<{ typeId?: string } | null>(request(this.id, registryId, 'lookup', { objectId: this.fileSystemId }))
+        : null;
+      this.fileSystemTypeId = reg?.typeId;
+    }
+    if (!this.fileSystemTypeId) return null;
+
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(img.data));
+    const name = [...new Uint8Array(digest).slice(0, 8)].map(b => b.toString(16).padStart(2, '0')).join('');
+    const path = `/mcp/${server.replace(/[^A-Za-z0-9._-]/g, '_')}/${name}.${ext}`;
+    await this.request(request(this.id, this.fileSystemId, 'writeFileBytes', { path, base64: img.data }), 30000);
+    return buildAbjectUrl(this.fileSystemTypeId, path);
   }
 
   /**
@@ -1405,6 +1485,11 @@ and HTTP for anything the server already exposes.
   the missing credential with \`set_skill_config\`, and try the tool again.
 - Credentials belong in skill config, never in a shell command. A token in a
   command line is echoed into permission dialogs and logs.
+- An image a tool returns appears in its result as a markdown image line,
+  \`![name](abject://...)\`. To show the image to the person, put that line,
+  unchanged, on a line of its own in your reply; that line is how the image
+  reaches them. A result that says an image was not passed on or could not be
+  saved has no picture to show, so tell the person that.
 
 ## Live state outranks anything you remember
 
@@ -1487,7 +1572,19 @@ A large response alone is not a reason to fail or split a task. Page or process 
 
 ## Installing MCP Server Skills
 
-Two paths, depending on whether the user named a specific package:
+A remote server, given by its address (e.g. "connect to https://example.com/mcp"):
+1. Use install_skill with a SKILL.md that names the address in \`mcp-url\` (format
+   below). The bridge speaks HTTP to the server itself, so the skill launches
+   nothing locally: no \`mcp-command\` and no proxy package.
+2. Use enable_skill. When the server asks for a sign-in (OAuth), the bridge
+   handles it: it discovers how to sign in from the server, and the person is
+   asked to approve access in their browser. enable_skill returns once they have,
+   or with mcpStatus \`signing_in\` while they still have to. The sign-in needs
+   no token, client registration, or curl from you.
+3. Verify with list_mcp_tools and one read-only tool call, as for any server.
+
+A local server, launched as a package, has two paths, depending on whether the
+user named a specific package:
 
 **By specific package name** (e.g., "install @shinzolabs/gmail-mcp"):
 1. Use install_skill directly with a SKILL.md (exact format below), listing the server's env var names with empty values. npx handles package installation automatically.
@@ -1516,8 +1613,31 @@ env:
 <Brief description of the MCP server.>
 \`\`\`
 
+Remote server SKILL.md format:
+
+\`\`\`
+---
+name: <short-name>
+description: "<what the server provides>"
+mcp-url: https://example.com/mcp
+---
+
+<Brief description of the MCP server.>
+\`\`\`
+
+A remote server that takes an API key instead of a sign-in gets it in a header,
+filled from the skill's config:
+
+\`\`\`
+mcp-url: https://example.com/mcp
+mcp-headers:
+  Authorization: "Bearer \${EXAMPLE_API_KEY}"
+env:
+  EXAMPLE_API_KEY: ""
+\`\`\`
+
 Frontmatter rules:
-- All keys are hyphenated: \`mcp-command\`, \`mcp-args\`
+- All keys are hyphenated: \`mcp-command\`, \`mcp-args\`, \`mcp-url\`, \`mcp-headers\`
 - \`mcp-command\` is always \`npx\` for npm packages
 - \`mcp-args\` always starts with \`"-y"\` followed by the package name
 - List every environment variable the server needs under \`env\` with an EMPTY
@@ -1544,9 +1664,12 @@ this system does not read credentials back out of them, so a token written
 there has no effect and simply leaks. If you cannot find where a credential
 goes, the answer is \`set_skill_config\`.
 
-When you do not have the credential, \`reply\` to ask the user for it and say
-exactly which value you need and how to obtain it. Never invent a file path
-for them to paste it into.
+Every credential value you store comes from the person (or a file they point
+you to) or from a sign-in. A value you have not been given is one to ask for:
+\`reply\` to ask the user for it and say exactly which value you need and how to
+obtain it. Never invent a file path for them to paste it into. A server that
+signs people in with OAuth needs no credential from you at all: enabling it
+starts the sign-in.
 
 ## Verifying an MCP server actually works
 
@@ -1766,22 +1889,27 @@ When using curl, use -s (silent) and pipe JSON through jq.
     );
     const pkg = detail.packages?.find(p => !!p && !!(p.identifier ?? p.name));
     const { command, args } = packageToMcpCommand(pkg);
-    if (!command) return `Cannot install "${name}": no supported package registry for this server.`;
+    // A server with no installable package may still be hosted somewhere.
+    const url = command ? undefined : remoteMcpUrl(detail.remotes);
+    if (!command && !url) return `Cannot install "${name}": no supported package registry or remote endpoint for this server.`;
 
     const skillName = sanitiseSkillName(detail.name);
     const content = buildMcpSkillMd({
       name: skillName,
       description: detail.description ?? `MCP server: ${detail.name}`,
-      mcpCommand: command,
-      mcpArgs: args,
+      ...(command ? { mcpCommand: command, mcpArgs: args } : { mcpUrl: url! }),
     });
 
     await this.request(
       request(this.id, this.skillRegistryId!, 'installSkill', { name: skillName, content }),
     );
-    await this.request(
+    const enabled = await this.request<{ mcpStatus?: string; error?: string }>(
       request(this.id, this.skillRegistryId!, 'enableSkill', { name: skillName }),
+      60000,
     );
+    if (enabled?.mcpStatus === 'signing_in') {
+      return `Installed MCP server "${detail.name}" as skill "${skillName}". It asks the person to sign in; they have been asked to approve access in their browser, and it connects once they do.`;
+    }
     return `Installed and enabled MCP server "${detail.name}" as skill "${skillName}".`;
   }
 
@@ -1799,6 +1927,13 @@ When using curl, use -s (silent) and pipe JSON through jq.
     );
     return `Installed skill "${skillName}" from ClawHub. Review the SKILL.md and use enable_skill once you're ready to run it.`;
   }
+}
+
+/** How a skill's state reads in a skill list. */
+function skillStatusLabel(s: { enabled: boolean; mcpStatus?: string }): string {
+  if (s.mcpStatus === 'error') return 'error';
+  if (s.mcpStatus === 'signing_in') return 'waiting for sign-in';
+  return s.enabled ? 'enabled' : 'disabled';
 }
 
 export const SKILL_AGENT_ID = 'abjects:skill-agent' as AbjectId;

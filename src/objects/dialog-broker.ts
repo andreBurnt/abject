@@ -152,8 +152,11 @@ export class DialogBroker extends Abject {
             },
             {
               name: 'cancel',
-              description: 'Withdraw a question you asked (the asker only).',
-              parameters: [{ name: 'dialogId', type: { kind: 'primitive', primitive: 'string' }, description: 'Dialog id' }],
+              description: 'Withdraw a question you asked (the asker only), named by its dialog id or by the id of the askPerson request that opened it.',
+              parameters: [
+                { name: 'dialogId', type: { kind: 'primitive', primitive: 'string' }, description: 'Dialog id', optional: true },
+                { name: 'requestId', type: { kind: 'primitive', primitive: 'string' }, description: 'Message id of the askPerson request', optional: true },
+              ],
               returns: { kind: 'primitive', primitive: 'boolean' },
             },
             {
@@ -248,12 +251,17 @@ export class DialogBroker extends Abject {
       return DEFERRED_REPLY;
     });
 
+    // Withdraw a question, named by its dialog id or by the id of the
+    // askPerson request that opened it (all an asker still waiting knows).
     this.on('cancel', (msg: AbjectMessage) => {
-      const { dialogId } = (msg.payload ?? {}) as { dialogId?: string };
-      const pending = dialogId ? this.open.get(dialogId) : undefined;
+      const { dialogId, requestId } = (msg.payload ?? {}) as { dialogId?: string; requestId?: string };
+      const found = dialogId
+        ? (this.open.has(dialogId) ? dialogId : undefined)
+        : [...this.open.entries()].find(([, p]) => p.msg.header.messageId === requestId)?.[0];
+      const pending = found ? this.open.get(found) : undefined;
       if (!pending) return false;
       precondition(pending.askedById === msg.routing.from, 'Only the asker may withdraw its question');
-      this.close(dialogId!, { answered: false, confirmed: false });
+      this.close(found!, { answered: false, confirmed: false });
       return true;
     });
 

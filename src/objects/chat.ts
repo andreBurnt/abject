@@ -26,6 +26,7 @@ import { require as precondition, invariant } from '../core/contracts.js';
 import type { AgentAction } from './agent-abject.js';
 import type { ContentPart } from '../llm/provider.js';
 import { Log } from '../core/timed-log.js';
+import { parseAbjectUrl, imageMimeForPath } from './widgets/markdown-image-resolver.js';
 
 const log = new Log('Chat');
 const CHAT_INTERFACE: InterfaceId = 'abjects:chat';
@@ -92,6 +93,10 @@ The desktop is a native 3D scene: every window is a slab in it, and objects can 
 // ── Attachments ────────────────────────────────────────────────────────
 /** Image MIME types the LLM vision content part accepts. */
 const IMAGE_MIME = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+/** A markdown image whose source is a file reference: alt in 1, reference in 2. */
+const ABJECT_IMAGE = /!\[([^\]]*)\]\((abject:\/\/[^)\s]+)\)/g;
+/** Images read for display, kept for replays (oldest dropped first). */
+const IMAGE_CACHE_LIMIT = 16;
 /** Max characters of a text/code attachment injected into the prompt. */
 const MAX_ATTACHMENT_CHARS = 40_000;
 const ATTACH_GLYPH = '📎';
@@ -289,6 +294,8 @@ export class Chat extends Abject {
 
   /** Task info per goal, fetched from GoalManager. */
   private liveTasks = new Map<string, ChatActivityTask[]>();
+  /** Image references already read for display, as data URIs. */
+  private imageCache = new Map<string, string>();
 
   /** Pending routing-task replies, with scoped inactivity timeouts. */
   private pendingTickets = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout>; timeoutMs: number }>();
@@ -622,7 +629,7 @@ export class Chat extends Abject {
       // the image.
       const id = uuidv4();
       this.recordEntry({ id, role: 'assistant', content: trimmed, media: true, sender: displaySender });
-      this.appendMessage('assistant', displaySender, trimmed, true, id);
+      this.appendMessage('assistant', displaySender, await this.showable(trimmed), true, id);
       this.schedulePersist();
       return true;
     });
@@ -660,7 +667,7 @@ export class Chat extends Abject {
     this.on('getTranscript', async () => ({
       conversationId: this.conversationId ?? '',
       title: this.conversationTitle ?? '',
-      messages: this.transcriptViews(),
+      messages: await this.transcriptViews(),
       controls: this.controls(),
       activity: this.activitySnapshot(),
       working: this.isGoalActive(),
@@ -899,7 +906,7 @@ export class Chat extends Abject {
           this._streamBuffer = '';
           const id = uuidv4();
           this.recordEntry({ id, role: 'assistant', content: text });
-          this.appendMessage('assistant', 'Agent', text, true, id);
+          this.appendMessage('assistant', 'Agent', await this.showable(text), true, id);
           this.schedulePersist();
           this.stepStreamChars = 0;
           this.scheduleActivityRefresh();
@@ -1053,22 +1060,65 @@ export class Chat extends Abject {
     this.conversationHistory.push({ ...entry, at: entry.at ?? Date.now() });
   }
 
+  /**
+   * A message as listeners can show it. An image line that points into the
+   * workspace's files (`![alt](abject://...)`, as an agent writes for an
+   * image a tool returned) carries the image itself instead, since a window
+   * or a terminal cannot reach the FileSystem; the saved conversation keeps
+   * the short reference. An image that cannot be read is said to be missing.
+   */
+  private async showable(text: string): Promise<string> {
+    if (!text.includes('](abject://')) return text;
+    const shown = new Map<string, string | null>();
+    for (const match of text.matchAll(ABJECT_IMAGE)) {
+      if (!shown.has(match[2])) shown.set(match[2], await this.imageData(match[2]));
+    }
+    return text.replace(ABJECT_IMAGE, (_whole, alt: string, ref: string) => {
+      const data = shown.get(ref);
+      return data ? `![${alt}](${data})` : `_(image not found: ${alt || ref})_`;
+    });
+  }
+
+  /** The bytes behind an `abject://` reference as a data URI, or null. */
+  private async imageData(ref: string): Promise<string | null> {
+    const cached = this.imageCache.get(ref);
+    if (cached) return cached;
+    const registryId = await this.resolveRegistryId();
+    if (!registryId) return null;
+    for (const { typeId, path } of parseAbjectUrl(ref)) {
+      const fsId = await this.request<AbjectId | null>(request(this.id, registryId, 'resolveType', { typeId }))
+        .catch(() => null);
+      if (!fsId) continue;
+      try {
+        const base64 = await this.request<string>(request(this.id, fsId, 'readFileBytes', { path }), 30000);
+        if (!base64) return null;
+        const data = `data:${imageMimeForPath(path)};base64,${base64}`;
+        this.imageCache.set(ref, data);
+        if (this.imageCache.size > IMAGE_CACHE_LIMIT) this.imageCache.delete(this.imageCache.keys().next().value!);
+        return data;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
   /** The saved conversation as listeners render it. */
-  private transcriptViews(): ChatMessageView[] {
-    return this.conversationHistory.map((entry) => {
+  private async transcriptViews(): Promise<ChatMessageView[]> {
+    return Promise.all(this.conversationHistory.map(async (entry) => {
       const role: ChatRole = entry.role === 'user' ? 'user' : entry.role === 'assistant' ? 'assistant' : 'system';
       const defaultSender = entry.role === 'user' ? 'You' : entry.role === 'assistant' ? 'Agent' : 'System';
       return {
         id: entry.id ?? uuidv4(),
         role,
         sender: entry.sender ?? defaultSender,
-        text: entry.content,
+        text: entry.role === 'assistant' ? await this.showable(entry.content) : entry.content,
         // Attachment chips use markdown (bold filename) even though they're user-role.
         markdown: entry.role !== 'user' || !!entry.attachment,
         // 0: saved before message times were kept, so no time is shown.
         at: entry.at ?? 0,
       };
-    });
+    }));
   }
 
   private controls(): ChatControls {
@@ -1302,7 +1352,7 @@ export class Chat extends Abject {
     this.emitGoalActivity();
     await this.persistActiveGoal(undefined);
     this.removeActivity();
-    this.deliverLateGoalOutcome({ status, result, error, goalId });
+    await this.deliverLateGoalOutcome({ status, result, error, goalId });
     // The job lands: a burst on success, a glitch when it fell over (a stop
     // the user asked for is their own doing and plays nothing).
     if (status === 'completed') this.playEffect('burst');
@@ -1314,14 +1364,14 @@ export class Chat extends Abject {
    * Post a goal outcome that landed after the dispatching chat task already
    * returned, into the conversation where the user asked.
    */
-  private deliverLateGoalOutcome(outcome: { result?: unknown; error?: string; status: 'completed' | 'failed'; goalId?: string }): void {
+  private async deliverLateGoalOutcome(outcome: { result?: unknown; error?: string; status: 'completed' | 'failed'; goalId?: string }): Promise<void> {
     const text = outcome.status === 'completed'
       ? (typeof outcome.result === 'string' ? outcome.result : JSON.stringify(outcome.result))
       : `The goal did not complete: ${outcome.error ?? 'unknown error'}`;
     if (!text?.trim()) return;
     const id = uuidv4();
     this.recordEntry({ id, role: 'assistant', content: text.trim(), sourceGoalId: outcome.goalId });
-    this.appendMessage('assistant', 'Agent', text.trim(), true, id);
+    this.appendMessage('assistant', 'Agent', await this.showable(text.trim()), true, id);
     this.schedulePersist();
   }
 
@@ -2241,7 +2291,7 @@ A single successful creation goal is a complete turn. End it with **done**.
         if (text) {
           const id = uuidv4();
           this.recordEntry({ id, role: 'assistant', content: text });
-          this.appendMessage('assistant', 'Agent', text, true, id);
+          this.appendMessage('assistant', 'Agent', await this.showable(text), true, id);
           this.schedulePersist();
         }
       } else {

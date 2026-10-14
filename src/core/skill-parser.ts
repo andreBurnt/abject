@@ -30,7 +30,7 @@ export interface ParsedSkill {
   defaultEnv?: Record<string, string>;
   /** Version string if present. */
   version?: string;
-  /** Present when the skill is an MCP server (type: mcp / mcp-command in frontmatter). */
+  /** Present when the skill is an MCP server (mcp-command or mcp-url in frontmatter). */
   mcpServer?: MCPServerMeta;
   /** Path to the MCP server's config file (from frontmatter 'config-file'). */
   configFile?: string;
@@ -99,8 +99,10 @@ export function parseSkillMd(content: string, dirName: string): ParsedSkill {
   // seed their config, not just skills that nest env under metadata.
   mergeEnvBlock(result, frontmatter.env);
 
-  // Detect MCP server type
+  // Detect MCP server type: a local server is started with `mcp-command`, a
+  // remote one is reached at `mcp-url`.
   const mcpCommand = frontmatter['mcp-command'];
+  const mcpUrl = frontmatter['mcp-url'];
   if (typeof mcpCommand === 'string' && mcpCommand.length > 0) {
     const mcpArgs = Array.isArray(frontmatter['mcp-args'])
       ? (frontmatter['mcp-args'] as unknown[]).filter((a): a is string => typeof a === 'string')
@@ -109,6 +111,22 @@ export function parseSkillMd(content: string, dirName: string): ParsedSkill {
     result.mcpServer = {
       command: mcpCommand,
       args: mcpArgs,
+      requiredEnv: result.requiredEnv,
+    };
+  } else if (typeof mcpUrl === 'string' && /^https?:\/\//i.test(mcpUrl.trim())) {
+    const headersRaw = frontmatter['mcp-headers'];
+    const headers: Record<string, string> = {};
+    if (headersRaw && typeof headersRaw === 'object' && !Array.isArray(headersRaw)) {
+      for (const [name, value] of Object.entries(headersRaw as Record<string, unknown>)) {
+        if (typeof value === 'string') headers[name] = value;
+      }
+    }
+    const clientId = frontmatter['mcp-oauth-client-id'];
+
+    result.mcpServer = {
+      url: mcpUrl.trim(),
+      headers: Object.keys(headers).length > 0 ? headers : undefined,
+      oauthClientId: typeof clientId === 'string' && clientId.length > 0 ? clientId : undefined,
       requiredEnv: result.requiredEnv,
     };
   }
@@ -153,8 +171,8 @@ function mergeEnvBlock(result: ParsedSkill, envObj: unknown): void {
  * Detect which ecosystem a skill comes from based on frontmatter fields.
  */
 function detectSource(fm: Record<string, unknown>): 'claude-code' | 'openclaw' | 'mcp' | 'unknown' {
-  // MCP server: has mcp-command or type: mcp
-  if ('mcp-command' in fm || fm.type === 'mcp') return 'mcp';
+  // MCP server: has mcp-command, mcp-url or type: mcp
+  if ('mcp-command' in fm || 'mcp-url' in fm || fm.type === 'mcp') return 'mcp';
 
   // OpenClaw / clawdbot: has metadata.openclaw (or the clawdbot brand alias)
   if (fm.metadata && typeof fm.metadata === 'object') {

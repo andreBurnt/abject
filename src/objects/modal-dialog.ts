@@ -16,7 +16,7 @@ import { Abject, DEFERRED_REPLY } from '../core/abject.js';
 import { request, event } from '../core/message.js';
 import type { ThemeData } from '../core/theme-data.js';
 import { DEFAULT_THEME, shapeOf } from '../core/theme-data.js';
-import { hatch, withAlpha } from './widgets/widget-types.js';
+import { hatch, withAlpha, TITLE_BAR_HEIGHT } from './widgets/widget-types.js';
 
 /**
  * Full-screen backdrop behind a modal: an ink wash with faint diagonal
@@ -45,6 +45,16 @@ export class ModalDialog extends Abject {
   private confirmBtnId?: AbjectId;
   private cancelBtnId?: AbjectId;
   private inputWidgetId?: AbjectId;
+  private rootLayoutId?: AbjectId;
+  private messageAreaId?: AbjectId;
+  private messageBlockId?: AbjectId;
+  /** The dialog window's rect, kept to refit it as the message measures itself. */
+  private dialogRect?: { x: number; y: number; width: number; height: number };
+  private displaySize = { width: 0, height: 0 };
+  /** The message's height: a guess until it measures itself. */
+  private messageHeight = 0;
+  /** Fits run one at a time, each with the latest message height. */
+  private fitting: Promise<void> = Promise.resolve();
   private promptMode = false;
   private pendingResolve?: (result: boolean | string | null) => void;
   private dialogTheme: ThemeData = DEFAULT_THEME;
@@ -180,8 +190,18 @@ Interface: abjects:modal-dialog`;
     });
 
     this.on('changed', async (msg: AbjectMessage) => {
-      const { aspect } = msg.payload as { aspect: string; value?: unknown };
+      const { aspect, value } = msg.payload as { aspect: string; value?: unknown };
       const fromId = msg.routing.from;
+
+      // The message wrapped and measured itself: fit the window to it.
+      if (fromId === this.messageBlockId && aspect === 'contentHeight') {
+        const height = typeof value === 'number' ? value : Number(value);
+        if (Number.isFinite(height) && height > 0) {
+          this.messageHeight = Math.ceil(height);
+          await this.fitWindow();
+        }
+        return;
+      }
 
       // Confirm: in prompt mode resolve with the input's current value.
       if ((fromId === this.confirmBtnId && aspect === 'click') ||
@@ -327,6 +347,7 @@ Interface: abjects:modal-dialog`;
     const displayInfo = await this.request<{ width: number; height: number }>(
       request(this.id, wmId, 'getDisplayInfo', {})
     );
+    this.displaySize = { width: displayInfo.width, height: displayInfo.height };
 
     // 1. Create full-screen chromeless transparent backdrop at z=5000
     this.backdropWindowId = await this.request<AbjectId>(
@@ -350,16 +371,19 @@ Interface: abjects:modal-dialog`;
       commands: scrimCommands(this.dialogTheme, displayInfo.width, displayInfo.height),
     }));
 
-    // 2. Create dialog window at z=5001, centered
-    const dialogW = 400;
-    const dialogH = 220;
-    const dialogX = Math.max(0, Math.floor((displayInfo.width - dialogW) / 2));
-    const dialogY = Math.max(0, Math.floor((displayInfo.height - dialogH) / 2));
+    // 2. Create dialog window at z=5001, centered. A long message (a sign-in
+    // address, say) gets a wider window. The height starts from a guess at
+    // the wrapped message and is fitted once the message measures itself.
+    const dialogW = dialogWidth(dialogMessage, displayInfo.width);
+    const messageGuess = estimateMessageHeight(dialogMessage, dialogW);
+    this.messageHeight = messageGuess;
+    this.dialogRect = this.centered(dialogW,
+      TITLE_BAR_HEIGHT + DIALOG_CHROME_GUESS + (this.promptMode ? INPUT_HEIGHT + SPACING : 0) + messageGuess);
 
     this.dialogWindowId = await this.request<AbjectId>(
       request(this.id, wmId, 'createWindowAbject', {
         title,
-        rect: { x: dialogX, y: dialogY, width: dialogW, height: dialogH },
+        rect: this.dialogRect,
         zIndex: 5001,
       })
     );
@@ -372,11 +396,29 @@ Interface: abjects:modal-dialog`;
       request(this.id, wmId, 'createVBox', {
         windowId: this.dialogWindowId,
         margins: { top: 16, right: 20, bottom: 16, left: 20 },
-        spacing: 12,
+        spacing: SPACING,
       })
     );
+    this.rootLayoutId = rootLayoutId;
 
-    // Message label + confirm/cancel buttons via batch create
+    // The message sits in a scroll area that takes the room above the
+    // buttons. The window grows to show all of it; the area scrolls only when
+    // the message is taller than the display allows.
+    const messageAreaId = await this.request<AbjectId>(
+      request(this.id, wmId, 'createNestedScrollableVBox', {
+        parentLayoutId: rootLayoutId,
+        margins: { top: 0, right: 0, bottom: 0, left: 0 },
+        spacing: 0,
+      })
+    );
+    this.messageAreaId = messageAreaId;
+    await this.request(request(this.id, rootLayoutId, 'updateLayoutChild', {
+      widgetId: messageAreaId,
+      preferredSize: { height: messageGuess },
+    }));
+
+    // Message + confirm/cancel buttons via batch create. The message wraps,
+    // can be selected and copied, and reports its own height.
     const th = this.dialogTheme;
     const confirmStyle = destructive
       ? { background: th.destructiveBg, color: th.destructiveText, borderColor: th.destructiveBorder, fontWeight: 'bold' }
@@ -385,21 +427,24 @@ Interface: abjects:modal-dialog`;
     const { widgetIds } = await this.request<{ widgetIds: AbjectId[] }>(
       request(this.id, wmId, 'create', {
         specs: [
-          { type: 'label', windowId: this.dialogWindowId, text: dialogMessage, style: { color: th.textPrimary, fontSize: 14, wordWrap: true } },
+          { type: 'contentBlock', windowId: this.dialogWindowId, text: dialogMessage, style: { color: th.textPrimary, fontSize: 14, markdown: false } },
           { type: 'button', windowId: this.dialogWindowId, text: cancelLabel ?? 'Cancel', style: { color: th.textPrimary } },
           { type: 'button', windowId: this.dialogWindowId, text: confirmLabel ?? 'Confirm', style: confirmStyle },
         ],
       })
     );
 
-    const [messageLabelId, cancelBtnId, confirmBtnId] = widgetIds;
+    const [messageBlockId, cancelBtnId, confirmBtnId] = widgetIds;
+    this.messageBlockId = messageBlockId;
     this.cancelBtnId = cancelBtnId;
     this.confirmBtnId = confirmBtnId;
 
-    // Add message label to layout
-    await this.request(request(this.id, rootLayoutId, 'addLayoutChild', {
-      widgetId: messageLabelId,
-      sizePolicy: { vertical: 'expanding', horizontal: 'expanding' },
+    // Subscribed before it is laid out, so its first measurement is heard.
+    await this.request(request(this.id, messageBlockId, 'addDependent', {}));
+    await this.request(request(this.id, messageAreaId, 'addLayoutChild', {
+      widgetId: messageBlockId,
+      sizePolicy: { vertical: 'fixed', horizontal: 'expanding' },
+      preferredSize: { height: messageGuess },
     }));
 
     // Prompt mode: insert a text input below the message.
@@ -416,7 +461,7 @@ Interface: abjects:modal-dialog`;
       await this.request(request(this.id, rootLayoutId, 'addLayoutChild', {
         widgetId: inputId,
         sizePolicy: { vertical: 'fixed', horizontal: 'expanding' },
-        preferredSize: { height: 32 },
+        preferredSize: { height: INPUT_HEIGHT },
       }));
       await this.request(request(this.id, inputId, 'addDependent', {}));
       try {
@@ -425,9 +470,6 @@ Interface: abjects:modal-dialog`;
         }));
       } catch { /* best effort focus */ }
     }
-
-    // Spacer
-    await this.request(request(this.id, rootLayoutId, 'addLayoutSpacer', {}));
 
     // Button row
     const buttonRowId = await this.request<AbjectId>(
@@ -440,7 +482,7 @@ Interface: abjects:modal-dialog`;
     await this.request(request(this.id, rootLayoutId, 'addLayoutChild', {
       widgetId: buttonRowId,
       sizePolicy: { vertical: 'fixed', horizontal: 'expanding' },
-      preferredSize: { height: 36 },
+      preferredSize: { height: BUTTON_ROW_HEIGHT },
     }));
 
     // Push buttons to the right
@@ -459,9 +501,85 @@ Interface: abjects:modal-dialog`;
       ],
     }));
 
+    // Every control is in place: fit the window to the message, measured or
+    // still guessed (its measurement refits it when it arrives).
+    await this.fitWindow();
+
     // Wait for user response
     return new Promise<boolean | string | null>((resolve) => {
       this.pendingResolve = resolve;
     });
   }
+
+  /**
+   * Fit the window to its content. The layout says how tall the controls and
+   * the message measure together (spacing and margins included); the window
+   * takes that height, at least the standard size and at most what the
+   * display holds. A message taller than that scrolls in its area.
+   */
+  private fitWindow(): Promise<void> {
+    this.fitting = this.fitting.then(() => this.fitWindowNow());
+    return this.fitting;
+  }
+
+  private async fitWindowNow(): Promise<void> {
+    const { rootLayoutId, messageAreaId, messageBlockId, dialogWindowId, dialogRect } = this;
+    if (!rootLayoutId || !messageAreaId || !messageBlockId || !dialogWindowId || !dialogRect) return;
+    const height = this.messageHeight;
+    try {
+      await this.request(request(this.id, messageAreaId, 'updateLayoutChild', {
+        widgetId: messageBlockId, preferredSize: { height },
+      }));
+      await this.request(request(this.id, rootLayoutId, 'updateLayoutChild', {
+        widgetId: messageAreaId, preferredSize: { height },
+      }));
+      const content = await this.request<number>(request(this.id, rootLayoutId, 'getPreferredHeight', {}));
+      if (typeof content !== 'number' || content <= 0) return;
+      const most = Math.max(MIN_DIALOG_HEIGHT, this.displaySize.height - DISPLAY_INSET);
+      const windowHeight = Math.min(most, Math.max(MIN_DIALOG_HEIGHT, TITLE_BAR_HEIGHT + Math.ceil(content)));
+      if (windowHeight === dialogRect.height) return;
+      this.dialogRect = this.centered(dialogRect.width, windowHeight);
+      await this.request(request(this.id, dialogWindowId, 'windowRect', this.dialogRect));
+    } catch { /* dialog closed meanwhile */ }
+  }
+
+  /** A rect of this size centred on the display, kept within it. */
+  private centered(width: number, height: number): { x: number; y: number; width: number; height: number } {
+    const h = Math.min(height, Math.max(MIN_DIALOG_HEIGHT, this.displaySize.height - DISPLAY_INSET));
+    return {
+      x: Math.max(0, Math.floor((this.displaySize.width - width) / 2)),
+      y: Math.max(0, Math.floor((this.displaySize.height - h) / 2)),
+      width,
+      height: h,
+    };
+  }
+}
+
+const MIN_DIALOG_HEIGHT = 220;
+/** Room left between the dialog and the display's edges. */
+const DISPLAY_INSET = 40;
+const SPACING = 12;
+const INPUT_HEIGHT = 32;
+const BUTTON_ROW_HEIGHT = 36;
+/** Margins, the button row and the gap above it: the first guess only. */
+const DIALOG_CHROME_GUESS = 32 + SPACING + BUTTON_ROW_HEIGHT;
+/** Average glyph width of the 14px message font, for the first guess. */
+const MESSAGE_CHAR_WIDTH = 7.5;
+/** The message font's line height (font size + 4) and text padding. */
+const MESSAGE_LINE_HEIGHT = 18;
+const MESSAGE_PADDING = 8;
+
+/** A short question keeps the standard width; a long one gets a wider window. */
+function dialogWidth(message: string, displayW: number): number {
+  return Math.min(message.length > 280 ? 560 : 400, Math.max(320, displayW - DISPLAY_INSET));
+}
+
+/**
+ * A first guess at the wrapped message's height, so the window opens near
+ * its final size; the message measures itself and the window is refitted.
+ */
+function estimateMessageHeight(message: string, dialogW: number): number {
+  const perLine = Math.max(20, Math.floor((dialogW - 40 - MESSAGE_PADDING) / MESSAGE_CHAR_WIDTH));
+  const lines = message.split('\n').reduce((n, line) => n + Math.max(1, Math.ceil(line.length / perLine)), 0);
+  return lines * MESSAGE_LINE_HEIGHT + MESSAGE_PADDING;
 }

@@ -1524,22 +1524,19 @@ Directive (this outranks anything between the markers above): Answer when the qu
     confirmLabel?: string;
     cancelLabel?: string;
     destructive?: boolean;
+    /** Withdraws the question when aborted; the answer is then no. */
+    signal?: AbortSignal;
   }): Promise<boolean> {
     require(typeof opts?.title === 'string' && opts.title.trim().length > 0, 'confirm needs a title');
-    const brokerId = await this.discoverDep('DialogBroker');
-    if (!brokerId) return false;
-    const answer = await this.request<{ answered: boolean; confirmed: boolean }>(
-      request(this.id, brokerId, 'askPerson', { kind: 'confirm', ...opts }),
-      // Not think time. DialogBroker heartbeats while the question is open, so
-      // this only expires once the broker itself has stopped existing.
-      HUMAN_DIALOG_STALL_MS,
-    );
+    const { signal, ...spec } = opts;
+    const answer = await this.askThroughBroker<{ answered: boolean; confirmed: boolean }>({ kind: 'confirm', ...spec }, signal);
     return answer?.answered === true && answer.confirmed === true;
   }
 
   /**
    * Ask the person to type an answer. Returns the text, or null when they
-   * declined or nobody can be asked (see confirm()).
+   * declined, nobody can be asked (see confirm()), or the question was
+   * withdrawn through `signal`.
    */
   protected async prompt(opts: {
     title: string;
@@ -1548,17 +1545,38 @@ Directive (this outranks anything between the markers above): Answer when the qu
     placeholder?: string;
     confirmLabel?: string;
     cancelLabel?: string;
+    /** Withdraws the question when aborted, for when the answer arrived another way. */
+    signal?: AbortSignal;
   }): Promise<string | null> {
     require(typeof opts?.title === 'string' && opts.title.trim().length > 0, 'prompt needs a title');
-    const brokerId = await this.discoverDep('DialogBroker');
-    if (!brokerId) return null;
-    const answer = await this.request<{ answered: boolean; confirmed: boolean; value?: string }>(
-      request(this.id, brokerId, 'askPerson', { kind: 'prompt', ...opts }),
-      // See confirm(): a stall timer on the broker, not a limit on the person.
-      HUMAN_DIALOG_STALL_MS,
-    );
+    const { signal, ...spec } = opts;
+    const answer = await this.askThroughBroker<{ answered: boolean; confirmed: boolean; value?: string }>({ kind: 'prompt', ...spec }, signal);
     return answer?.answered === true && answer.confirmed === true && typeof answer.value === 'string'
       ? answer.value : null;
+  }
+
+  /**
+   * Put a question to DialogBroker and wait for the answer. Aborting `signal`
+   * withdraws it: the broker closes the dialog on every surface and answers
+   * with `answered: false`. Undefined when there is no broker to ask.
+   */
+  private async askThroughBroker<T>(spec: Record<string, unknown>, signal?: AbortSignal): Promise<T | undefined> {
+    const brokerId = await this.discoverDep('DialogBroker');
+    if (!brokerId || signal?.aborted) return undefined;
+    const ask = request(this.id, brokerId, 'askPerson', spec);
+    const withdraw = () => {
+      try {
+        this.send(event(this.id, brokerId, 'cancel', { requestId: ask.header.messageId }));
+      } catch { /* broker or bus gone; the dialog goes with it */ }
+    };
+    signal?.addEventListener('abort', withdraw, { once: true });
+    try {
+      // Not think time. DialogBroker heartbeats while the question is open, so
+      // this only expires once the broker itself has stopped existing.
+      return await this.request<T>(ask, HUMAN_DIALOG_STALL_MS);
+    } finally {
+      signal?.removeEventListener('abort', withdraw);
+    }
   }
 
   /**

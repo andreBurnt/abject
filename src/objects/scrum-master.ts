@@ -2020,6 +2020,7 @@ ${record.length > 0
     ? 'When the work created or modified objects, open with how the user reaches the result: a window they can open now, or — for objects with no visual surface — say plainly that nothing appears on screen and they use it by asking in chat; offer building a window as a natural next step.'
     : 'When the work created or modified objects, open with how the user reaches the result: by asking in this conversation, on a schedule, or through the web gateway. This instance has no display, so nothing opens in a window.'}
 - Markdown formatting is fine and encouraged.
+- A markdown image line in a task result (\`![name](abject://...)\`) is how the user sees that picture. Carry each one the answer needs over unchanged, on a line of its own.
 - If the scratchpad is empty or the goal couldn't be resolved, say so plainly.
 - Write the answer itself, with no action JSON.
 - Output the answer directly — no preamble like "Here is the result:".`;

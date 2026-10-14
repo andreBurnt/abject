@@ -23,18 +23,34 @@ export interface SkillInfo {
   configuredEnvKeys?: string[];
   /** True if this skill is an MCP server (type: mcp). */
   isMcpServer?: boolean;
-  /** MCP server command (e.g. "npx @anthropic-ai/mcp-server-gmail"). */
+  /** MCP server command (e.g. "npx @anthropic-ai/mcp-server-gmail"), for a local server. */
   mcpCommand?: string;
-  /** MCP server runtime status. */
-  mcpStatus?: 'idle' | 'running' | 'error';
+  /** MCP server endpoint (e.g. "https://example.com/mcp"), for a remote server. */
+  mcpUrl?: string;
+  /**
+   * MCP server runtime status. `signing_in` means the remote server asked for
+   * a sign-in and the person has been asked to approve it.
+   */
+  mcpStatus?: 'idle' | 'running' | 'signing_in' | 'error';
   /** Path to the MCP server's config file (e.g. ~/.config/email-mcp/config.toml). */
   configFile?: string;
 }
 
-/** MCP server metadata parsed from SKILL.md frontmatter. */
+/**
+ * MCP server metadata parsed from SKILL.md frontmatter. A local server has a
+ * `command` (stdio); a remote server has a `url` (HTTP). Exactly one is set.
+ */
 export interface MCPServerMeta {
-  command: string;
+  /** Local server: the program to start (`mcp-command`). */
+  command?: string;
+  /** Local server: its arguments (`mcp-args`). */
   args?: string[];
+  /** Remote server: its endpoint (`mcp-url`). */
+  url?: string;
+  /** Remote server: headers for every request (`mcp-headers`); `${VAR}` is filled from the skill's env. */
+  headers?: Record<string, string>;
+  /** Remote server: a pre-registered OAuth client id, for a server without dynamic registration (`mcp-oauth-client-id`). */
+  oauthClientId?: string;
   requiredEnv?: string[];
 }
 

@@ -52,21 +52,50 @@ export function sanitiseSkillName(raw: string): string {
     .slice(0, 80) || 'skill';
 }
 
-/** Build a SKILL.md file body that wraps an MCP server install. */
+/** A registry `remotes` entry: where a server is hosted, and how it is spoken to. */
+export interface McpRemoteRef {
+  type?: string;
+  /** Earlier registry drafts. */
+  transport_type?: string;
+  url?: string;
+}
+
+/**
+ * The endpoint of a hosted server, from its registry `remotes`, for
+ * `mcp-url`. Streamable HTTP is preferred over the older SSE transport (the
+ * bridge speaks both). An address with placeholders to fill in (`{tenant}`)
+ * is skipped, since there is nothing to fill them with here.
+ */
+export function remoteMcpUrl(remotes: McpRemoteRef[] | undefined): string | undefined {
+  const usable = (remotes ?? []).filter(r =>
+    typeof r?.url === 'string' && /^https?:\/\//i.test(r.url) && !r.url.includes('{'));
+  const kind = (r: McpRemoteRef) => (r.type ?? r.transport_type ?? '').toLowerCase();
+  return (usable.find(r => kind(r) === 'streamable-http') ?? usable.find(r => kind(r) === 'sse') ?? usable[0])?.url;
+}
+
+/**
+ * Build a SKILL.md file body that wraps an MCP server install: a local
+ * server launched by `mcpCommand`, or a remote one reached at `mcpUrl`.
+ */
 export function buildMcpSkillMd(opts: {
   name: string;
   description: string;
-  mcpCommand: string;
-  mcpArgs: string[];
+  mcpCommand?: string;
+  mcpArgs?: string[];
+  mcpUrl?: string;
 }): string {
+  const launch = opts.mcpUrl
+    ? [`mcp-url: ${opts.mcpUrl}`]
+    : [`mcp-command: ${opts.mcpCommand}`, `mcp-args: ${JSON.stringify(opts.mcpArgs ?? [])}`];
   const frontmatter = [
     '---',
     `name: ${opts.name}`,
     `description: ${JSON.stringify(opts.description)}`,
-    `mcp-command: ${opts.mcpCommand}`,
-    `mcp-args: ${JSON.stringify(opts.mcpArgs)}`,
+    ...launch,
     '---',
   ].join('\n');
-  const body = `# ${opts.name}\n\nInstalled from the MCP registry. Configure any required environment variables via the skill's config.\n`;
+  const body = opts.mcpUrl
+    ? `# ${opts.name}\n\nInstalled from the MCP registry. A remote server: enabling it connects to ${opts.mcpUrl}, and asks you to sign in there if the server requires it.\n`
+    : `# ${opts.name}\n\nInstalled from the MCP registry. Configure any required environment variables via the skill's config.\n`;
   return `${frontmatter}\n\n${body}`;
 }

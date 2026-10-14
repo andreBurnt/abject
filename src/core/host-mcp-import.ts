@@ -6,12 +6,13 @@
  * Why this exists: a user may already have working MCP servers wired up through
  * mcporter or openclaw. Rather than asking them to re-declare each server as a
  * SKILL.md by hand, we read those host configs and generate the correct
- * `mcp-command` / `mcp-args` frontmatter so abjects can bridge the server
+ * `mcp-command` / `mcp-args` (or `mcp-url`) frontmatter so abjects can bridge the server
  * natively (its own MCPBridge, message-passing, capability gating) instead of
  * shelling out to the host tool.
  *
  * Source roles:
- *  - mcporter  -- authoritative command source: `{ command, args, env }` per server.
+ *  - mcporter  -- authoritative command source: `{ command, args, env }` per local
+ *                 server, `{ url | baseUrl, headers }` per remote one.
  *  - openclaw  -- credential source only: stores `{ enabled, env }` per skill name,
  *                 not command/args. We merge its env into a matching mcporter server.
  *
@@ -44,10 +45,17 @@ type Env = Record<string, string | undefined>;
 export interface HostMcpServer {
   /** Server / skill name as the host tool knows it. */
   name: string;
-  /** Launch command (e.g. "npx"). */
-  command: string;
+  /** Launch command (e.g. "npx"), for a local server. */
+  command?: string;
   /** Launch arguments (e.g. ["-y", "@presto-ai/google-workspace-mcp"]). */
   args: string[];
+  /** Endpoint, for a remote server. */
+  url?: string;
+  /**
+   * Header names for a remote server, each mapped to the env var holding its
+   * value (`env` carries the values, so they stay out of the SKILL.md).
+   */
+  headerEnv?: Record<string, string>;
   /** Environment variables the server needs (merged from mcporter + openclaw). */
   env: Record<string, string>;
   /** Which host tool the command came from. */
@@ -193,11 +201,25 @@ export function readMcporterServers(homeDir: string, env: Env = process.env): Ho
     if (!cfgRaw || typeof cfgRaw !== 'object') continue;
     const cfg = cfgRaw as Record<string, unknown>;
     const command = typeof cfg.command === 'string' ? cfg.command : '';
-    if (!command) continue; // skip remote (url-only) servers — not subprocess-bridgeable here
-    const args = Array.isArray(cfg.args)
-      ? cfg.args.filter((a): a is string => typeof a === 'string')
-      : [];
-    out.push({ name, command, args, env: stringEnv(cfg.env), source: 'mcporter' });
+    if (command) {
+      const args = Array.isArray(cfg.args)
+        ? cfg.args.filter((a): a is string => typeof a === 'string')
+        : [];
+      out.push({ name, command, args, env: stringEnv(cfg.env), source: 'mcporter' });
+      continue;
+    }
+    // A remote server (`url`, or mcporter's `baseUrl`). Its headers often
+    // carry a key, so each value moves to an env var the bridge fills in.
+    const url = typeof cfg.url === 'string' ? cfg.url : typeof cfg.baseUrl === 'string' ? cfg.baseUrl : '';
+    if (!/^https?:\/\//i.test(url)) continue;
+    const env = stringEnv(cfg.env);
+    const headerEnv: Record<string, string> = {};
+    for (const [header, value] of Object.entries(stringEnv(cfg.headers))) {
+      const envName = `MCP_HEADER_${header.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}`;
+      headerEnv[header] = envName;
+      env[envName] = value;
+    }
+    out.push({ name, url, args: [], headerEnv, env, source: 'mcporter' });
   }
   return out;
 }
@@ -246,12 +268,20 @@ export function discoverHostMcpServers(homeDir: string, env: Env = process.env):
  * skill config separately, keeping the same storage path abjects already uses.
  */
 export function synthesizeHostSkillMd(server: HostMcpServer): string {
+  const headers = Object.entries(server.headerEnv ?? {});
+  const launch = server.url
+    ? [
+      `mcp-url: ${server.url}`,
+      ...(headers.length > 0
+        ? ['mcp-headers:', ...headers.map(([h, envName]) => `  ${JSON.stringify(h)}: ${JSON.stringify(`\${${envName}}`)}`)]
+        : []),
+    ]
+    : [`mcp-command: ${server.command}`, `mcp-args: ${JSON.stringify(server.args)}`];
   const frontmatter = [
     '---',
     `name: ${server.name}`,
     `description: ${JSON.stringify(`MCP server imported from host ${server.source} config.`)}`,
-    `mcp-command: ${server.command}`,
-    `mcp-args: ${JSON.stringify(server.args)}`,
+    ...launch,
     '---',
   ].join('\n');
 
@@ -262,9 +292,10 @@ export function synthesizeHostSkillMd(server: HostMcpServer): string {
       + `SkillRegistry.setSkillConfig.\n`
     : '';
 
+  const origin = server.url ?? `${server.command} ${server.args.join(' ')}`;
   const body = `# ${server.name}\n\n`
     + `Imported automatically from your host ${server.source} configuration `
-    + `(\`${server.command} ${server.args.join(' ')}\`). Abjects bridges this MCP `
+    + `(\`${origin}\`). Abjects bridges this MCP `
     + `server directly through its own MCPBridge, so the host tool does not need to `
     + `be running. Enable the skill to start the bridge.\n${envNote}`;
 
