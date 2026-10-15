@@ -271,9 +271,9 @@ Per-workspace UI.
 | `abject-store.ts` | AbjectStore | workspace, worker | Persists user objects' source and data, restores them at boot, keeps 10 prior source versions, holds script packages' data |
 | `theme.ts` | Theme (class `ThemeAbject`) | workspace, worker | The workspace's UI theme and presets; broadcasts `themeChanged` |
 | `notification-center.ts` | NotificationCenter | workspace, worker | `notify` events with history; announces each one (terminals show them) and draws toasts where there is a desktop |
-| `job-manager.ts` | JobManager | workspace, worker | Runs submitted code jobs in FIFO queues and broadcasts their progress |
-| `scheduler.ts` | Scheduler | workspace, worker | Time-based entries (`at T do X`) that submit jobs to JobManager; persisted |
-| `trigger-manager.ts` | TriggerManager | workspace, worker | Declarative event rules (`when E on A, send Y to B`), addressed by registered name; persisted |
+| `job-manager.ts` | JobManager | workspace, worker | Runs submitted code jobs in FIFO queues, each in a `Sandbox` of its own, and broadcasts their progress. A stretch of job code may run 10 s without pausing; a job waiting on something that cannot arrive fails at once; `timeoutMs` (at most a day) stops a job that goes that long without progress (`submit_job` and Scheduler pass a day); a job's `call` waits up to a day, since jobs wait on other jobs |
+| `scheduler.ts` | Scheduler | workspace, worker | Time-based entries (`at T do X`) that submit jobs to JobManager; persisted. An entry whose job is still running is not fired again until it ends |
+| `trigger-manager.ts` | TriggerManager | workspace, worker | Declarative event rules (`when E on A, send Y to B`), addressed by registered name; persisted. Filters and payload templates are synchronous expressions, one `Sandbox` per rule, 250 ms each |
 | `collection-store.ts` | CollectionStore | workspace, worker | SQLite-backed collections (`<dataDir>/ws-<id>/collections.db`) with change events and read-only SQL |
 
 The KnowledgeBase in `INFRA_OBJECTS` is the C++/WASM package in `native/knowledge-base`; there is no TypeScript KnowledgeBase here. Storage, FileSystem, Console, SharedState, FileTransfer and MediaStream are capabilities.
@@ -351,7 +351,7 @@ ChatBrowser, the roster window, is under Per-workspace UI.
 | File | Object | Runs | Role |
 |------|--------|------|------|
 | `packages.ts` | Packages | global, worker | Lists installed packages, edits `packages.json` (enable, directories, settings), serves `getSettings` and system-scope package data |
-| `scriptable-abject.ts` | ScriptableAbject | on demand, worker | Abject whose behavior is a JavaScript handler map run in a sandboxed vm; emits `sourceUpdated` |
+| `scriptable-abject.ts` | ScriptableAbject | on demand, worker | Abject whose behavior is a JavaScript handler map run in a `Sandbox` (`src/core/sandbox.ts`): messages, replies and `this.data` cross as copies, each handler or timer may run 1 s without pausing (past that the call fails and the object goes on), timers stop with the object or its source; emits `sourceUpdated` |
 | `wasm-abject.ts` | WasmAbject | on demand, worker | Host side of [docs/WASM_ABI.md](../../docs/WASM_ABI.md): forwards messages to a WebAssembly module referenced by `wasm:sha256:` |
 | `organism.ts` | Organism | on demand, worker | Composite Abject with its own internal registry; organelles (ScriptableAbjects) behind one interface |
 

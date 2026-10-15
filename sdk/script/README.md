@@ -37,8 +37,11 @@ interface State { count: number }
 - **Type-only imports** (`import type`). A runtime import cannot be resolved in
   the sandbox, and forge refuses it.
 - **Sandbox globals.** The standard built-ins (`Math`, `JSON`, `Date`, `Map`,
-  `Promise`, and so on) plus `setTimeout` / `setInterval`; no `require`,
-  `fetch` or `crypto`. HTTP goes through the `HttpClient` abject; secure
+  `Promise`, `BigInt`, `Intl`, and so on) plus `setTimeout` / `setInterval`;
+  no `require`, `fetch`, `crypto` or `import()`. Messages, replies and
+  `this.data` are copies (JSON and `Uint8Array`), a handler or timer callback
+  may run 1 s without pausing, and timers stop when the object stops or its
+  source is replaced. HTTP goes through the `HttpClient` abject; secure
   randomness, hashes and HMACs through the `Crypto` abject.
 - **`this.data`** is durable and visible to the model through `ask`. Keep
   secrets in package settings (type `secret`) or Storage instead.

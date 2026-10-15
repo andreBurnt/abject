@@ -36,8 +36,8 @@ export async function runDoctor(dataDir: string): Promise<void> {
   const edition = cliEdition();
   line('ok', `abject ${cliVersion()} (${servesDesktop() ? 'server' : edition} edition)${installHome() ? `, installed in ${installHome()}` : ''}`);
   const [major, minor] = process.versions.node.split('.').map(Number);
-  line(major > 22 || (major === 22 && minor >= 5) ? 'ok' : 'fail', `runtime Node ${process.versions.node}`,
-    major > 22 || (major === 22 && minor >= 5) ? undefined : 'Abject needs Node 22.5 or newer (node:sqlite).');
+  line(major > 22 || (major === 22 && minor >= 8) ? 'ok' : 'fail', `runtime Node ${process.versions.node}`,
+    major > 22 || (major === 22 && minor >= 8) ? undefined : 'Abject needs Node 22.8 or newer (node:sqlite, and the code sandbox).');
 
   try {
     fs.mkdirSync(dataDir, { recursive: true });

@@ -235,8 +235,9 @@ and the capability object decides.
 - **`identity.ts`**: peer identity primitives. A PeerId is the hex SHA-256 of
   the public signing key; ECDSA for signatures, ECDH plus AES-256-GCM for
   channels.
-- **`sandbox.ts`**: the `vm` sandbox that runs script code (no `require`,
-  `fetch`, `process` or other host globals).
+- **`sandbox.ts`**: the `vm` sandbox that runs script code. Nothing of the
+  host is in reach (a `DONT_CONTEXTIFY` context; values cross as copies) and
+  every stretch of code runs under a time limit, after an `await` too.
 - **`knowledge.ts`**: the KnowledgeBase message vocabulary. The KnowledgeBase
   itself is the C++/WASM package in `native/knowledge-base`; there is no
   TypeScript one.
@@ -331,7 +332,7 @@ Other notable objects:
 
 - **ScriptableAbject**: an object whose behavior is a JavaScript handler map,
   run in the `vm` sandbox with a `this` shim (`call`, `dep`, `find`,
-  `changed`, `emit`, `observe`). Objects people create, generated proxies and
+  `changed`, `emit`, `observe`) that reaches the host by copies only. Objects people create, generated proxies and
   script packages are ScriptableAbjects. AbjectStore persists their snapshots
   and keeps a ring of prior sources.
 - **WasmAbject**: an object backed by a WebAssembly module (section 5.5).
@@ -692,8 +693,9 @@ The main thread stays small (the bus, the registries, the sockets) so routing
 never waits behind an agent or a model call; work spreads across worker
 threads with their own heaps, and a worker that dies is rebuilt rather than
 taking the instance down. Generated code runs as handler maps in a `vm`
-context with no host globals: everything it does is a message to a
-capability object. Code in other languages runs as WASM, with three host
+context that holds nothing of the host: what crosses in or out is a copy,
+every stretch of it runs under a time limit, and everything it does is a
+message to a capability object. Code in other languages runs as WASM, with three host
 imports (send a message, log, read the clock) and no filesystem or sockets.
 
 ## 7. Extension Points

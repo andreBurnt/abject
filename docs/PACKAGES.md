@@ -76,9 +76,13 @@ Nothing may sit outside the expression, not even a leading comment in a
 JavaScript entry. Helpers and constants go inside it as `_` members, which are
 not message handlers; forge refuses top-level declarations.
 
-The sandbox has no Node or browser globals (no `require`, `fetch`, `crypto`);
-everything else is reached by message through `this` (`call`, `dep`, `find`,
-`emit`, `observe`, `changed`, `data`, `saveData`). `sdk/script/abject.d.ts`
+The sandbox has no Node or browser globals (no `require`, `fetch`, `crypto`,
+`import()`); everything else is reached by message through `this` (`call`,
+`dep`, `find`, `emit`, `observe`, `changed`, `data`, `saveData`). What crosses
+in and out (messages, replies, `this.data`) is a copy, a handler or timer
+callback may run 1 s without pausing (past that the call fails and the
+object goes on), and timers stop when the object stops or its source is
+replaced. `sdk/script/abject.d.ts`
 types all of it for TypeScript; see `examples/tally-ts`. For secure random
 tokens, hashes, HMACs, password hashing and signature checks, ask the `Crypto`
 object (`this.call(this.dep('Crypto'), 'randomBytes', {})`); `Math.random` is

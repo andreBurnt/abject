@@ -124,7 +124,7 @@ service.
 
 ### From Source: Prerequisites
 
-- **Node.js 22.5+** (the server uses `node:sqlite`). Download from [nodejs.org](https://nodejs.org) or use [nvm](https://github.com/nvm-sh/nvm) (`.nvmrc` pins 22).
+- **Node.js 22.8+** (the server uses `node:sqlite`, and its code sandbox needs 22.8). Download from [nodejs.org](https://nodejs.org) or use [nvm](https://github.com/nvm-sh/nvm) (`.nvmrc` pins 22).
 - **pnpm** - install via `npm install -g pnpm` or see [pnpm.io/installation](https://pnpm.io/installation) for other methods (Homebrew, Corepack, standalone script, etc.).
 
 ### From Source: Setup

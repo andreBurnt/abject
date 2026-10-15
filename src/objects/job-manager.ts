@@ -9,7 +9,7 @@ import { AbjectId, AbjectMessage, InterfaceId } from '../core/types.js';
 import { Abject, DEFERRED_REPLY } from '../core/abject.js';
 import { request, event } from '../core/message.js';
 import { require as contractRequire, requireNonEmpty } from '../core/contracts.js';
-import { validateCode, runSandboxed, SANDBOX_BUILTIN_NAMES } from '../core/sandbox.js';
+import { Sandbox, SandboxTimeLimitError } from '../core/sandbox.js';
 import { Log } from '../core/timed-log.js';
 import { levenshtein } from './source-diff.js';
 
@@ -20,8 +20,17 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 const JOBMANAGER_INTERFACE: InterfaceId = 'abjects:job-manager';
 
-// Sandbox builtins, blocked patterns, and execution are provided by core/sandbox.ts.
-// JobManager only supplies its own application-level context (call, dep, find, progress).
+// The sandbox (core/sandbox.ts) runs the code; JobManager supplies the helpers
+// (call, dep, find, ask, decide, progress) and the limits.
+
+/** Longest a stretch of job code may run without pausing. */
+const JOB_SLICE_MS = 10_000;
+/**
+ * A day: how long a job waits on one call, and the longest inactivity limit a
+ * submitter may ask for. Jobs wait on other jobs, which wait on others in
+ * turn, so the wait has to cover the whole chain below it.
+ */
+const JOB_WAIT_MS = 86_400_000;
 
 export interface Job {
   id: string;
@@ -38,6 +47,8 @@ export interface Job {
   requestMessageId?: string;
   /** Extra values bound into the sandbox context alongside call/dep/find. */
   context?: Record<string, unknown>;
+  /** Stop the job when it goes this long without progress (ms). Unset: no limit. */
+  timeoutMs?: number;
   status: 'queued' | 'running' | 'completed' | 'failed';
   result?: unknown;
   error?: string;
@@ -51,8 +62,18 @@ interface QueueState {
   queue: string[];
   processing: boolean;
   currentJobId?: string;
-  currentCallMsgId?: string;
-  currentJobCallerId?: AbjectId;
+}
+
+/**
+ * A running job's view of its own calls, so progress from a callee keeps its
+ * inactivity limit from firing. Kept per job, never per queue: a job stopped
+ * at its limit can still have calls in flight while the next one runs.
+ */
+interface RunningJob {
+  /** Objects this job is waiting on, with how many calls to each. */
+  awaiting: Map<AbjectId, number>;
+  /** The job made progress: restart its inactivity limit. */
+  touch(): void;
 }
 
 export interface JobResult {
@@ -77,6 +98,7 @@ export class JobManager extends Abject {
   private static readonly DEFAULT_QUEUE = 'default';
   private jobCounter = 0;
   private pendingResolvers: Map<string, (job: Job) => void> = new Map();
+  private running: Map<string, RunningJob> = new Map();
   private consoleId?: AbjectId;
 
   constructor() {
@@ -98,6 +120,7 @@ export class JobManager extends Abject {
                   { name: 'description', type: { kind: 'primitive', primitive: 'string' }, description: 'Human-readable job description' },
                   { name: 'code', type: { kind: 'primitive', primitive: 'string' }, description: 'JavaScript code to execute' },
                   { name: 'queue', type: { kind: 'primitive', primitive: 'string' }, description: 'Named queue for concurrent execution (default: "default")', optional: true },
+                  { name: 'timeoutMs', type: { kind: 'primitive', primitive: 'number' }, description: 'Stop the job when it goes this long without progress: no call answered, no progress reported. At most a day; unset: no limit.', optional: true },
                 ],
                 returns: { kind: 'reference', reference: 'JobResult' },
               },
@@ -180,21 +203,20 @@ export class JobManager extends Abject {
     // (which is exactly the submitJob callers tracked per queue).
 
     this.on('submitJob', async (msg: AbjectMessage) => {
-      const { description, code, queue: queueName, context: userContext } = msg.payload as {
+      const { description, code, queue: queueName, context: userContext, timeoutMs } = msg.payload as {
         description: string; code: string; queue?: string;
-        context?: Record<string, unknown>;
+        context?: Record<string, unknown>; timeoutMs?: number;
       };
       requireNonEmpty(description, 'description');
       requireNonEmpty(code, 'code');
 
-      // Defence-in-depth: reject code that tries to use raw Node.js APIs.
-      const validation = validateCode(code);
-      if (!validation.valid) {
-        log.info(`BLOCKED job from ${msg.routing.from}: code contains '${validation.blocked}'`);
-        throw new Error(
-          `Job code rejected: '${validation.blocked}' is not allowed. ` +
-          `Use call(), dep(), and find() to discover and invoke system capabilities.`,
-        );
+      // Refuse at once what could never run, with the reason.
+      try {
+        Sandbox.checkSource(code, 'body');
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        log.info(`Rejected job from ${msg.routing.from}: ${reason}`);
+        throw new Error(`Job code rejected: ${reason}`);
       }
 
       // User-supplied context values cannot shadow built-in names.
@@ -220,6 +242,7 @@ export class JobManager extends Abject {
         taskId: typeof (msg.payload as any)?.taskId === 'string' ? (msg.payload as any).taskId : undefined,
         requestMessageId: msg.header.messageId,
         context: sanitisedContext,
+        ...(typeof timeoutMs === 'number' && timeoutMs > 0 ? { timeoutMs: Math.min(timeoutMs, JOB_WAIT_MS) } : {}),
         status: 'queued',
         queuedAt: Date.now(),
       };
@@ -334,7 +357,7 @@ export class JobManager extends Abject {
         await this.log('info', `Job started: ${job.description}`, { jobId, queue: job.queue });
 
         try {
-          const result = await this.executeCode(job.code, job.callerId, q, job.context);
+          const result = await this.executeJob(job);
           job.status = 'completed';
           job.result = result;
           this.changed('jobCompleted', { jobId, description: job.description, queue: job.queue, result });
@@ -418,14 +441,18 @@ export class JobManager extends Abject {
     );
   }
 
-  private async executeCode(
-    code: string,
-    callerId: AbjectId | undefined,
-    q: QueueState,
-    userContext?: Record<string, unknown>,
-  ): Promise<unknown> {
-    q.currentJobCallerId = callerId;
-    log.info(`Executing job code (queue: ${q.name}):\n${code}`);
+  /**
+   * Run one job in a sandbox of its own, under three limits: a stretch of
+   * code that runs past JOB_SLICE_MS is stopped; a job waiting on something
+   * nothing can deliver (no call outstanding, no timer set) fails at once;
+   * and a job with a `timeoutMs` is stopped when it goes that long without
+   * progress. Whichever way it ends, its sandbox is disposed, so its timers
+   * and late answers die with it.
+   */
+  private async executeJob(job: Job): Promise<unknown> {
+    const callerId = job.callerId;
+    const userContext = job.context;
+    log.info(`Executing job code (queue: ${job.queue}):\n${job.code}`);
 
     // Names resolved during this job. Scoped to the run rather than to the
     // object: an id belongs to one object for its lifetime, but a respawn
@@ -493,20 +520,22 @@ export class JobManager extends Abject {
       }
       const resolved = await resolveTarget(to);
       const msg = request(this.id, resolved as AbjectId, actualMethod, actualPayload);
-      q.currentCallMsgId = msg.header.messageId;
-      this.invocationContexts.set(msg.header.messageId,{callerId:q.currentJobCallerId,taskId:q.currentJobId ? this.jobs.get(q.currentJobId)?.taskId : undefined,target:resolved as AbjectId});
+      this.invocationContexts.set(msg.header.messageId, { callerId, taskId: job.taskId, target: resolved as AbjectId });
+      running.awaiting.set(resolved, (running.awaiting.get(resolved) ?? 0) + 1);
       try {
-        return await this.request<unknown>(msg, 600000);
+        return await this.request<unknown>(msg, JOB_WAIT_MS);
       } finally {
         this.invocationContexts.delete(msg.header.messageId);
-        q.currentCallMsgId = undefined;
+        const left = (running.awaiting.get(resolved) ?? 1) - 1;
+        if (left > 0) running.awaiting.set(resolved, left); else running.awaiting.delete(resolved);
       }
     };
 
     const progressFn = async (message?: string) => {
-      if (q.currentJobCallerId) {
+      running.touch();
+      if (callerId) {
         this.send(
-          event(this.id, q.currentJobCallerId, 'progress',
+          event(this.id, callerId, 'progress',
             { message: message ?? 'working', taskId: userContext?.taskId })
         );
       }
@@ -542,7 +571,7 @@ export class JobManager extends Abject {
       // asked itself for its state, got "busy executing 1 skill task" back,
       // and reported that to the user as a finding about the subject it was
       // supposed to be investigating.
-      if (q.currentJobCallerId && target === q.currentJobCallerId) {
+      if (callerId && target === callerId) {
         throw new Error('ask: that object is you. Asking yourself returns your own description, or the busy notice while you are working — neither is evidence. Answer from what you already know, or do the work and report what it returns.');
       }
       return callFn(target as AbjectId, 'ask', { question });
@@ -556,25 +585,61 @@ export class JobManager extends Abject {
     const decideFn = async (state: unknown, questions: Record<string, unknown>) =>
       callFn('LLM', 'decide', { state, questions });
 
-    // Caller-bound values first; built-ins second so they cannot be shadowed.
-    const context: Record<string, unknown> = {
-      ...(userContext ?? {}),
-      ask: askFn,
-      decide: decideFn,
-      call: callFn,
-      dep: depFn,
-      find: findFn,
-      id: this.id,
-      progress: progressFn,
+    // The inactivity limit: restarted by every stretch of code that runs
+    // (each answered call, each timer) and by progress, the job's own or a
+    // callee's (onProgressBubble).
+    let stallTimer: ReturnType<typeof setTimeout> | undefined;
+    let stalled!: (err: Error) => void;
+    const stop = new Promise<never>((_, reject) => { stalled = reject; });
+    stop.catch(() => { /* raced below */ });
+    const touch = (): void => {
+      if (!job.timeoutMs) return;
+      if (stallTimer) clearTimeout(stallTimer);
+      stallTimer = setTimeout(() => stalled(new Error(
+        `Job stopped: no progress for ${Math.round(job.timeoutMs! / 1000)} s (its time limit). ` +
+        'Call progress() during long work, or split it into separate jobs.')), job.timeoutMs);
     };
+    const running: RunningJob = { awaiting: new Map(), touch };
 
+    const sandbox = new Sandbox({
+      filename: `${job.id}.js`,
+      sliceMs: JOB_SLICE_MS,
+      timers: true,
+      failStuckCalls: true,
+      asyncHelpers: { ask: askFn, decide: decideFn, call: callFn, dep: depFn, find: findFn, progress: progressFn },
+      onSlice: touch,
+    });
+    this.running.set(job.id, running);
     try {
-      return await runSandboxed(code, context, {
-        filename: `job-${this.jobCounter}.js`,
-      });
+      // Caller-bound values are copied in; the helpers above cannot be shadowed
+      // (RESERVED_CONTEXT_KEYS dropped those names at submit).
+      const globals: Record<string, unknown> = { id: this.id };
+      for (const [key, value] of Object.entries(userContext ?? {})) {
+        if (/^[A-Za-z_$][\w$]*$/.test(key)) globals[key] = value;
+        else log.warn(`${job.id}: context key "${key}" is not a name code can use; left out`);
+      }
+      sandbox.setGlobals(globals);
+      const body = sandbox.compileBody(job.code);
+      touch();
+      return await Promise.race([sandbox.run(body), stop]);
+    } catch (err) {
+      if (err instanceof SandboxTimeLimitError) {
+        throw new Error(
+          `Job stopped: its code ran for more than ${JOB_SLICE_MS / 1000} s without pausing. ` +
+          'Split long computations into pieces with `await new Promise(r => setTimeout(r, 0))` between them.');
+      }
+      throw err;
     } finally {
-      q.currentJobCallerId = undefined;
-      q.currentCallMsgId = undefined;
+      if (stallTimer) clearTimeout(stallTimer);
+      this.running.delete(job.id);
+      sandbox.dispose(`${job.id} finished`);
+    }
+  }
+
+  /** Progress from an object a running job is waiting on keeps that job's limit from firing. */
+  protected override onProgressBubble(msg: AbjectMessage): void {
+    for (const running of this.running.values()) {
+      if (running.awaiting.has(msg.routing.from)) running.touch();
     }
   }
 
@@ -589,21 +654,29 @@ export class JobManager extends Abject {
 ### Submit a job for execution
 
   const result = await call(await dep('JobManager'), 'submitJob', {
-    description: 'Calculate stats', code: 'return 2 + 2;', queue: 'default'
+    description: 'Calculate stats', code: 'return 2 + 2;', queue: 'default', timeoutMs: 86400000
   });
   // result: { jobId, status: 'completed'|'failed'|'cancelled', result?, error? }
 
-Jobs run in a sandboxed environment. Only these helpers and built-ins are available:
+Jobs run in a sandbox. These helpers are available:
 - \`call(target, method, payload)\` — invoke a method on another object. Returns the method's reply.
 - \`dep(name)\` — resolve a dependency by name. Returns a Promise<AbjectId> (a string).
 - \`find(query)\` — find objects in the registry. Returns a Promise<AbjectId | null>. A miss is not proof of absence; ask the Registry.
 - \`decide(state, questions)\`: typed judgments with probabilities, no prose: \`{ q1: { type: 'choice', instructions, criteria: { key: 'meaning', ... } }, q2: { type: 'noul', instructions }, q3: { type: 'score', instructions, criteria: ['low', 'mid', 'high'] } }\`. Returns \`{ answers: { q1: { choice, confidence, probabilities }, q2: { noul }, q3: { score, confidence } }, emulated, calibrated }\`. Keep control flow in code; act on confident answers.
 - \`ask(question)\` — ask the Registry "which object does X?" from its whole catalog. \`ask(target, question)\` asks one object (AbjectId or registered name) about itself. Returns its answer as text.
 - \`id\` — this object's AbjectId
-- \`progress(pct)\` — report progress (0-100)
-- Built-ins: ${SANDBOX_BUILTIN_NAMES.join(', ')}
+- \`progress(message)\` — report that the job is still working
+- The standard JavaScript built-ins (Math, JSON, Date, BigInt, Intl, Map, Set, typed arrays, ...) and \`setTimeout\`, \`setInterval\`, \`clearTimeout\`, \`clearInterval\`
 
-No other globals exist. require, fetch, process, Buffer, setTimeout, and all Node.js/browser APIs are unavailable. Use \`dep(name)\` or \`find(query)\` to discover available system capabilities at runtime.
+What goes into a helper and what comes back are copies: JSON values and Uint8Array. Node and browser APIs (require, fetch, process, Buffer) do not exist; reach what they would provide by message, through \`dep(name)\` or \`find(query)\`.
+
+### Limits
+
+- A stretch of code may run for 10 s without pausing; past that it is stopped. Split a long computation into pieces with \`await new Promise(r => setTimeout(r, 0))\` between them.
+- A job waiting on something that can never arrive (no call outstanding, no timer set) fails at once.
+- With \`timeoutMs\`, a job is stopped when it goes that long without progress: no call answered, no \`progress()\`. The most it can be is a day.
+- A \`call\` waits up to a day for its answer, and progress from the object answering keeps it waiting.
+- When a job ends, its timers end with it.
 
 ### Calling objects — the canonical pattern
 

@@ -256,11 +256,23 @@ All but `file-edit.ts` and `tool-output.ts` import Node built-ins (`fs`,
   `truncateHead` (file reads) and `truncateTail` (command output), line and
   byte budgets (`DEFAULT_MAX_LINES` 2000, `DEFAULT_MAX_BYTES` 50 KB),
   `continuationNotice`, `droppedNotice`, `formatSize`.
-- **sandbox.ts**: Node `vm` sandbox for untrusted JavaScript.
-  `SANDBOX_BUILTINS` / `SANDBOX_BUILTIN_NAMES`, `BLOCKED_CODE_PATTERNS` +
-  `validateCode()`, `runSandboxed()` (async body) and `compileSandboxed()`
-  (handler-map object expression, used by ScriptableAbject). Also used by
-  JobManager and TriggerManager.
+- **sandbox.ts**: `Sandbox`, the context untrusted JavaScript runs in (job
+  code, generated and package objects, trigger expressions). The context is
+  created with `DONT_CONTEXTIFY`, so nothing in it belongs to the host; values
+  cross as copies (JSON, plus Uint8Array and the non-finite numbers, like the
+  wire codec), and helpers are wrappers inside the sandbox that reach the host
+  through one function taking and returning strings. Every entry into
+  sandbox code (a call, an answered helper call's continuation, a timer) is a
+  timed slice under `microtaskMode: 'afterEvaluate'`, so code after an
+  `await` is limited too; a slice that runs over fails every pending call
+  (`SandboxTimeLimitError`). Source is checked with acorn first: it must stay
+  in its wrapper, `import()` is refused, and for job code and expressions
+  `require`/`fetch`/`process` are refused with a reach-it-by-message hint
+  (`SandboxSourceError`). `compileBody` (JobManager), `compileExpression`
+  (TriggerManager), `installHandlers` (ScriptableAbject), `checkHandlers`
+  (compile checks, forge). Do not enable `async_hooks.createHook` in a
+  process that runs sandboxes: Node aborts when a slice is stopped inside a
+  promise continuation while a hook is enabled.
 
 ### Agents, goals and decisions
 

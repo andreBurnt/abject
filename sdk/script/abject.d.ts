@@ -3,9 +3,10 @@
  *
  * A script abject is one handler-map expression: an object literal whose
  * methods answer messages. It runs as a ScriptableAbject in a sandbox with no
- * Node or browser globals (no fetch, require, timers beyond setTimeout /
- * setInterval, no crypto); everything else is reached by message through
- * `this`. Secure randomness, hashes, HMACs and password hashing come from the
+ * Node or browser globals (no fetch, require, import(), timers beyond
+ * setTimeout / setInterval, no crypto); everything else is reached by message
+ * through `this`. Messages, replies and `this.data` cross as copies, and a
+ * handler may run 1 s without pausing. Secure randomness, hashes, HMACs and password hashing come from the
  * Crypto object (`this.call(this.dep('Crypto'), 'randomBytes', {})`).
  * `pnpm forge` compiles the TypeScript and erases these types, so
  * import them with `import type` only:

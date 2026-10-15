@@ -20,6 +20,8 @@ const log = new Log('Scheduler');
 const SCHEDULER_INTERFACE: InterfaceId = 'abjects:scheduler';
 const STORAGE_KEY = 'scheduler:entries';
 const TICK_INTERVAL_MS = 60_000; // check schedules every 60s
+/** How long a scheduled job may go without progress: a day. */
+const JOB_TIMEOUT_MS = 86_400_000;
 
 export interface ScheduleEntry {
   id: string;
@@ -56,6 +58,8 @@ export class Scheduler extends Abject {
   private jobManagerId?: AbjectId;
   private tickTimerId?: string;
   private entries = new Map<string, ScheduleEntry>();
+  /** Schedules whose job is still running; they are not fired again until it ends. */
+  private running = new Set<string>();
   private entryCounter = 0;
 
   constructor() {
@@ -361,21 +365,26 @@ export class Scheduler extends Abject {
       if (!entry.enabled) continue;
       if (now < entry.nextRun) continue;
       if (!this.jobManagerId) continue;
+      // A job can run for hours. Waiting on it here would leave nextRun
+      // unchanged until it ended, so every tick in between would fire it again.
+      if (this.running.has(entry.id)) continue;
 
       log.info(`Schedule "${entry.description}" (${entry.id}) firing`);
-      try {
-        await this.request(
-          request(this.id, this.jobManagerId, 'submitJob', {
-            description: `[Scheduled] ${entry.description}`,
-            code: entry.jobCode,
-            queue: entry.queue,
-          }),
-          300000,
-        );
-        log.info(`Schedule "${entry.description}" job completed`);
-      } catch (err) {
-        log.warn(`Schedule "${entry.description}" job failed:`, err instanceof Error ? err.message : String(err));
-      }
+      const { id, description } = entry;
+      this.running.add(id);
+      this.request(
+        request(this.id, this.jobManagerId, 'submitJob', {
+          description: `[Scheduled] ${description}`,
+          code: entry.jobCode,
+          queue: entry.queue,
+          // Stops the job when this request gives up on it.
+          timeoutMs: JOB_TIMEOUT_MS,
+        }),
+        JOB_TIMEOUT_MS,
+      ).then(
+        () => log.info(`Schedule "${description}" job completed`),
+        (err) => log.warn(`Schedule "${description}" job failed:`, err instanceof Error ? err.message : String(err)),
+      ).finally(() => this.running.delete(id));
 
       entry.lastRun = now;
 
@@ -384,8 +393,8 @@ export class Scheduler extends Abject {
       } else if (entry.hour !== undefined && entry.minute !== undefined) {
         entry.nextRun = this.computeNextDailyRun(entry.hour, entry.minute, entry.timezone);
       } else if (entry.runAt !== undefined) {
-        // One-shot: fire-once-and-delete. The job-submit above ran
-        // whether or not it succeeded; either way we don't fire again.
+        // One-shot: fire-once-and-delete. The job submitted above runs
+        // on; whether or not it succeeds, we don't fire again.
         toDelete.push(entry.id);
       }
 

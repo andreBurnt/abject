@@ -49,7 +49,7 @@ import { fileURLToPath } from 'node:url';
 import { AbjectManifest } from '../core/types.js';
 import { require } from '../core/contracts.js';
 import { Log } from '../core/timed-log.js';
-import { compileSandboxed } from '../core/sandbox.js';
+import { Sandbox } from '../core/sandbox.js';
 import { packageOwner } from '../core/packages.js';
 import { WASM_ABI_VERSION, looksLikeManifest } from './wasm-abi.js';
 import { storeWasmModule } from './wasm-module-store.js';
@@ -325,13 +325,11 @@ export async function readPackage(pkgDir: string): Promise<ExtensionPackage> {
  * ScriptableAbject makes before it installs source. Returns the handler names.
  */
 export function checkScriptSource(source: string, filename = 'package.js'): string[] {
-  let handlers: Record<string, unknown>;
   try {
-    handlers = compileSandboxed(source, {}, { filename });
+    return Sandbox.checkHandlers(source, filename);
   } catch (err) {
     throw new Error(`source does not compile to a handler map: ${err instanceof Error ? err.message : err}`);
   }
-  return Object.keys(handlers).filter(k => typeof handlers[k] === 'function');
 }
 
 // ── Finding and choosing packages ────────────────────────────────────

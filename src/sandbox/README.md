@@ -86,8 +86,8 @@ Package discovery and boot-time ingest.
   (`{ guide, tier }`; the guide file is read once here). WASM packages need
   `abi: 1` and a module (default `main.wasm`); script packages need a built
   `source`, or an `entry` that is already `.js`/`.cjs`/`.mjs`.
-- `loadPackageManifest()`, `checkScriptSource()` (compiles the source in the
-  sandbox and returns its handler names), `compareVersions()`.
+- `loadPackageManifest()`, `checkScriptSource()` (compiles the source in a
+  throwaway `Sandbox` and returns its handler names), `compareVersions()`.
 - `extensionsDir()`, `findBuiltinNativeDir()`, `packageRoots(config)`,
   `discoverPackages(roots)`, `scanExtensions(dir)`.
 - `resolvePackages(discovered, config)`: later roots win a type name when
@@ -183,8 +183,9 @@ an installed backend it sets `ABJECTS_NATIVE_DIR` to the install's
 ## Security Model
 
 A script package's abjects run in the same sandbox as any ScriptableAbject
-(no Node or browser globals; everything by message), on the worker pool when
-workers are enabled. Package abjects of either runtime are owned by
+(`src/core/sandbox.ts`: nothing of the host in reach, values crossing as
+copies, every stretch of code time-limited; everything by message), on the
+worker pool when workers are enabled. Package abjects of either runtime are owned by
 `package:<name>`, which makes a script one's source and manifest read-only
 (reinstalling the package is the only way to change them) and keeps their
 data (a script's `saveData`, a WASM module's `persist`) under `package/<Type>`

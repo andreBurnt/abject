@@ -47,8 +47,8 @@ const lib = path.join(stage, 'lib');
 const exe = process.platform === 'win32' ? 'abject.exe' : 'abject';
 
 const [major, minor] = process.versions.node.split('.').map(Number);
-if (major < 22 || (major === 22 && minor < 5)) {
-  throw new Error(`package-${edition}: the binary is a copy of this Node (${process.versions.node}); build with Node 22.5 or newer (24 for releases).`);
+if (major < 22 || (major === 22 && minor < 8)) {
+  throw new Error(`package-${edition}: the binary is a copy of this Node (${process.versions.node}); build with Node 22.8 or newer (24 for releases).`);
 }
 
 const run = (cmd, args, cwd = root, extra = {}) =>

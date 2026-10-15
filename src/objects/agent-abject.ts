@@ -931,8 +931,12 @@ export class AgentAbject extends Abject {
    */
   private static readonly PATTERN_ENTRY_CHAR_CAP = 3000;
 
-  /** submit_job pipelines may legitimately run many bus calls; give them room. */
-  private static readonly SUBMIT_JOB_TIMEOUT_MS = 300000;
+  /**
+   * How long a submit_job may go without progress: a day. A job may wait on
+   * other jobs, which wait on others in turn, so the limit has to cover the
+   * whole chain below it.
+   */
+  private static readonly SUBMIT_JOB_TIMEOUT_MS = 86_400_000;
   /** Keep-alive cadence to the caller while a submit_job runs (under every watchdog). */
   private static readonly JOB_KEEPALIVE_MS = 30_000;
   /** Cap on a job result entering the conversation; jobs should aggregate. */
@@ -3481,6 +3485,9 @@ The registered object must implement these handlers to participate in the agent 
                         // Dedicated queue per agent: pipeline jobs never
                         // interleave with the OTA loop's own phase jobs.
                         queue: `pipeline-${entry.agentId.slice(0, 8)}`,
+                        // The job stops when this request would: after the
+                        // same stretch with no progress.
+                        timeoutMs: AgentAbject.SUBMIT_JOB_TIMEOUT_MS,
                       }),
                       AgentAbject.SUBMIT_JOB_TIMEOUT_MS,
                     ).finally(() => this.cancelTimer(jobHeartbeat));
@@ -5186,6 +5193,8 @@ Use it when your next chunk of work is a mechanical multi-step sequence with no 
 { "action": "submit_job", "description": "summarize open goals", "code": "const gm = await dep('GoalManager'); const goals = await call(gm, 'listGoals', {}); return goals.filter(g => g.status === 'active').map(g => g.title);" }
 \`\`\`
 Keep the return value small — aggregate or summarize inside the job instead of returning raw bulk data (results are truncated past 20k chars). Use your regular actions when each step's outcome should change what you do next; use one job when it wouldn't. Your own domain actions (browsing, shell, drafting) stay as actions — the job sandbox has no browser, no shell, and no filesystem, only object messaging.
+
+Limits: a stretch of job code may run 10 s without pausing, so split a long computation into pieces with \`await new Promise(r => setTimeout(r, 0))\` between them; a job that goes a day without an answered call or a \`progress()\` is stopped; values passed to and from \`call\` are copies (JSON and Uint8Array).
 
 Object names in job code must be EXACT registered object names as they appear in your context (goals, scratchpad, registry listings) — a skill, service, or server name is not an object name. When unsure a name exists, use \`find(name)\` and handle null instead of \`dep(name)\`, which fails the whole job. Anything you reach through a dedicated action of yours (like a tool-call action) has no object of that name on the bus; keep using your action for it.
 

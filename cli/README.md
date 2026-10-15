@@ -295,7 +295,7 @@ binary. Other installs (Homebrew, Scoop, winget, Docker, a checkout) are told
 to update the way they were installed; the desktop edition points at the
 app's updater.
 
-**Doctor** checks the version and edition, Node 22.5 or newer, a writable data
+**Doctor** checks the version and edition, Node 22.8 or newer, a writable data
 directory, a live backend (and through it, a configured model and waiting
 questions), a pid that is alive but not answering, ports taken by something
 else, and on the headless edition start at login and Chromium; finally `npx`

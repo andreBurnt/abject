@@ -9,9 +9,12 @@
  *     }
  *   })
  *
- * Handler functions run in a sandboxed vm context. A `this`-proxy shim
- * provides this.call(), this.dep(), this.find(), this.changed(), this.emit(),
- * and this.observe() without exposing the real Abject instance or Node.js APIs.
+ * Handler functions run in a Sandbox (src/core/sandbox.ts): a context of their
+ * own where `this` offers this.call(), this.dep(), this.find(), this.changed(),
+ * this.emit(), this.observe(), this.saveData() and the live this.id and
+ * this.data. Nothing of the real Abject or of Node crosses in: messages,
+ * replies and data cross as copies, and each stretch of handler code runs
+ * under a time limit.
  */
 
 import { withKeyedLock } from '../core/keyed-lock.js';
@@ -23,11 +26,11 @@ import {
   EventDeclaration,
   InterfaceId,
 } from '../core/types.js';
-import { Abject, MessageHandlerFn } from '../core/abject.js';
+import { Abject } from '../core/abject.js';
 import { require as contractRequire } from '../core/contracts.js';
 import { request, event } from '../core/message.js';
 import { INTROSPECT_METHODS, INTROSPECT_EVENTS } from '../core/introspect.js';
-import { validateCode, compileSandboxed } from '../core/sandbox.js';
+import { Sandbox, SandboxSourceError, type SandboxOutcome } from '../core/sandbox.js';
 import { isPackageOwner, packageNameOf } from '../core/packages.js';
 import { Log } from '../core/timed-log.js';
 import { bytesToHex } from '../core/encoding.js';
@@ -148,14 +151,19 @@ export function mergeScriptableManifest(manifest: AbjectManifest): AbjectManifes
 export class ScriptableAbject extends Abject {
   private _source: string;
   private _owner: AbjectId;
-  private _data: Record<string, unknown>;
+  /** Runs the installed source; `this.data` lives inside it. */
+  private sandbox!: Sandbox;
+  /** What the sandbox's source installed, kept for a rollback to it. */
+  private handlerList: HandlerList = [];
+  /** Every function the source defines, message handler or not. */
+  private _handlerFunctions: Set<string> = new Set();
+  /** The last copy of `this.data` read out, for when the sandbox cannot answer. */
+  private _lastData: Record<string, unknown>;
   private activeUserCalls = 0;
   private activating = false;
   /** Whether a `show` call (by message) left the object on screen; `hide` clears it. */
   private _showing = false;
-  private sourceHandlers?: Record<string, unknown>;
   private _userMethods: Set<string> = new Set();
-  private _userProps: Set<string> = new Set();
   private _depCache: Record<string, AbjectId> = {};
 
   // Coalesced saveData state: at most one save in flight, one queued.
@@ -203,9 +211,9 @@ export class ScriptableAbject extends Abject {
     // Internal data clones with the object via Factory.clone, snapshot restore,
     // and respawn. Source code mutates it as `this.data`; persistence is
     // explicit via `await this.saveData()`.
-    this._data = data ?? {};
+    this._lastData = data ?? {};
 
-    this.compileAndInstall(source);
+    this.compileAndInstall(source, this._lastData);
     this.setupEditableHandlers();
   }
 
@@ -218,22 +226,21 @@ export class ScriptableAbject extends Abject {
   }
 
   /**
-   * Live reference to the internal data record. Used by Factory/AbjectStore to
-   * read what should be persisted or carried with a clone. Callers MUST treat
-   * the returned object as read-only — handler code mutates `this.data`
-   * directly through the proxy.
+   * A copy of the internal data record. Used by Factory/AbjectStore to read
+   * what should be persisted or carried with a clone.
    */
   get dataSnapshot(): Record<string, unknown> {
-    return this._data;
+    return this.readData();
   }
 
   protected override askPrompt(question: string): string {
     let prompt = super.askPrompt(question);
     if (this._source) prompt += '\n\nSource code:\n' + this._source;
-    if (this._data && Object.keys(this._data).length > 0) {
+    const data = this.readData();
+    if (Object.keys(data).length > 0) {
       let dataJson: string;
       try {
-        dataJson = JSON.stringify(this._data, null, 2);
+        dataJson = JSON.stringify(data, null, 2);
       } catch {
         dataJson = '(non-serializable)';
       }
@@ -319,31 +326,31 @@ export class ScriptableAbject extends Abject {
   }
 
   /** Keep synchronous UI handlers synchronous while tracking async work for activation. */
-  private invokeUserHandler(handler: MessageHandlerFn, msg: AbjectMessage): unknown {
+  private invokeUserHandler(name: string, msg: AbjectMessage): unknown {
     // A system-scope package abject's data arrives before its first handler
     // runs; after that this path is synchronous again.
     const loading = this.packageDataReady();
-    if (loading) return loading.then(() => this.invokeUserHandler(handler, msg));
+    if (loading) return loading.then(() => this.invokeUserHandler(name, msg));
     if (this.activating) throw new Error('Source activation in progress; retry against the committed revision');
     this.activeUserCalls++;
     const method = msg.routing.method;
     const lifecycle = method === 'show' || method === 'hide';
+    let outcome: SandboxOutcome;
     try {
-      const result = handler(msg);
-      // Sandboxed Promises belong to another realm; instanceof Promise misses them.
-      if (result != null && typeof (result as { then?: unknown }).then === 'function') {
-        return Promise.resolve(result).then((value) => {
-          if (lifecycle) this._showing = method === 'show';
-          return value;
-        }).finally(() => { this.activeUserCalls--; });
-      }
-      if (lifecycle) this._showing = method === 'show';
-      this.activeUserCalls--;
-      return result;
+      outcome = this.sandbox.invoke(name, [msg]);
     } catch (err) {
       this.activeUserCalls--;
       throw err;
     }
+    if (!outcome.sync) {
+      return outcome.promise.then((value) => {
+        if (lifecycle) this._showing = method === 'show';
+        return value;
+      }).finally(() => { this.activeUserCalls--; });
+    }
+    if (lifecycle) this._showing = method === 'show';
+    this.activeUserCalls--;
+    return outcome.value;
   }
 
   private setupEditableHandlers(): void {
@@ -367,12 +374,8 @@ export class ScriptableAbject extends Abject {
 
     this.on('getData', async () => {
       await this.packageDataReady();
-      // Deep-copy via JSON round-trip so callers can't mutate the live record.
-      try {
-        return JSON.parse(JSON.stringify(this._data));
-      } catch {
-        return {};
-      }
+      // A copy: callers can't mutate the live record.
+      return this.readData();
     });
 
     // Prototype replication across peers: return everything needed to grow an
@@ -385,14 +388,7 @@ export class ScriptableAbject extends Abject {
     // (spawn with { manifest, source, data }).
     this.on('replicate', async (msg: AbjectMessage) => {
       const { withData } = (msg.payload ?? {}) as { withData?: boolean };
-      let data: Record<string, unknown> | undefined;
-      if (withData !== false) {
-        try {
-          data = JSON.parse(JSON.stringify(this._data));
-        } catch {
-          data = {};
-        }
-      }
+      const data: Record<string, unknown> | undefined = withData !== false ? this.readData() : undefined;
       const manifest = {
         ...this.manifest,
         lineage: {
@@ -542,46 +538,51 @@ export class ScriptableAbject extends Abject {
           const deadline = Date.now()+10000;
           while (this.activeUserCalls > 0 && Date.now()<deadline) await new Promise(resolve=>setTimeout(resolve,25));
           if (this.activeUserCalls > 0) return {success:false,error:'Live handlers are still running; reconcile their effects before activation'};
-        let prepared: Record<string, MessageHandlerFn> | undefined;
-        try { prepared = compileSandboxed(source, this.buildHandlerProxy(), { filename: `scriptable-${this.manifest.name}.js` }) as Record<string, MessageHandlerFn>; }
-        catch (err) { return { success: false, error: err instanceof Error ? err.message : String(err) }; }
+        // The new source compiles in a sandbox of its own before anything
+        // changes; the old one keeps running until the new one has shown.
         const previousSource = this._source;
-        const previousData = structuredClone(this._data);
+        const previousList = this.handlerList;
+        const previousData = this.readData();
+        const prepared = this.prepareSource(source, previousData);
+        if ('error' in prepared) return { success: false, error: prepared.error, ...(prepared.errorLine !== undefined ? { errorLine: prepared.errorLine } : {}) };
+        const old = this.sandbox;
         // Only an object that was on screen comes back on screen. Re-showing
         // one that was not opened a window nobody asked for, and failed the
         // update outright on an instance with no display. The old hide still
         // runs either way: it is how the old lifecycle lets go of what it holds.
         const wasShowing = this._showing;
         const reshow = async (): Promise<void> => {
-          if (!wasShowing) return;
-          await (this.sourceHandlers?.show as MessageHandlerFn | undefined)?.(msg);
+          if (wasShowing && this._handlerFunctions.has('show')) await this.runLifecycle('show', msg);
         };
-        const currentHide = this.sourceHandlers?.hide as MessageHandlerFn | undefined;
-        try { if (currentHide) await currentHide(msg); }
-        catch (err) {
-          this._data = previousData;
-          let rollbackError: string | undefined;
-          try { const restored = this.applySource(previousSource); if (!restored.success) throw new Error(restored.error); await reshow(); } catch (restore) { rollbackError = String(restore); }
-          return { success: false, error: `Previous lifecycle could not deactivate: ${String(err)}`, rolledBack: !rollbackError, rollbackError };
+        if (this._handlerFunctions.has('hide')) {
+          try { await this.runLifecycle('hide', msg); }
+          catch (err) {
+            prepared.sandbox.dispose('the update was rolled back');
+            let rollbackError: string | undefined;
+            try { old.writeData(previousData); await reshow(); } catch (restore) { rollbackError = String(restore); }
+            return { success: false, error: `Previous lifecycle could not deactivate: ${String(err)}`, rolledBack: !rollbackError, rollbackError };
+          }
         }
-        const result = this.applySource(source, prepared);
-        if (!result.success) { this._data = previousData; return result; }
+        // The new handlers start from the data as the old hide left it.
+        prepared.sandbox.writeData(this.readData());
+        const result = this.activate(prepared, source);
 
-        const newShow = this.sourceHandlers?.show as MessageHandlerFn | undefined;
-        if (newShow && wasShowing) {
-          try { await newShow(msg); }
+        if (wasShowing && this._handlerFunctions.has('show')) {
+          try { await this.runLifecycle('show', msg); }
           catch (err) {
             let rollbackError: string | undefined;
+            const failed = this.sandbox;
             try {
-              await (this.sourceHandlers?.hide as MessageHandlerFn | undefined)?.(msg);
-              this._data = previousData;
-              const restored = this.applySource(previousSource);
-              if (!restored.success) throw new Error(restored.error);
+              if (this._handlerFunctions.has('hide')) await this.runLifecycle('hide', msg);
+              old.writeData(previousData);
+              this.activate({ sandbox: old, list: previousList }, previousSource);
               await reshow();
             } catch (restore) { rollbackError = String(restore); }
+            if (this.sandbox !== failed) failed.dispose('its activation failed');
             return { success: false, error: `Activation failed: ${String(err)}`, rolledBack: !rollbackError, rollbackError };
           }
         }
+        old.dispose('its source was replaced');
         return result;
         } finally { this.activating = false; }
       });
@@ -623,9 +624,8 @@ export class ScriptableAbject extends Abject {
   private installDefaultCloseHandler(): void {
     if (this._userMethods.has('windowCloseRequested')) return;
     this.on('windowCloseRequested', async (msg: AbjectMessage) => {
-      const hideFn = (this as Record<string, unknown>)['hide'];
-      if (typeof hideFn === 'function') {
-        await (hideFn as MessageHandlerFn)(msg);
+      if (this._handlerFunctions.has('hide')) {
+        await this.invokeUserHandler('hide', msg);
         this._showing = false;
       }
     });
@@ -695,7 +695,7 @@ export class ScriptableAbject extends Abject {
    */
   static tryCompile(source: string): string | undefined {
     try {
-      compileSandboxed(source, {});
+      Sandbox.checkHandlers(source, 'scriptable-check.js');
       return undefined;
     } catch (err) {
       return err instanceof Error ? err.message : String(err);
@@ -733,94 +733,59 @@ export class ScriptableAbject extends Abject {
     'data', 'saveData', 'ensure', 'invariant',
   ]);
 
+  /** Longest a handler, or a timer callback, may run without pausing. */
+  private static readonly HANDLER_SLICE_MS = 1000;
+
   /**
-   * Build the `this`-proxy object that handler code sees as `this`.
-   * Contains only safe helpers; no access to the real Abject or Node.js APIs.
+   * A sandbox for this object's source: `this` and the bare globals offer the
+   * helpers below, each reached by message on the code's behalf, plus the
+   * live `id` and `data`. What crosses in either direction is a copy.
    */
-  private buildHandlerProxy(): Record<string, unknown> {
-    const self = this;
-
-    const callFn = async <T>(
-      to: AbjectId | string | Promise<AbjectId>,
-      method: string,
-      payload?: unknown,
-      options?: { timeout?: number } | unknown,
-    ): Promise<T> => {
-      // Backward compat: 4-arg call(to, interfaceId, method, payload)
-      if (options !== undefined && typeof method === 'string' && typeof payload === 'string') {
-        const actualMethod = payload as unknown as string;
-        const actualPayload = options;
-        const resolvedTo = await to;
-        return self.request<T>(
-          request(self.id, resolvedTo as AbjectId, actualMethod, actualPayload)
-        );
-      }
-      const resolvedTo = await to;
-      const timeoutMs = (options && typeof options === 'object' && 'timeout' in options)
-        ? (options as { timeout?: number }).timeout
-        : undefined;
-      return self.request<T>(
-        request(self.id, resolvedTo as AbjectId, method, payload ?? {}),
-        timeoutMs,
-      );
-    };
-
-    const depFn = async (name: string): Promise<AbjectId> => self.dep(name);
-    const findFn = async (name: string): Promise<AbjectId | null> => self.find(name);
-    const changedFn = (aspect: string, value?: unknown): void => self.changed(aspect, value);
-    const emitFn = async (to: AbjectId | string | Promise<AbjectId>, eventName: string, payload?: unknown): Promise<void> => {
-      const resolvedTo = await to;
-      self.send(event(self.id, resolvedTo as AbjectId, eventName, payload ?? {}));
-    };
-    const observeFn = async (target: AbjectId | string | Promise<AbjectId>): Promise<void> => {
-      const resolvedTarget = await target;
-      await self.request(request(self.id, resolvedTarget as AbjectId, 'addDependent', {}));
-    };
-
-    const saveDataFn = async (): Promise<void> => self.saveData();
-
-    // Design-by-Contract helpers for handler code. The sandbox forbids the
-    // `require(` token, so preconditions and postconditions both use `ensure`;
-    // `invariant` is for object-state invariants (call from _checkInvariants()
-    // after a mutation). Both throw a clear ContractViolation when the
-    // condition is false, surfacing in the caller's reply / the object logs.
-    const ensureFn = (cond: unknown, message?: string): void => {
-      if (!cond) throw new Error(`ContractViolation (ensure): ${message ?? 'condition failed'}`);
-    };
-    const invariantFn = (cond: unknown, message?: string): void => {
-      if (!cond) throw new Error(`ContractViolation (invariant): ${message ?? 'invariant failed'}`);
-    };
-
-    const proxy: Record<string, unknown> = {
-      call: callFn,
-      dep: depFn,
-      find: findFn,
-      changed: changedFn,
-      emit: emitFn,
-      observe: observeFn,
-      saveData: saveDataFn,
-      ensure: ensureFn,
-      invariant: invariantFn,
-    };
-    // `id` must read live from the Abject so handler code that captures
-    // `this.id` (e.g. `inputTargetId: this.id` on createCanvas) sees the
-    // post-setId value. Worker spawn and snapshot restore both call
-    // setId AFTER the constructor finishes, so a value-captured id would
-    // be the stale constructor-time uuid and route messages to a dead id.
-    Object.defineProperty(proxy, 'id', {
-      enumerable: true,
-      configurable: false,
-      get: () => self.id,
+  private createSandbox(): Sandbox {
+    return new Sandbox({
+      filename: `scriptable-${this.manifest.name}.js`,
+      sliceMs: ScriptableAbject.HANDLER_SLICE_MS,
+      timers: true,
+      contracts: true,
+      data: true,
+      reservedNames: [...ScriptableAbject.PROXY_BUILTINS],
+      asyncHelpers: {
+        call: (to: unknown, method: unknown, payload?: unknown, options?: unknown) =>
+          this.call(to as AbjectId, method as string, payload, options),
+        dep: (name: unknown) => this.dep(String(name)),
+        find: (name: unknown) => this.find(String(name)),
+        emit: (to: unknown, eventName: unknown, payload?: unknown) => this.emit(to as AbjectId, String(eventName), payload),
+        observe: (target: unknown) => this.observe(target as AbjectId),
+        saveData: () => this.saveData(),
+      },
+      syncHelpers: {
+        id: () => this.id,
+        changed: (aspect: unknown, value?: unknown) => { this.changed(String(aspect), value); },
+      },
+      onInterrupt: (err) => log.warn(`[${this.manifest.name}] ${err.message} Its calls in flight failed and its timers were cleared.`),
+      onUncaught: (err) => log.warn(`[${this.manifest.name}] uncaught error in a timer callback: ${err.message}`),
     });
-    // `data` reads live from the Abject — same record across handler calls
-    // and across applySource hot-reloads. Mutations are persisted only when
-    // user code calls `await this.saveData()`.
-    Object.defineProperty(proxy, 'data', {
-      enumerable: true,
-      configurable: false,
-      get: () => self._data,
-    });
-    return proxy;
+  }
+
+  /** A copy of `this.data`; the last one read when the sandbox cannot answer. */
+  private readData(): Record<string, unknown> {
+    try {
+      this._lastData = this.sandbox.readData();
+    } catch (err) {
+      log.warn(`[${this.manifest.name}] could not read this.data (${err instanceof Error ? err.message : String(err)}); using the last copy`);
+    }
+    return this._lastData;
+  }
+
+  private writeData(data: Record<string, unknown>): void {
+    this.sandbox.writeData(data);
+    this._lastData = data;
+  }
+
+  /** Run the current source's show or hide outside the message path (source activation). */
+  private async runLifecycle(name: 'show' | 'hide', msg: AbjectMessage): Promise<void> {
+    const outcome = this.sandbox.invoke(name, [msg]);
+    if (!outcome.sync) await outcome.promise;
   }
 
   /**
@@ -836,9 +801,8 @@ export class ScriptableAbject extends Abject {
    * includes the caller's data mutations has been persisted.
    */
   async saveData(): Promise<void> {
-    let serialized: string;
     try {
-      serialized = JSON.stringify(this._data);
+      this.sandbox.readData();
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       throw new Error(
@@ -846,15 +810,9 @@ export class ScriptableAbject extends Abject {
         `Remove functions, cycles, or class instances and retry.`
       );
     }
-    if (serialized === undefined) {
-      throw new Error(
-        'saveData failed: JSON.stringify returned undefined. ' +
-        'Top-level this.data must be a plain object, not a function or undefined.'
-      );
-    }
 
     // Join the queued save if one exists — it has not started yet, so it
-    // will pick up the caller's mutations when it reads this._data.
+    // will pick up the caller's mutations when it reads the data.
     if (this._pendingSave) return this._pendingSave.promise;
 
     let resolve!: () => void;
@@ -867,7 +825,7 @@ export class ScriptableAbject extends Abject {
       if (wait > 0) await new Promise((r) => setTimeout(r, wait));
       const ticket = this._pendingSave;
       if (!ticket) return; // already flushed by onStop
-      // Clear before reading _data: mutations after this point need a new save.
+      // Clear before reading the data: mutations after this point need a new save.
       this._pendingSave = undefined;
       this._lastSaveStart = Date.now();
       try {
@@ -890,7 +848,7 @@ export class ScriptableAbject extends Abject {
         // Never write before the stored data has been read: that would
         // replace it with whatever this fresh instance started with.
         await this.packageDataReady();
-        await this.request(request(this.id, this._packagesId, 'savePackageData', { data: this._data }));
+        await this.request(request(this.id, this._packagesId, 'savePackageData', { data: this.readData() }));
         return;
       }
       if (!this._storeId) {
@@ -905,7 +863,7 @@ export class ScriptableAbject extends Abject {
           manifest: this.manifest,
           source: this._source,
           owner: this._owner,
-          data: this._data,
+          data: this.readData(),
         })
       );
     } catch (err) {
@@ -947,7 +905,7 @@ export class ScriptableAbject extends Abject {
       try {
         const stored = await this.request<Record<string, unknown> | null>(
           request(this.id, this._packagesId!, 'getPackageData', {}));
-        if (stored && typeof stored === 'object') this._data = stored;
+        if (stored && typeof stored === 'object') this.writeData(stored);
         this._packageDataLoaded = true;
       } catch (err) {
         log.warn(`[${this.manifest.name}] could not load package data:`, err);
@@ -964,24 +922,30 @@ export class ScriptableAbject extends Abject {
     // Flush a queued save so the last data mutations survive shutdown.
     // Status is already 'stopped' here, so request() would refuse and a
     // reply could never be dispatched back to us — post the save as a
-    // fire-and-forget event straight to the bus instead.
+    // fire-and-forget event straight to the bus instead. Then stop the
+    // sandbox, and its timers with it.
     const ticket = this._pendingSave;
-    if (!ticket) return;
     this._pendingSave = undefined;
     try {
-      if (this._packagesId) {
-        this.bus.send(event(this.id, this._packagesId, 'savePackageData', { data: this._data }));
-      } else if (this._storeId) {
-        this.bus.send(event(this.id, this._storeId, 'save', {
-          objectId: this.id,
-          manifest: this.manifest,
-          source: this._source,
-          owner: this._owner,
-          data: this._data,
-        }));
-      }
-    } catch { /* best effort at shutdown */ }
-    ticket.resolve();
+      if (!ticket) return;
+      const data = this.readData();
+      try {
+        if (this._packagesId) {
+          this.bus.send(event(this.id, this._packagesId, 'savePackageData', { data }));
+        } else if (this._storeId) {
+          this.bus.send(event(this.id, this._storeId, 'save', {
+            objectId: this.id,
+            manifest: this.manifest,
+            source: this._source,
+            owner: this._owner,
+            data,
+          }));
+        }
+      } catch { /* best effort at shutdown */ }
+      ticket.resolve();
+    } finally {
+      this.sandbox.dispose('the object stopped');
+    }
   }
 
   /**
@@ -1035,134 +999,50 @@ export class ScriptableAbject extends Abject {
     })().catch(err => log.warn(`[${this.manifest.name}] manifest update not accepted by Registry: ${err instanceof Error ? err.message : String(err)}`));
   }
 
-  private compileAndInstall(source: string): void {
-    // Build the this-proxy with safe helpers
-    const handlerThis = this.buildHandlerProxy();
-
-    // Compile in the existing in-process vm context with caller-provided helpers.
-    const handlerMap = compileSandboxed(source, handlerThis, {
-      filename: `scriptable-${this.manifest.name}.js`,
-    }) as Record<string, MessageHandlerFn>;
-
-    this.sourceHandlers = handlerMap;
-    const baseProps = new Set(Object.keys(this));
-    const proto = Object.getPrototypeOf(this);
-    for (const [key, value] of Object.entries(handlerMap)) {
-      if (typeof value === 'function') {
-        const bound = value.bind(handlerThis);
-        this.sourceHandlers![key] = bound;
-        // Don't overwrite base class methods or properties
-        if (!(key in proto) && !baseProps.has(key)) {
-          (this as Record<string, unknown>)[key] = bound;
-        }
-        // Store on proxy so handlers can call each other via this.method(),
-        // but never overwrite proxy builtins (call, dep, find, changed, etc.)
-        if (!ScriptableAbject.PROXY_BUILTINS.has(key)) {
-          handlerThis[key] = bound;
-        }
-        if (!key.startsWith('_') && !ScriptableAbject.PROTECTED_HANDLERS.has(key)) {
-          // Message handler -- also registered on bus
-          this.on(key, msg => this.invokeUserHandler(bound, msg));
-          this._userMethods.add(key);
-        }
-      } else {
-        // State property -- store on proxy so handler code sees this._state
-        if (!ScriptableAbject.PROXY_BUILTINS.has(key)) {
-          handlerThis[key] = value;
-        }
-        // Skip if it collides with a base class field
-        if (baseProps.has(key)) {
-          log.warn(`Skipping user property '${key}' -- collides with base class`);
-          continue;
-        }
-        (this as Record<string, unknown>)[key] = value;
-      }
-      if (!baseProps.has(key) && !(key in proto)) {
-        this._userProps.add(key);
-      }
-    }
+  /** Install the first source (construction). Throws when it does not install. */
+  private compileAndInstall(source: string, data: Record<string, unknown>): void {
+    const prepared = this.prepareSource(source, data);
+    if ('error' in prepared) throw new Error(prepared.error);
+    this.sandbox = prepared.sandbox;
+    this.handlerList = prepared.list;
+    this.registerHandlers(prepared.list);
     // Before registration, so the Registry sees the reconciled manifest.
     this.reconcileManifestWithSource(new Set());
   }
 
-  /**
-   * Apply new source at runtime. Returns success/error.
-   * The reply also names the manifest methods added or removed by the swap.
-   * On failure, old handlers remain — the object never enters a broken state.
-   */
-  applySource(source: string, prepared?: Record<string, MessageHandlerFn>): { success: boolean; error?: string; errorLine?: number; manifestMethodsAdded?: string[]; manifestMethodsRemoved?: string[] } {
-    // Build a fresh this-proxy and compile in sandbox
-    const handlerThis = this.buildHandlerProxy();
-    let handlerMap: Record<string, MessageHandlerFn>;
+  /** Compile source into a new sandbox holding `data`; nothing live changes. */
+  private prepareSource(source: string, data: Record<string, unknown>): { sandbox: Sandbox; list: HandlerList } | { error: string; errorLine?: number } {
+    const sandbox = this.createSandbox();
     try {
-      handlerMap = prepared ?? compileSandboxed(source, handlerThis, {
-        filename: `scriptable-${this.manifest.name}.js`,
-      }) as Record<string, MessageHandlerFn>;
+      sandbox.writeData(data);
+      return { sandbox, list: sandbox.installHandlers(source) };
     } catch (err) {
-      // Extract error line number from vm.Script stack trace
-      let errorLine: number | undefined;
-      const stack = (err as Error).stack ?? '';
-      const match = stack.match(/evalmachine\.<anonymous>:(\d+)/);
-      if (match) {
-        errorLine = parseInt(match[1], 10) - 1; // subtract 1 for the function wrapper line
-      }
-      return {
-        success: false,
-        error: err instanceof Error ? err.message : String(err),
-        errorLine,
-      };
+      sandbox.dispose('its source did not install');
+      return { error: err instanceof Error ? err.message : String(err), errorLine: err instanceof SandboxSourceError ? err.line : undefined };
     }
+  }
 
-    this.sourceHandlers = handlerMap;
+  /** Message handlers: the source's functions, less the private and the protected. */
+  private registerHandlers(list: HandlerList): void {
+    this._handlerFunctions = new Set(list.filter(h => h.kind === 'function').map(h => h.name));
+    for (const name of this._handlerFunctions) {
+      if (name.startsWith('_') || ScriptableAbject.PROTECTED_HANDLERS.has(name)) continue;
+      this.on(name, msg => this.invokeUserHandler(name, msg));
+      this._userMethods.add(name);
+    }
+  }
+
+  /**
+   * Make a prepared sandbox the live one: its handlers replace the old ones
+   * on the bus and the manifest follows. The caller disposes the old sandbox.
+   */
+  private activate(prepared: { sandbox: Sandbox; list: HandlerList }, source: string): ApplyResult {
     const previousUserMethods = new Set(this._userMethods);
-    // Remove old user handlers and properties
-    for (const method of this._userMethods) {
-      this.off(method);
-    }
-    for (const prop of this._userProps) {
-      delete (this as Record<string, unknown>)[prop];
-    }
+    for (const method of this._userMethods) this.off(method);
     this._userMethods.clear();
-    this._userProps.clear();
-
-    // Install new handlers and properties bound to the proxy
-    const baseProps = new Set(Object.keys(this));
-    const proto = Object.getPrototypeOf(this);
-    for (const [key, value] of Object.entries(handlerMap)) {
-      if (typeof value === 'function') {
-        const bound = value.bind(handlerThis);
-        this.sourceHandlers![key] = bound;
-        // Don't overwrite base class methods or properties
-        if (!(key in proto) && !baseProps.has(key)) {
-          (this as Record<string, unknown>)[key] = bound;
-        }
-        // Store on proxy so handlers can call each other via this.method(),
-        // but never overwrite proxy builtins (call, dep, find, changed, etc.)
-        if (!ScriptableAbject.PROXY_BUILTINS.has(key)) {
-          handlerThis[key] = bound;
-        }
-        if (!key.startsWith('_') && !ScriptableAbject.PROTECTED_HANDLERS.has(key)) {
-          // Message handler -- also registered on bus
-          this.on(key, msg => this.invokeUserHandler(bound, msg));
-          this._userMethods.add(key);
-        }
-      } else {
-        // State property -- store on proxy so handler code sees this._state
-        if (!ScriptableAbject.PROXY_BUILTINS.has(key)) {
-          handlerThis[key] = value;
-        }
-        // Skip if it collides with a base class field
-        if (baseProps.has(key)) {
-          log.warn(`Skipping user property '${key}' -- collides with base class`);
-          continue;
-        }
-        (this as Record<string, unknown>)[key] = value;
-      }
-      if (!baseProps.has(key) && !(key in proto)) {
-        this._userProps.add(key);
-      }
-    }
-
+    this.sandbox = prepared.sandbox;
+    this.handlerList = prepared.list;
+    this.registerHandlers(prepared.list);
     this._source = source;
     this.installDefaultCloseHandler();
 
@@ -1171,9 +1051,33 @@ export class ScriptableAbject extends Abject {
 
     // Tell dependents the source changed: a Negotiator that connected this
     // object to another regenerates the proxy between them.
-    const newMethods = Array.from(this._userMethods);
-    this.changed('sourceUpdated', { objectId: this.id, methods: newMethods });
+    this.changed('sourceUpdated', { objectId: this.id, methods: Array.from(this._userMethods) });
 
     return { success: true, ...(added.length > 0 ? { manifestMethodsAdded: added } : {}), ...(removed.length > 0 ? { manifestMethodsRemoved: removed } : {}) };
   }
+
+  /**
+   * Apply new source at runtime, carrying `this.data` across. Returns
+   * success/error and names the manifest methods added or removed by the
+   * swap. On failure, old handlers remain — the object never enters a broken
+   * state.
+   */
+  applySource(source: string): ApplyResult {
+    const prepared = this.prepareSource(source, this.readData());
+    if ('error' in prepared) return { success: false, error: prepared.error, ...(prepared.errorLine !== undefined ? { errorLine: prepared.errorLine } : {}) };
+    const old = this.sandbox;
+    const result = this.activate(prepared, source);
+    old.dispose('its source was replaced');
+    return result;
+  }
+}
+
+type HandlerList = Array<{ name: string; kind: 'function' | 'value' }>;
+
+interface ApplyResult {
+  success: boolean;
+  error?: string;
+  errorLine?: number;
+  manifestMethodsAdded?: string[];
+  manifestMethodsRemoved?: string[];
 }

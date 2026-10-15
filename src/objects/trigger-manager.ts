@@ -22,14 +22,15 @@ import { AbjectId, AbjectMessage, InterfaceId } from '../core/types.js';
 import { Abject } from '../core/abject.js';
 import { require as precondition, requireNonEmpty, invariant } from '../core/contracts.js';
 import { request } from '../core/message.js';
-import { runSandboxed, validateCode } from '../core/sandbox.js';
+import { Sandbox } from '../core/sandbox.js';
 import { Log } from '../core/timed-log.js';
 
 const log = new Log('TriggerManager');
 
 const TRIGGER_INTERFACE: InterfaceId = 'abjects:trigger-manager';
 const STORAGE_KEY = 'trigger-manager:rules';
-const FILTER_TIMEOUT_MS = 1_000;
+/** A filter or template is one small expression run on every matching event. */
+const EXPRESSION_SLICE_MS = 250;
 const FIRE_TIMEOUT_MS = 15_000;
 
 export interface TriggerAction {
@@ -70,6 +71,8 @@ export interface TriggerRule {
 export class TriggerManager extends Abject {
   private storageId?: AbjectId;
   private rules = new Map<string, TriggerRule>();
+  /** Each rule's sandbox and its compiled expressions, made on first use. */
+  private expressions = new Map<string, { sandbox: Sandbox; filter?: number; payloadTemplate?: number }>();
   private ruleCounter = 0;
 
   /** Resolved + subscribed source objects: name -> id and id -> name. */
@@ -194,12 +197,12 @@ export class TriggerManager extends Abject {
       requireNonEmpty(action.targetName, 'action.targetName');
       requireNonEmpty(action.method, 'action.method');
       if (filter) {
-        const check = validateCode(filter);
-        precondition(check.valid, `filter contains blocked pattern: ${check.blocked ?? ''}`);
+        const problem = TriggerManager.expressionProblem(filter);
+        precondition(problem === undefined, `filter rejected: ${problem ?? ''}`);
       }
       if (action.payloadTemplate) {
-        const check = validateCode(action.payloadTemplate);
-        precondition(check.valid, `payloadTemplate contains blocked pattern: ${check.blocked ?? ''}`);
+        const problem = TriggerManager.expressionProblem(action.payloadTemplate);
+        precondition(problem === undefined, `payloadTemplate rejected: ${problem ?? ''}`);
       }
 
       // Deduplicate: an identical rule returns the existing id instead of
@@ -233,6 +236,7 @@ export class TriggerManager extends Abject {
     this.on('removeTrigger', async (msg: AbjectMessage) => {
       const { triggerId } = msg.payload as { triggerId: string };
       const deleted = this.rules.delete(triggerId);
+      this.dropExpressions(triggerId);
       if (deleted) {
         await this.persistToStorage();
         this.changed('triggerRemoved', { triggerId });
@@ -311,6 +315,52 @@ export class TriggerManager extends Abject {
     return false;
   }
 
+  /** Why an expression would be refused, or undefined when it is fine. */
+  private static expressionProblem(expression: string): string | undefined {
+    try {
+      Sandbox.checkSource(expression, 'expression', ['aspect', 'value']);
+      return undefined;
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  /**
+   * Evaluate a rule's filter or payload template over a copy of the event.
+   * Each rule keeps one sandbox, compiled on first use; an expression must
+   * answer at once.
+   */
+  private evaluate(rule: TriggerRule, which: 'filter' | 'payloadTemplate', aspect: string, value: unknown): unknown {
+    const expression = which === 'filter' ? rule.filter : rule.action.payloadTemplate;
+    precondition(typeof expression === 'string' && expression.length > 0, `${which} is set`);
+    let entry = this.expressions.get(rule.id);
+    if (!entry || entry.sandbox.stopped) {
+      entry = { sandbox: new Sandbox({ filename: `trigger-${rule.id}.js`, sliceMs: EXPRESSION_SLICE_MS }) };
+      this.expressions.set(rule.id, entry);
+    }
+    let fn = entry[which];
+    if (fn === undefined) {
+      fn = entry.sandbox.compileExpression(expression, ['aspect', 'value']);
+      entry[which] = fn;
+    }
+    const outcome = entry.sandbox.invoke(fn, [aspect, value]);
+    if (!outcome.sync) {
+      outcome.promise.catch(() => { /* answered below */ });
+      throw new Error(`${which} must give its answer at once, not a promise`);
+    }
+    return outcome.value;
+  }
+
+  private dropExpressions(ruleId: string): void {
+    this.expressions.get(ruleId)?.sandbox.dispose('the trigger was removed');
+    this.expressions.delete(ruleId);
+  }
+
+  protected override async onStop(): Promise<void> {
+    for (const id of [...this.expressions.keys()]) this.dropExpressions(id);
+    await super.onStop();
+  }
+
   private async fireMatching(sourceName: string, aspect: string, value: unknown): Promise<void> {
     let dirty = false;
     for (const rule of this.rules.values()) {
@@ -322,11 +372,7 @@ export class TriggerManager extends Abject {
       // recorded on the rule, never propagated.
       if (rule.filter) {
         try {
-          const ok = await runSandboxed(
-            `return (${rule.filter});`,
-            { aspect, value },
-            { filename: `trigger-${rule.id}-filter.js`, timeout: FILTER_TIMEOUT_MS },
-          );
+          const ok = this.evaluate(rule, 'filter', aspect, value);
           if (!ok) continue;
         } catch (err) {
           rule.lastError = `filter: ${err instanceof Error ? err.message : String(err)}`;
@@ -340,11 +386,7 @@ export class TriggerManager extends Abject {
       let payload: unknown = { aspect, value };
       if (rule.action.payloadTemplate) {
         try {
-          payload = await runSandboxed(
-            `return (${rule.action.payloadTemplate});`,
-            { aspect, value },
-            { filename: `trigger-${rule.id}-payload.js`, timeout: FILTER_TIMEOUT_MS },
-          );
+          payload = this.evaluate(rule, 'payloadTemplate', aspect, value);
         } catch (err) {
           rule.lastError = `payloadTemplate: ${err instanceof Error ? err.message : String(err)}`;
           this.changed('triggerFailed', { triggerId: rule.id, error: rule.lastError });
@@ -545,7 +587,7 @@ A rule reads: when \`sourceName\` emits \`aspect\` (and \`filter\` passes), send
 ### Semantics
 - Sources and targets are registered object NAMES. Rules survive object respawns: ids are re-resolved automatically.
 - A rule whose source does not exist yet stays dormant and attaches when the object registers.
-- \`filter\` and \`payloadTemplate\` are JS expressions evaluated in a sandbox with \`aspect\` (string) and \`value\` (the event payload) in scope. A throwing filter counts as no match; a throwing template records lastError. Both run with a 1s timeout.
+- \`filter\` and \`payloadTemplate\` are synchronous JS expressions evaluated in a sandbox with \`aspect\` (string) and \`value\` (a copy of the event payload) in scope. A throwing filter counts as no match; a throwing template records lastError. Each evaluation may run for 250 ms.
 - Rules persist to Storage and reload on startup.
 - Emits \`triggerFired\` and \`triggerFailed\` events; subscribe with addDependent to observe rule activity.`;
   }

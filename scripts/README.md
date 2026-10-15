@@ -38,7 +38,7 @@ pipeline.
   `VERSION`, `LICENSE`, `README.txt`), injects the bootstrap into a copy of the
   running Node with postject (ad hoc signed on macOS), and smoke-tests it with
   `abject version`. The binary is a copy of the Node that runs the script, so
-  build with the Node the release targets (24; at least 22.5), on each target
+  build with the Node the release targets (24; at least 22.8), on each target
   platform.
 - **sea-bootstrap.cjs**: the entry inside the `abject` binary. Sets
   `ABJECT_SEA=1`, `ABJECT_HOME` (the binary's directory) and

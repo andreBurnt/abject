@@ -1,35 +1,55 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { runSandboxed, compileSandboxed } from '../core/sandbox.js';
+import { execFileSync } from 'node:child_process';
+import { Sandbox } from '../core/sandbox.js';
 import { ScriptableAbject } from './scriptable-abject.js';
 import { request } from '../core/message.js';
 import { MessageBus } from '../runtime/message-bus.js';
 
-test('JavaScript helpers retain host object identity and callable arguments', async () => {
-  const data = { count: 2 };
-  const result = await runSandboxed('return await invoke(data, () => ++data.count);', {
-    data,
-    invoke: async (received: unknown, callback: () => number) => {
-      assert.equal(received, data);
-      assert.equal(callback(), 3);
-      return received;
-    },
-  });
-  assert.equal(result, data);
-  assert.equal(data.count, 3);
+test('JavaScript helpers receive copies and answers come back as copies', async () => {
+  const data = { count: 2, bytes: new Uint8Array([1, 2]) };
+  let received: unknown;
+  const sandbox = new Sandbox({ filename: 'copies.js', sliceMs: 1000, asyncHelpers: {
+    invoke: async (value: unknown) => { received = value; return { count: 3 }; },
+  } });
+  try {
+    sandbox.setGlobals({ data });
+    const result = await sandbox.run(sandbox.compileBody('const answer = await invoke(data); data.count = answer.count; return data;')) as typeof data;
+    assert.deepEqual(received, data, 'the helper sees the same values');
+    assert.notEqual(received, data, 'but not the same object');
+    assert.equal(result.count, 3);
+    assert.ok(result.bytes instanceof Uint8Array);
+    assert.equal(data.count, 2, 'the host value is untouched');
+  } finally { sandbox.dispose(); }
 });
 
 test('handler compilation supports factories, computed names and synchronous return values', () => {
-  const receiver = { data: { count: 2 } };
-  const handlers = compileSandboxed('(() => { let calls = 0; return { ["increment"]() { calls++; return this.data.count += calls; } }; })()', {});
-  const increment = (handlers.increment as () => number).bind(receiver);
-  assert.equal(increment(), 3);
-  assert.equal(increment(), 5);
-  assert.equal(receiver.data.count, 5);
+  const sandbox = new Sandbox({ filename: 'handlers.js', sliceMs: 1000, data: true });
+  try {
+    sandbox.writeData({ count: 2 });
+    sandbox.installHandlers('(() => { let calls = 0; return { ["increment"]() { calls++; return this.data.count += calls; } }; })()');
+    assert.deepEqual(sandbox.invoke('increment'), { sync: true, value: 3 });
+    assert.deepEqual(sandbox.invoke('increment'), { sync: true, value: 5 });
+    assert.equal(sandbox.readData().count, 5);
+  } finally { sandbox.dispose(); }
 });
 
-test('in-process execution retains the VM synchronous timeout', async () => {
-  await assert.rejects(runSandboxed('while (true) {}', {}, { timeout: 25 }), /timed out/);
+test('a runaway loop is stopped, before and after an await', async () => {
+  const sandbox = new Sandbox({ filename: 'runaway.js', sliceMs: 25 });
+  try {
+    await assert.rejects(sandbox.run(sandbox.compileBody('while (true) {}')), /without pausing/);
+  } finally { sandbox.dispose(); }
+  // After an await the loop runs as a promise continuation. The test runner
+  // enables async hooks, and Node aborts the process when such a continuation
+  // is stopped while a hook is enabled, so this half runs in a plain process.
+  const script = `
+    const { Sandbox } = await import(${JSON.stringify(new URL('../core/sandbox.ts', import.meta.url).href)});
+    const sandbox = new Sandbox({ filename: 'runaway.js', sliceMs: 25, asyncHelpers: { pause: async () => undefined } });
+    const err = await sandbox.run(sandbox.compileBody('await pause(); while (true) {}')).catch(e => e);
+    const ok = await sandbox.run(sandbox.compileBody('await pause(); return 7;'));
+    process.stdout.write(JSON.stringify({ stopped: /without pausing/.test(err && err.message), ok }));`;
+  const out = execFileSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], { encoding: 'utf8', timeout: 20_000 });
+  assert.deepEqual(JSON.parse(out), { stopped: true, ok: 7 });
 });
 
 test('scripted message handlers keep synchronous results and track asynchronous lifecycle work', async () => {
