@@ -1,5 +1,29 @@
 [
   {
+    "version": "0.15.9",
+    "date": "2026-10-15",
+    "title": "A Sealed Sandbox for Script Abjects",
+    "summary": "Generated objects, script packages, agent jobs and trigger rules now run in a rebuilt sandbox. Nothing of the host is reachable from inside it, and every stretch of code has a time limit, so a buggy or hostile script can no longer get past your permissions or freeze the system.",
+    "highlights": [
+      "Script abjects (generated objects and script packages) run in a new sandbox with hard isolation: nothing from the host process is in reach, and messages, replies and this.data cross the boundary only as copies (JSON values and Uint8Array).",
+      "Every stretch of sandboxed code has a time limit. A handler or timer callback may run 1 s without pausing; past that, the call fails and the object keeps its state and keeps running instead of locking up its worker.",
+      "Each agent job gets its own sandbox, now with setTimeout and setInterval. A job's code may run 10 s without pausing, and the error says how to split longer work into pieces.",
+      "Jobs can take an optional timeoutMs that stops them after a stretch with no progress (at most a day). Each answered call and each progress report starts that clock over, including progress from an object the job is waiting on.",
+      "Long work can wait longer: a job's call to another object now waits up to a day for its answer instead of 10 minutes.",
+      "A job waiting on something that can never arrive (no call outstanding, no timer set) now fails at once with a reason instead of hanging.",
+      "Errors in script and job code now report line numbers, and pnpm forge runs the same checks as the runtime, so a package that installs will load. import() is refused up front.",
+      "Editing a script abject's source swaps it in place and keeps its this.data.",
+      "Trigger rule filters and payload templates are checked when the rule is saved, compiled once per rule, and limited to 250 ms per evaluation.",
+      "Running from source now needs Node.js 22.8 or newer; abject doctor checks for it."
+    ],
+    "fixes": [
+      "Closed a hole where sandboxed code could reach the host process through objects handed into the sandbox, and from there get past PermissionBroker.",
+      "Agent jobs had no time limit, so a runaway loop in job code could tie up a worker for good; it is now stopped.",
+      "A scheduled job that ran longer than a minute was fired again on every scheduler tick while the first run was still going; a schedule now waits for its running job to finish.",
+      "Timers set by a script abject or a job now stop when the object stops, its source is replaced, or the job ends, instead of running on."
+    ]
+  },
+  {
     "version": "0.15.8",
     "date": "2026-10-14",
     "title": "Remote MCP servers, with sign-in",
