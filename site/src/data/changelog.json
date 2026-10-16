@@ -1,5 +1,17 @@
 [
   {
+    "version": "0.15.10",
+    "date": "2026-10-16",
+    "title": "Shell permission prompts in plain words",
+    "summary": "When an abject asks to run a shell command, the permission prompt now opens with a short, everyday explanation of what the command will do, so you can decide with confidence even if you don't read shell. The exact command and its analysis stay on screen right below that explanation.",
+    "highlights": [
+      "Shell permission prompts start with a plain-language summary of what the command does, written by your fast-tier model from the command analysis; the exact command stays visible beneath it, and the model only explains (you still make the decision)",
+      "The explanation shows up wherever you answer: the desktop permission window, and the question lists in the `abject` command and its chat TUI",
+      "The model sees only the redacted command, its answers are cached so repeated prompts open quickly, and it has a 20-second limit; with no model configured, or if it fails or takes too long, the prompt opens just as it did before"
+    ],
+    "fixes": []
+  },
+  {
     "version": "0.15.9",
     "date": "2026-10-15",
     "title": "A Sealed Sandbox for Script Abjects",
