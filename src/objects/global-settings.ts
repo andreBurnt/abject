@@ -646,7 +646,7 @@ The settings themselves live in SettingsManager, which this window loads from an
     this.on('presentDialog', async (m: AbjectMessage) => {
       if (!(await this.fromDialogBroker(m))) return;
       const d = m.payload as {
-        dialogId: string; title: string; message: string; resource?: string; detail?: string[];
+        dialogId: string; title: string; message: string; summary?: string; resource?: string; detail?: string[];
         groups?: Array<{ label: string; options: Array<{ id: string; label: string; tone?: string }> }>;
       };
       contractRequire(typeof d?.dialogId === 'string' && d.dialogId.length > 0, 'presentDialog needs a dialogId');
@@ -654,6 +654,7 @@ The settings themselves live in SettingsManager, which this window loads from an
         dialogId: d.dialogId,
         title: d.title || 'Permission',
         description: d.message || '',
+        summary: d.summary || '',
         resource: d.resource || '',
         detail: d.detail ?? [],
         groups: d.groups ?? [],
@@ -678,10 +679,11 @@ The settings themselves live in SettingsManager, which this window loads from an
         if (decision) { this._pendingPermissionPrompt.resolve(decision); return; }
       }
 
-      // The prompt's resource block measured itself; grow the window to fit.
-      if (fromId === this._promptResourceBlockId && aspect === 'contentHeight') {
+      // A wrapped block of the prompt measured itself; grow the window to fit.
+      if (aspect === 'contentHeight'
+          && (fromId === this._promptResourceBlockId || fromId === this._promptSummaryBlockId)) {
         const height = typeof value === 'number' ? value : Number(value);
-        if (Number.isFinite(height) && height > 0) await this.resizePromptForResource(height);
+        if (Number.isFinite(height) && height > 0) await this.resizePromptBlock(fromId, height);
         return;
       }
 
@@ -4523,6 +4525,8 @@ The settings themselves live in SettingsManager, which this window loads from an
   private _promptButtons = new Map<AbjectId, string>();
   /** The self-measuring block holding the requested resource. */
   private _promptResourceBlockId?: AbjectId;
+  /** The self-measuring block explaining the resource in everyday words. */
+  private _promptSummaryBlockId?: AbjectId;
   private _promptResourceLayoutId?: AbjectId;
   private _promptRect?: { x: number; y: number; width: number; height: number };
 
@@ -4531,7 +4535,9 @@ The settings themselves live in SettingsManager, which this window loads from an
    * acts on the exact command line, the bottom group on the pair (object,
    * program) so an object that drives one tool is not re-asked per argument
    * list. The resource itself is a self-measuring block, because a command
-   * line is any length and the old fixed-height label overlapped it.
+   * line is any length and the old fixed-height label overlapped it. When the
+   * question carries a summary (a command explained in everyday words), it
+   * comes first, so the person reads what will happen before any shell.
    *
    * @param grant present when the caller resolved to a registered object.
    *        `canAllow` false means the line does not reduce to a program name
@@ -4543,6 +4549,8 @@ The settings themselves live in SettingsManager, which this window loads from an
     dialogId: string;
     title: string;
     description: string;
+    /** The resource in everyday words; empty when there is none. */
+    summary: string;
     resource: string;
     detail: string[];
     groups: Array<{ label: string; options: Array<{ id: string; label: string; tone?: string }> }>;
@@ -4569,18 +4577,22 @@ The settings themselves live in SettingsManager, which this window loads from an
     const SECTION_H = 16;
     const ROW_H = 34;
     const RESOURCE_START_H = 22;
+    const SUMMARY_START_H = 40;
 
     const groups = opts.groups.filter(g => g.options.length > 0);
+    const summary = opts.summary.trim();
 
     try {
       // Only a starting size: the window has to exist before its children do.
       // Once every control is in the layout, `fitPromptToLayout` asks the
       // layout what it actually measures and corrects this. The children are
-      // header + resource block + one label per detail line + a caption and a
-      // button row per group, with SPACING between each adjacent pair.
-      const childCount = 2 + opts.detail.length + groups.length * 2;
+      // header + (summary block + its caption) + resource block + one label
+      // per detail line + a caption and a button row per group, with SPACING
+      // between each adjacent pair.
+      const childCount = 2 + (summary ? 2 : 0) + opts.detail.length + groups.length * 2;
       const estimate = MARGIN * 2
         + HEADER_H + RESOURCE_START_H
+        + (summary ? SUMMARY_START_H + SECTION_H : 0)
         + opts.detail.length * DETAIL_H
         + groups.length * (SECTION_H + ROW_H)
         + Math.max(0, childCount - 1) * SPACING;
@@ -4620,6 +4632,27 @@ The settings themselves live in SettingsManager, which this window loads from an
         sizePolicy: { vertical: 'fixed', horizontal: 'expanding' },
         preferredSize: { height: HEADER_H },
       }));
+
+      // What it will do, in everyday words, before the shell nobody but a
+      // programmer can read. The LLM wrote it for PermissionBroker and decided
+      // nothing; the caption says so and points at the command below it.
+      if (summary) {
+        const { widgetIds: [summaryId] } = await this.request<{ widgetIds: AbjectId[] }>(
+          request(this.id, this.widgetManagerId, 'create', { specs: [
+            { type: 'contentBlock', windowId, text: summary,
+              style: { color: this.theme.textPrimary, fontSize: 14, markdown: false } },
+          ]})
+        );
+        this._promptSummaryBlockId = summaryId;
+        await this.request(request(this.id, summaryId, 'addDependent', {}));
+        await this.request(request(this.id, layoutId, 'addLayoutChild', {
+          widgetId: summaryId,
+          sizePolicy: { vertical: 'fixed', horizontal: 'expanding' },
+          preferredSize: { height: SUMMARY_START_H },
+        }));
+        await this.promptSectionLabel(layoutId, windowId,
+          'Explained by AI, which can be wrong. The exact command:', SECTION_H);
+      }
 
       // The command line itself: wraps and reports its own height, so nothing
       // is clipped or overlapped however long it is.
@@ -4707,6 +4740,7 @@ The settings themselves live in SettingsManager, which this window loads from an
       }
       this._promptWindowId = undefined;
       this._promptResourceBlockId = undefined;
+      this._promptSummaryBlockId = undefined;
       this._promptResourceLayoutId = undefined;
       this._promptRect = undefined;
       finished();
@@ -4807,18 +4841,18 @@ The settings themselves live in SettingsManager, which this window loads from an
   }
 
   /**
-   * Grow the open prompt to fit the command line it is showing. The resource
-   * block measures itself once the layout settles; the layout absorbs the new
-   * height and the window follows it.
+   * Grow the open prompt to fit a wrapped block it is showing (the command
+   * line, or its explanation). The block measures itself once the layout
+   * settles; the layout absorbs the new height and the window follows it.
    */
-  private async resizePromptForResource(contentHeight: number): Promise<void> {
-    if (!this._promptWindowId || !this._promptResourceBlockId || !this._promptRect) return;
+  private async resizePromptBlock(blockId: AbjectId, contentHeight: number): Promise<void> {
+    if (!this._promptWindowId || !this._promptRect) return;
     const height = Math.min(Math.max(Math.ceil(contentHeight), 22), 260);
 
     const layoutId = this._promptResourceLayoutId;
     if (layoutId) {
       await this.request(request(this.id, layoutId, 'updateLayoutChild', {
-        widgetId: this._promptResourceBlockId,
+        widgetId: blockId,
         preferredSize: { height },
       })).catch(() => { /* widget gone */ });
     }

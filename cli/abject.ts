@@ -201,7 +201,10 @@ async function status(dataDir: string, url?: string): Promise<void> {
     say(`  ${workspaces.length} workspace(s); AI model ${configured === false ? 'NOT configured (abject setup)' : 'configured'}`);
     if (dialogs.length > 0) {
       say(`  ${dialogs.length} question(s) waiting on you:`);
-      dialogs.forEach((d, i) => say(`    ${i + 1}. ${d.title}${d.resource ? `: ${d.resource.slice(0, 90)}` : ''}`));
+      dialogs.forEach((d, i) => {
+        const about = d.summary || d.resource;
+        say(`    ${i + 1}. ${d.title}${about ? `: ${about.slice(0, 90)}` : ''}`);
+      });
     }
   } finally {
     client.close();
@@ -218,6 +221,7 @@ async function questions(dataDir: string, url?: string): Promise<void> {
     open.forEach((d, i) => {
       say(`${i + 1}. ${d.title}${d.askedBy && d.topic !== 'permission' ? ` (${d.askedBy})` : ''}`);
       for (const l of d.message.split('\n')) say(`   ${l}`);
+      if (d.summary) say(`   ${d.summary} (explained by AI)`);
       if (d.resource) say(`   ${d.resource}`);
       if (d.kind === 'options') d.options?.forEach((o, j) => say(`     [${j + 1}] ${o.label}`));
       else say(d.kind === 'prompt' ? '     answer with text' : '     answer yes or no');

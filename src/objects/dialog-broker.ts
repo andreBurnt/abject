@@ -64,6 +64,8 @@ export interface DialogSpec {
   /** prompt */
   defaultValue?: string;
   placeholder?: string;
+  /** options: what the resource does in everyday words, shown before it. */
+  summary?: string;
   /** options: the thing being decided on (a command line, a path), shown verbatim. */
   resource?: string;
   /** options: analysis lines shown under the resource. */
@@ -140,6 +142,7 @@ export class DialogBroker extends Abject {
                 { name: 'title', type: { kind: 'primitive', primitive: 'string' }, description: 'Short title' },
                 { name: 'message', type: { kind: 'primitive', primitive: 'string' }, description: 'The question' },
                 { name: 'groups', type: { kind: 'array', elementType: { kind: 'object', properties: {} } }, description: 'options: [{ label, options: [{ id, label, tone? }] }]', optional: true },
+                { name: 'summary', type: { kind: 'primitive', primitive: 'string' }, description: 'options: what the resource does in everyday words, shown before it', optional: true },
                 { name: 'resource', type: { kind: 'primitive', primitive: 'string' }, description: 'options: what is being decided on', optional: true },
                 { name: 'taskId', type: { kind: 'primitive', primitive: 'string' }, description: 'Task the question belongs to', optional: true },
               ],
@@ -336,6 +339,7 @@ export class DialogBroker extends Abject {
       destructive: p.destructive === true ? true : undefined,
       defaultValue: str(p.defaultValue),
       placeholder: str(p.placeholder),
+      summary: str(p.summary),
       resource: str(p.resource),
       detail: Array.isArray(p.detail) ? (p.detail as unknown[]).filter((d): d is string => typeof d === 'string') : undefined,
       taskId: str(p.taskId),

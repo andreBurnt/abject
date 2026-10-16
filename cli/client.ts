@@ -68,6 +68,8 @@ export interface DialogInfo {
   destructive?: boolean;
   placeholder?: string;
   defaultValue?: string;
+  /** What the resource does in everyday words (permission prompts), shown before it. */
+  summary?: string;
   /** The resource being decided on (e.g. a command line), for options dialogs. */
   resource?: string;
   /** Choice list for options dialogs. */

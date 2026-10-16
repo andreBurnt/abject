@@ -717,6 +717,11 @@ class TuiApp {
     if (dialog.askedBy && dialog.topic !== 'permission') {
       lines.push({ text: `asked by ${dialog.askedBy}`, color: 'dim' });
     }
+    if (dialog.summary) {
+      lines.push({ text: '', color: 'normal' });
+      lines.push({ text: dialog.summary, color: 'normal' });
+      lines.push({ text: 'Explained by AI, which can be wrong. The exact command:', color: 'dim' });
+    }
     if (dialog.resource) {
       lines.push({ text: `  ${dialog.resource}`, color: 'yellow' });
     }
@@ -1150,10 +1155,13 @@ class TuiApp {
           if (tab) {
             this.appendTo(tab, open.length === 0
               ? [{ text: 'no questions are waiting', color: 'dim' }]
-              : [{ text: 'waiting on you:', color: 'bold' }, ...open.map((d, i) => ({
-                text: `  ${i + 1}: ${d.title}${d.resource ? ` — ${d.resource.slice(0, 80)}` : ''}`,
-                color: 'yellow' as LineColor,
-              }))]);
+              : [{ text: 'waiting on you:', color: 'bold' }, ...open.map((d, i) => {
+                const about = d.summary || d.resource;
+                return {
+                  text: `  ${i + 1}: ${d.title}${about ? ` — ${about.slice(0, 80)}` : ''}`,
+                  color: 'yellow' as LineColor,
+                };
+              })]);
           }
           // Anything missed while away joins the queue that takes the input line.
           await this.replayDialogs();
@@ -1495,6 +1503,7 @@ export async function runPlain(target: BackendTarget): Promise<void> {
       } else if (event.event === 'dialog') {
         pendingDialog = event.data as unknown as DialogInfo;
         print({ text: `[dialog] ${pendingDialog.title}: ${pendingDialog.message}`, color: 'yellow' });
+        if (pendingDialog.summary) print({ text: `  ${pendingDialog.summary} (explained by AI)`, color: 'normal' });
         if (pendingDialog.resource) print({ text: `  ${pendingDialog.resource}`, color: 'yellow' });
         if (pendingDialog.kind === 'options' && pendingDialog.options) {
           pendingDialog.options.forEach((option, i) =>

@@ -213,6 +213,14 @@ public workspace or for an object exposed to remote peers, where every one
 goes to the person. A refusal reaches the agent as a failure naming who
 declined (`refusalMessage` in `src/core/permission-outcome.ts`).
 
+A shell question first asks LLM (fast tier, the redacted command plus what
+command-analysis found, at most 20 s) to explain the command in everyday
+words, and sends that as the dialog's `summary`. The desktop dialog and the
+terminal show it before the command, marked as written by AI; the command and
+the analysis lines stay under it. The explanation decides nothing, and no
+model, an error or a slow answer opens the question without one. Explanations
+are cached per command and working directory (64 kept).
+
 A question goes to DialogBroker as an `options` dialog and waits indefinitely:
 the broker's heartbeat keeps the request alive, and the 30-minute timer fires
 only if the broker itself is gone. Concurrent questions are all open at once (a
