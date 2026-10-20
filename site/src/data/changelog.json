@@ -1,5 +1,19 @@
 [
   {
+    "version": "0.15.11",
+    "date": "2026-10-20",
+    "title": "Patterns From Lessons That Keep Coming Back",
+    "summary": "Your workspace now turns lessons it keeps relearning into written patterns. Until now a lesson only became a pattern if it had been flagged as a candidate the first time it showed up, so a new workspace could run dozens of goals and still have no patterns at all.",
+    "highlights": [
+      "The task reviewer now notices when the same piece of knowledge has come up in more than one goal, and offers those cases to the pattern language as instances of one recurring problem to name and write down as a pattern.",
+      "The context the reviewer reads before each goal now lists knowledge met in two or more goals, next to the existing patterns and candidate lessons, so a fresh workspace has something to build on.",
+      "KnowledgeBase 3.9.0 counts how many separate goals relied on each entry, and recall can now be limited to entries seen in at least a given number of goals (the new minGoals option)."
+    ],
+    "fixes": [
+      "When the reviewer judged an ordinary lesson as if it were a pattern, the update used to fail with \"Pattern not found\" and be discarded. It now counts as confirming, disputing or leaving that lesson unchanged, so the judgment is kept."
+    ]
+  },
+  {
     "version": "0.15.10",
     "date": "2026-10-16",
     "title": "Shell permission prompts in plain words",
