@@ -6,7 +6,7 @@ Abjects is an LLM-mediated distributed object system where objects communicate v
 
 **Tech Stack**: TypeScript on Node (worker threads), WASM and script packages (sandboxed objects), an X11-style display server driving a Canvas/WebGL browser client, Electron for the desktop app, Vite and esbuild for bundles.
 
-Every directory has a `README.md` describing what is in it and how it fits together; read the one for the area you are changing before changing it, and keep it current when you change the code.
+Every directory has a `README.md` describing what is in it and how it fits together; read the one for the area you are changing before changing it, and keep it current when you change the code. The one exception is `.github/`: GitHub shows a README there on the repository's front page instead of the root `README.md`, so `.github/workflows/README.md` documents it.
 
 ## Build & Run Commands
 

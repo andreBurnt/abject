@@ -1,23 +1,184 @@
+<p align="center">
+  <a href="https://abject.world"><img src="site/public/og-card.png" alt="Abject, an Abject-Oriented OS: describe what you want, an abject appears, window and all, and keeps working after you stop talking to it" width="100%"></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/mempko/abject/releases/latest"><b>Download</b></a> ·
+  <a href="https://abject.world">abject.world</a> ·
+  <a href="https://abject.world/install">Install guide</a> ·
+  <a href="https://abject.world/why">Why Abject</a> ·
+  <a href="https://abject.world/theory">The theory</a> ·
+  <a href="https://abject.world/changelog">What's new</a>
+</p>
+
 # Abject: An Abject-Oriented OS
 
-**[abject.world](https://abject.world)**
+Describe what you want and an abject appears, window and all. It keeps
+working after you stop talking to it, and it learns from every goal.
 
-## The Things That Think
+Abject is for anyone who wants software that's connected and personal to
+them, and you don't need to know how to program. It's free, open source, and
+it runs on your machine: Linux, Windows or macOS, or a server with no screen
+at all.
 
-> A self-aware object runtime and grass computing platform: objects
-> communicate via message passing, negotiate protocols through an
-> artificial intelligence, and regenerate when broken. The successor to Fire★.
->
 > *abject (n.) 1. an AI object. 2. 'utterly hopeless'. Anyone who has
 > maintained object-oriented code knows the two meanings are compatible.*
 
-## Why
+## The Big Idea: Every Abject Can Be Asked
+
+Abject is short for AI Object. An abject is an object, a little computer that
+sends and receives messages. Everything in the system is an abject: every
+window and widget, every agent, the ScrumMaster that plans, the reviewer that
+learns, the registry, the knowledge base, the link to your model, and whatever
+you make next. An AI agent is just another abject. We don't need a special
+protocol between agents and software, or between agents and agents. We just
+need objects that can talk.
+
+Every abject has a mandatory message handler called `ask`. You send it a
+question in plain English and it answers in plain English, from its own
+manifest and source code. Abjects describe themselves without anyone writing
+documentation or schemas. The whole system is a bunch of objects sending each
+other messages, Smalltalk or Erlang style, where each object has this ask
+handler.
+
+```
+you> ask({ question: "what are you?" })
+
+I'm an abject: a small object with a window, a mailbox and my own source
+code. I handle messages like any other object, and when someone asks me
+something, I answer in plain English. Like now.
+```
+
+The rest of Abject is built on that:
+
+- **Make.** Before writing a new object, ObjectCreator learns how to use the objects it will depend on, mainly by asking them.
+- **Team.** Before each sprint, the ScrumMaster asks each agent whether it can help. They answer or pass.
+- **Find.** Agents find the right object by asking the registry: is there an object that handles this?
+- **Connect.** When two objects don't speak the same messages, the ProxyGenerator asks both of them and writes a proxy that sits between them.
+
+Ordinary messages never touch an LLM: they are typed payloads on a message
+bus, fast and deterministic. The LLM is a service an abject calls when it
+actually needs to think. [The Ask Protocol](https://abject.world/ask-protocol)
+goes deeper.
+
+## 1. Say It, and It's Running
+
+Describe what you want in plain English and a real object appears on the
+desktop. It has a window, a mailbox and its own source code, and it keeps
+working after you close the chat. You never have to look at the code, but
+it's there if you want to.
+
+Things I asked for, and what stayed on the desktop:
+
+| I asked for | What stayed on the desktop |
+|-------------|----------------------------|
+| "Show me the Sun, the Earth, and the Moon, live, and keep it fresh." | A NASA viewer streaming the Sun and the Earth, refreshing itself every minute. |
+| A task list, then a Kanban board over the same tasks. | Two windows on one set of tasks: inbox, next actions and projects on one side; To Do, In Progress and Done on the other, kept in sync. |
+| A client for my TiddlyWiki, so I can explore ten years of notes as a graph. | A graph of 474 notes and 14,615 links, clustered by tag. I didn't have to switch to Obsidian to get it. |
+| "When is low tide in Seattle tomorrow?" | The answer came with a live NOAA tide widget, and the widget stayed on the desktop. |
+
+![A Getting Things Done task list and a Kanban board over the same tasks, kept in sync](site/public/gallery/tasks-pair.webp)
+
+It can look like anything. Abjects draw in 3D inside their windows, with
+materials like gold, chrome, glass, ceramic, neon or hologram, each one a
+single word, and you never write a shader. The desktop spreads its windows
+into Exposé, each space has its own colors, and you (and your abjects) can add
+new widgets, materials, looks and window effects.
+
+## 2. A Team That Asks, Plans and Replans
+
+You describe the goal: what you want, not how to get it. A team of agents
+works on it in sprints, like Scrum. They agree on who does what, and each task
+completes or fails. Then the ScrumMaster reviews what happened and the team
+plans the next sprint, learning from what failed. Rinse and repeat until the
+goal is done. The agents are abjects too.
+
+- **Asked, not assumed.** Each agent is asked what it can do for the goal, and it answers or passes. The ScrumMaster assigns the tasks from the answers. A one-step request skips the ceremony and goes straight to the agent that can do it.
+- **Failures count.** A sprint ends when its tasks finish or fail. The ScrumMaster reviews what really happened, including what failed, and decides to stop or run another sprint. There is no fixed retry budget, and a GoalObserver watches from outside so a goal that stops making progress is failed instead of left hanging.
+- **Plans change.** Finding something new in the middle of a task isn't a defect in the plan, it's expected. An agent can replan: it says what it found and asks the others what should change. You can change course too: send a note while the goal runs and the next plan takes it in.
+- **Goals outlive the machine.** In a shared workspace, goals sync across your peers, so a goal survives the machine it started on.
+
+## 3. It Gets Smarter Every Time
+
+Learning happens when things go wrong. For each task, the agent predicts what
+the result should be. After the goal, a reviewer compares every prediction
+with what actually happened and saves the lessons as facts and named patterns
+in a knowledge base. The next plan starts from those patterns. The lessons
+don't evaporate when the goal ends.
+
+1. **Predict.** Before it acts, the agent writes down what it expects to happen.
+2. **Act.** The runtime keeps the prediction and pairs it with what actually came back.
+3. **Compare.** After the goal, the reviewer checks each prediction: supported, contradicted or unresolved. The misses matter most.
+4. **Learn.** Lessons become facts. A problem that keeps coming back, goal after goal, becomes a named pattern.
+5. **Weave.** For the next task, the patterns that fit, and the ones they link to, go into the agent's prompt and the ScrumMaster's plan.
+
+The patterns are written the way Christopher Alexander and James Coplien wrote
+theirs: each names a problem that occurs over and over, the forces that make
+the obvious approach fail, and the resolution that keeps working, and each
+links to the patterns that come next. Together they make a pattern language,
+the part of the world model that generalizes. Here is a real one the reviewer
+wrote:
+
+> **The Team, the Setup, the Verification**
+>
+> *Context:* "A goal spans more than one competency … and no single agent holds all the tools."
+>
+> *Therefore:* "Assign tasks so each agent owns the data it can reach: default to ONE agent when a single competency covers the whole ask; split at exactly the handoff where the next competency begins…"
+>
+> *Recorded evidence:* "Revision 1; helpful in 33 distinct goals; counterexamples in 0 goals."
+
+![The Knowledge window on its Patterns tab: learned patterns with how often each proved useful, a 3D map of the pattern language, and one pattern open](site/public/gallery/knowledge.webp)
+
+Once an LLM is deployed, its weights don't change, so on its own it can't
+learn. An LLM with a harness and an external memory can. Here that memory is
+something you can read: open the Knowledge window to browse the patterns, and
+merge or prune them. It stays in its workspace, and a shared workspace syncs it
+to its peers.
+
+**A loop without memory is a treadmill. A loop with memory is a ratchet.**
+
+## 4. Yours
+
+- **On your machine.** Your abjects, what they learned and your chats live on your disk. No account, no telemetry, no subscription.
+- **Any model.** A free local model through Ollama, an API key, or a coding CLI you already log into, from 14 providers: Ollama, PeerLLM, Claude Code CLI, Codex CLI, Antigravity CLI, Anthropic, OpenAI, Google Gemini, OpenRouter, DeepSeek, xAI Grok, Moonshot Kimi, MiniMax and Meta. Switch any time, and an abject can bring a provider of its own ([docs/LLM_PROVIDERS.md](docs/LLM_PROVIDERS.md)).
+- **Across your devices.** Your machines talk to each other peer to peer, over encrypted WebRTC. Pair your phone with a QR code (Network → Frontends → Generate Pairing QR) and your desktop opens in its browser.
+- **Contained.** Generated code runs in a locked-down sandbox with no access of its own to your files, the network or other processes. To touch anything outside, an abject has to ask the object that owns it, and a shell command, or a file outside the folders you allowed, stops at a prompt and waits for you. The horror is thematic. The containment is real.
+- **Open source.** Free and open source under the GPL-3.0. Every abject carries its own source code, so you can open it and change it.
+
+## Get Abject
+
+The desktop app for Linux (AppImage, .deb), Windows and macOS (Apple silicon
+and Intel) is on the [releases page](https://github.com/mempko/abject/releases/latest).
+From download to your first abject takes about five minutes:
+
+1. **Install.** Download the build for your machine and open it. The builds are not code-signed yet, so the OS pauses once; the [install guide](https://abject.world/install#first-launch) says what to click.
+2. **Pick a model.** Settings opens by itself on the AI tab. Paste an API key, point it at Ollama, or choose a coding CLI you already log into.
+3. **Ask for something.** Click Chat and describe what you want. A window appears. Close the chat and the window stays, still working.
+4. **Say yes, or no.** The first time an abject wants a shell, a file outside its sandbox or a new website, it asks you first and waits.
+
+The app keeps itself up to date (Settings → Updates). On macOS, where builds
+are not signed yet, a new version is offered as a download instead.
+
+On a server, or if you live in a terminal, install the headless edition: the
+`abject` command with its own backend and no display.
+
+```bash
+curl -fsSL https://abject.world/install.sh | sh     # Linux and macOS
+irm https://abject.world/install.ps1 | iex          # Windows (PowerShell)
+abject                                              # guided setup the first time, then the chat
+```
+
+The release archives and a container image (`ghcr.io/mempko/abject`) carry the
+same edition; [deploy/README.md](deploy/README.md) covers running it as a
+service. To build from source, see [Running from Source](#running-from-source).
+
+## Why I Built It
 
 Most people never use a computer to compute. They read, watch, and scroll
-inside sealed apps somebody else wrote, because software stayed hard to
-make and making it stayed a profession. LLMs just cracked that open. Abject
-is where that matters: anyone who can say what they want gets software that
-is personal, connected, and theirs, running on their machine, under their
+inside sealed apps somebody else wrote, because software stayed hard to make
+and making it stayed a profession. LLMs just cracked that open. Abject is
+where that matters: anyone who can say what they want gets software that is
+personal, connected, and theirs, running on their machine, under their
 control, with nobody collecting rent.
 
 Underneath is a blunt technical position: AI agents are the wrong
@@ -40,94 +201,83 @@ The longform version lives on the blog:
 - [Let the Information Monopolies Crumble!](https://blog.mempko.com/let-the-information-monopolies-crumble/):
   the human case. Computers are for computing, and everyone should get to.
 
-## The Ask Protocol
+On the site, [the theory](https://abject.world/theory) condenses them: the big
+idea was messaging, compression instead of abstraction, the ultimate
+metasystem, theory and artifact, and data, context and interaction.
 
-Abjects explain themselves in their own words. When one Abject needs to use
-another, it asks: *"What do you do? How should I talk to you?"* The target
-reads its own manifest and source, then answers in natural language.
+## How It's Built
 
-- **ObjectCreator** asks dependencies how to use them before writing a single line of code.
-- **ProxyGenerator** asks both sides what they expect, then writes a living translator between them.
-- **Chat** lets people ask about any Abject. The question reaches the Abject, and it answers from its own manifest and source.
+- **Everything is an Abject.** The registry is an abject. The factory is an abject. Even the thing that makes abjects is an abject. There is no privileged layer, just abjects passing messages.
+- **Self-healing proxies.** When two abjects connect through a generated proxy, a health monitor watches the traffic. An error rate above 10% regenerates the proxy, and changing either side's source regenerates its proxies against the new interface. Break them. They grow back.
+- **Containment.** Generated abjects run in a script sandbox with no file, network, or process access of their own. Code in other languages runs as WebAssembly, which can do nothing but send messages, log, and read the clock. No ambient authority: everything an abject does is a message to a capability object, and the ones that reach your machine or the network go through a permission broker that follows rules you set, or asks you.
+- **True names.** Every peer has a true name: a SHA-256 hash of its public key. ECDSA/ECDH identity, AES-256-GCM encrypted WebRTC channels. Trust is verified, not assumed.
+- **Nothing truly dies.** Erlang-style supervision with state snapshots. Kill an abject and it comes back knowing what it knew. Kill the worker thread it lived on and what lived there is rebuilt.
+- **A body when it wants one.** An X11-style display server gives each abject a window with buttons, text inputs, layouts and custom drawing, and the client composites the windows in a WebGL scene. The headless edition has no display and works the same without it.
 
-Ordinary messages never touch an LLM: they are typed payloads on a message
-bus, fast and deterministic. The LLM is a service an Abject calls when it
-actually needs to think (negotiating with a stranger, generating a new
-object, answering a question in plain English).
-
-## The Standard Bestiary
-
-- **Self-Healing Proxies**: Error rates above 10% trigger LLM proxy regeneration. Change an object's source and its proxies are regenerated against the new interface. The new proxy is swapped in for the old one. Break them. They always grow back.
-- **The Negotiator**: Bridges incompatible interfaces. It reads both manifests, generates a real proxy Abject. Not a shim. A living translator.
-- **Everything is an Abject**: The registry is an Abject. The factory is an Abject. Even the thing that makes Abjects is an Abject. There is no privileged layer. Just Abjects passing messages.
-- **Containment Protocols**: Generated Abjects run in a script sandbox with no file, network, or process access of their own. Code in other languages runs as WASM, which can do nothing but send messages, log, and read the clock. No ambient authority: everything an Abject does is a message to a capability object, and the ones that reach your machine or the network go through a permission broker that follows rules you set or asks you.
-- **True Names**: Every peer has a true name: a SHA-256 hash of its public key. ECDSA/ECDH identity. AES-256-GCM encrypted WebRTC channels. Trust is verified, not assumed.
-- **Nothing Truly Dies**: Erlang-style supervision with state snapshots. Kill an Abject; it comes back knowing what it knew. Kill the worker thread it lived on; what lived there is rebuilt.
-
-## Symbiogenesis
-
-Every agent framework draws the same line: the agent thinks, the tool obeys.
-Abject erases that line. Here, Abjects create Abjects, Abjects interview their
-dependencies, and the LLM is just another service, summoned when an Abject needs
-a mind, silent otherwise.
-
-- **ObjectCreator** interviews existing Abjects, learns their protocols through the Ask Protocol, and generates living collaborators. The tool teaches the creator how to use it.
-- **The Negotiator** reads two incompatible manifests and conjures a living proxy between them, a real Abject, not a shim.
-- **The LLM** is a service Abject, summoned when needed, silent otherwise. Abjects create Abjects that create Abjects. The recursion is unlimited.
-- **Canvas UI**: Every Abject can paint its own face. An X11-style display server gives each one a window with buttons, text inputs, layouts, and custom draw commands, and the client composites the windows in a WebGL scene. The organism has a body. (The headless edition has none, and works the same without it.)
-
-## Emergence
-
-A Goal, and a planner that keeps re-planning. The **ScrumMaster** runs each
-goal as a series of scrums: every round it reviews what the previous round
-produced, asks the team what each agent can do (the Ask Protocol; agents
-answer with an approach or PASS), stages a batch of tasks each assigned to
-the best-fit agent, and records them in a shared **TupleSpace**. When every
-task in the round reaches a terminal state, the planner reviews and decides:
-complete the goal, plan another scrum, or fail it. Some agents think with an
-LLM; some just run code; some were spawned by another agent five minutes ago.
-
-- **Iterative Decomposition**: The plan is not decided up front. Each scrum reads the prior round's results (including failures) and rewrites what comes next. The plan adapts as the system discovers what the work actually needs.
-- **Cross-Machine Coordination**: Goals and TupleSpace tuples are CRDTs that sync across peers through encrypted WebRTC channels with no central server. Kill a peer and the goal survives on every other peer that subscribed.
-- **Failure as Context**: There is no fixed retry budget. A failed task ends with its error attached to the goal's history; the next scrum reads that history and decides whether to schedule a corrective task, route the work to a different abject, or fail the goal. A separate **GoalObserver** watches from outside and auto-fails goals that go silent for too long.
-
-## The Mesh
-
-Every Abject lives in a workspace. Workspaces control visibility: who can see,
-who can reach, who can speak.
+Every abject lives in a workspace, and workspaces decide who can see, who can
+reach, and who can speak:
 
 | Tier | Name | Behavior |
 |------|------|----------|
 | **Local** | The Sealed Vault | No routes exposed. Nothing enters. Nothing leaves. |
-| **Shared** | The Inner Circle | Shared with those you name. Encrypted WebRTC, ECDH key agreement, AES-256-GCM. |
+| **Shared** | The Inner Circle | Shared with the peers you name. Encrypted WebRTC, ECDH key agreement, AES-256-GCM. |
 | **Public** | The Commons | Visible to all. Any peer can discover, connect, and begin the Ask Protocol. |
 
-## Summon the System
+## Architecture
 
-### Install
-
-The desktop app (AppImage and .deb for Linux, an installer for Windows, .dmg
-for macOS) is on the [releases page](https://github.com/mempko/abject/releases).
-
-On a server, or if you live in a terminal, install the headless edition: the
-`abject` command with its own backend and no display.
-
-```bash
-curl -fsSL https://abject.world/install.sh | sh     # Linux and macOS
-irm https://abject.world/install.ps1 | iex          # Windows (PowerShell)
-abject                                              # guided setup the first time, then the chat
+```
+ ┌─ Node.js Backend (desktop: pnpm awaken / the app · headless: abject) ─┐
+ │                                                                       │
+ │  Main thread                                                          │
+ │    MessageBus ── PeerRouter (remote traffic) · proxy routes           │
+ │    Registry · Factory · Supervisor · AuthGate · Negotiator            │
+ │    CliServer (:7723) · WebGateway (HTTP, off until enabled)           │
+ │                                                                       │
+ │  Worker pool (worker threads, one bus each)                           │
+ │    LLM · capabilities · settings · ProxyGenerator · HealthMonitor     │
+ │    workspaces · agents · Chat · KnowledgeBase (C++/WASM)              │
+ │    your abjects (script sandbox, WASM) · windows (desktop only)       │
+ │                                                                       │
+ │  P2P worker                          UI worker (desktop only)         │
+ │    Identity · PeerRegistry             BackendUI: the display server  │
+ │    RemoteRegistry · PeerDiscovery                                     │
+ └──────┬──────────────────────────┬─────────────────────┬───────────────┘
+        │ WS :7719 (desktop)       │ WS :7723            │ WebRTC
+ ┌──────▼─────────────────┐ ┌──────▼─────────┐ ┌─────────▼───────────────┐
+ │ Thin browser client    │ │ abject         │ │ Peers, paired phones    │
+ │ WebGL compositor, input│ │ (terminal)     │ │ (introduced by whisper) │
+ └────────────────────────┘ └────────────────┘ └─────────────────────────┘
 ```
 
-The release archives and a container image (`ghcr.io/mempko/abject`) carry
-the same edition; [deploy/README.md](deploy/README.md) covers running it as a
-service.
+[ARCHITECTURE.md](ARCHITECTURE.md) walks through the layers, the boot
+sequence and the main flows.
 
-### From Source: Prerequisites
+## Capability Objects
+
+| Object | What It Does |
+|--------|-------------|
+| **HttpClient** | HTTP requests with domain allow/deny; private and loopback addresses only when you list them under Private hosts |
+| **StreamClient** | Long-lived WebSocket and Server-Sent Events connections |
+| **Storage** | Persistent key-value store (SQLite), one per workspace plus one global |
+| **FileSystem** | A virtual filesystem per workspace |
+| **HostFileSystem** | Real files on your machine, through the permission broker |
+| **ShellExecutor** | Shell commands on your machine, through the permission broker |
+| **WebSearch** / **WebFetch** | Web search, and a page's readable text |
+| **WebBrowser** | Browser automation with Playwright (in the desktop app, Electron's own Chromium) |
+| **WebParser** | HTML parsing and content extraction (linkedom) |
+| **SharedState** | CRDT state that syncs with peers who share the workspace |
+| **FileTransfer** / **MediaStream** | Files and media tracks over peer connections |
+| **Timer** / **Clipboard** / **Console** / **Crypto** | Timers, the clipboard, per-object logs, hashing and secure randomness |
+| **Screenshot** / **AudioOutput** / **Speech** | Desktop only: captures, sound, text to speech and back |
+
+## Running from Source
+
+### Prerequisites
 
 - **Node.js 22.8+** (the server uses `node:sqlite`, and its code sandbox needs 22.8). Download from [nodejs.org](https://nodejs.org) or use [nvm](https://github.com/nvm-sh/nvm) (`.nvmrc` pins 22).
 - **pnpm** - install via `npm install -g pnpm` or see [pnpm.io/installation](https://pnpm.io/installation) for other methods (Homebrew, Corepack, standalone script, etc.).
 
-### From Source: Setup
+### Setup
 
 ```bash
 # Clone the repository
@@ -156,10 +306,10 @@ pnpm awaken:headless            # then pnpm abject in another terminal
 | Command | What it does |
 |---------|-------------|
 | `pnpm conjure` | Install dependencies (`pnpm install`) |
-| `pnpm awaken` | Start the Node.js backend where all Abjects live |
+| `pnpm awaken` | Start the Node.js backend where all abjects live |
 | `pnpm scry` | Start the thin browser client (Canvas UI over WebSocket) |
 | `pnpm whisper` | Start a local signaling server (optional, `signal.abject.world` is used by default) |
-| `pnpm abject` | The `abject` command: chat with your Abjects from a tabbed TUI, answer their questions, change settings |
+| `pnpm abject` | The `abject` command: chat with your abjects from a tabbed TUI, answer their questions, change settings |
 | `pnpm awaken:headless` | Start the headless edition: the same backend with no display |
 | `pnpm incarnate:headless` | Package the headless edition (the `abject` binary and its backend, nothing to install); see [deploy/README.md](deploy/README.md) |
 | `pnpm incarnate:server` | Package the desktop edition for a server: the same command and layout, with the whole desktop, opened from browsers by pairing; see [deploy/README.md](deploy/README.md) |
@@ -175,8 +325,9 @@ A few more, for working on it:
 | `pnpm forge <dir>` | Build and install an abject package, WASM or script ([docs/PACKAGES.md](docs/PACKAGES.md)) |
 | `pnpm smelt` | Rebuild the bundled C++ KnowledgeBase (`native/knowledge-base`) |
 | `pnpm typecheck` | Type-check the whole tree |
+| `pnpm test` | Run the test suite (`node:test`) |
 
-### abject (The Command Line)
+## The abject Command
 
 The desktop has a canvas; the terminal gets `abject`. It is a whole way to
 run Abject, not only a view: the headless edition is the same backend with
@@ -212,16 +363,17 @@ Settings window has (AI keys and tiers, login, permissions, filesystem,
 shell, web) plus the current workspace's (name, access, web
 exposure, theme): arrow to one, press Enter, type the new value. Keys and
 passwords are hidden as you type and never shown again. The same changes
-are one-liners for scripts and `--plain`:
+are one-liners for scripts and `--plain` (a tier set to `latest` follows the
+provider's newest model):
 
 ```
 /get shell                          /set shell.enabled off
-/set ai.credentials.anthropic sk-…  /set ai.tiers.smart anthropic claude-sonnet-4-5
+/set ai.credentials.anthropic sk-…  /set ai.tiers.smart anthropic latest
 /add web.allowedDomains example.com /wset appearance.theme agitprop
 /preset apply OpenAI recommended    /skill enable <name>      /update check
 ```
 
-Changes go through the same Abject that serves the Settings window, so the
+Changes go through the same abject that serves the Settings window, so the
 window repaints when the terminal changes something and the other way
 round.
 
@@ -232,7 +384,7 @@ settings and shares the browser client's session tokens. The one-line
 installers above put it on your PATH; `abject update` moves an install made
 that way to the newest release, and `abject doctor` checks it.
 
-### Incarnation (Desktop App)
+## Building the Desktop App
 
 Package Abject as a standalone desktop app for Linux, Windows, or macOS.
 
@@ -258,7 +410,7 @@ opens the client in a window, uses Electron's own Chromium for web browsing,
 and carries the `abject` command. node-datachannel and node-pty are native
 modules, so the release workflow builds each platform on its own runner.
 
-The **backend** is the depths: all Abjects live here, passing messages in a
+The **backend** is the depths: all abjects live here, passing messages in a
 Node.js process with worker threads. The **browser client** is the surface: a
 thin renderer that draws what the backend tells it to and sends input back
 over WebSocket. The **signaling server** introduces peers to each other; it
@@ -268,127 +420,6 @@ alone, reached through `abject`.
 For running the signaling server in production behind TLS, and pairing it with a
 TURN relay so peers behind symmetric NAT or cell networks can still connect, see
 [WHISPER.md](WHISPER.md).
-
-## Architecture
-
-```
- ┌─ Node.js Backend (desktop: pnpm awaken / the app · headless: abject) ─┐
- │                                                                       │
- │  Main thread                                                          │
- │    MessageBus ── PeerRouter (remote traffic) · proxy routes           │
- │    Registry · Factory · Supervisor · AuthGate · Negotiator            │
- │    CliServer (:7723) · WebGateway (HTTP, off until enabled)           │
- │                                                                       │
- │  Worker pool (worker threads, one bus each)                           │
- │    LLM · capabilities · settings · ProxyGenerator · HealthMonitor     │
- │    workspaces · agents · Chat · KnowledgeBase (C++/WASM)              │
- │    your Abjects (script sandbox, WASM) · windows (desktop only)       │
- │                                                                       │
- │  P2P worker                          UI worker (desktop only)         │
- │    Identity · PeerRegistry             BackendUI: the display server  │
- │    RemoteRegistry · PeerDiscovery                                     │
- └──────┬──────────────────────────┬─────────────────────┬───────────────┘
-        │ WS :7719 (desktop)       │ WS :7723            │ WebRTC
- ┌──────▼─────────────────┐ ┌──────▼─────────┐ ┌─────────▼───────────────┐
- │ Thin browser client    │ │ abject         │ │ Peers, paired phones    │
- │ WebGL compositor, input│ │ (terminal)     │ │ (introduced by whisper) │
- └────────────────────────┘ └────────────────┘ └─────────────────────────┘
-```
-
-[ARCHITECTURE.md](ARCHITECTURE.md) walks through the layers, the boot
-sequence and the main flows.
-
-## Project Structure
-
-```
-src/
-  core/                 # Types, contracts, messages, the Abject base class
-  runtime/              # MessageBus, Mailbox, Supervisor, worker pool and bridges
-  objects/              # System objects: Registry, Factory, LLM, agents, goals, chat, workspaces, settings, windows
-  objects/capabilities/ # HttpClient, Storage, FileSystem, ShellExecutor, WebBrowser, SharedState, ...
-  objects/widgets/      # Canvas UI toolkit: windows, layouts, buttons, text, tables, charts, markdown
-  protocol/             # Negotiator, agreements, HealthMonitor
-  llm/                  # Provider interface and providers (Anthropic, OpenAI, Ollama, OpenRouter, CLI-driven, ...)
-  network/              # Transports, PeerTransport, SignalingClient, PeerRouter, binary wire codec
-  sandbox/              # Packages (WASM and script): discovery, packages.json, ingest; the WASM host
-  ui/                   # The WebGL compositor and 3D scene the browser client draws with
-server/                 # Backend: shared boot (boot.ts), desktop and headless entries, display server, gateways, whisper
-workers/                # Worker thread entries (pool, P2P, UI) and their constructor tables
-client/                 # Thin browser client: FrontendClient, transports, pairing
-cli/                    # The abject command: chat TUI, setup, service, update, doctor
-electron/               # The desktop app (Electron main process)
-native/                 # Bundled WASM system packages (the C++ KnowledgeBase)
-sdk/cpp/                # C++ SDK for writing abjects that compile to WebAssembly
-sdk/script/             # TypeScript types for script packages
-examples/               # User-loadable abject packages, WASM and script (install with pnpm forge)
-docs/                   # Specifications (PACKAGES.md, WASM_ABI.md, LLM_PROVIDERS.md, WEB_GATEWAY.md, ...)
-deploy/                 # Running the headless edition as a service (systemd unit, environment file)
-packaging/              # Package-manager manifests for the abject command
-scripts/                # forge, headless packaging, the single-binary bootstrap
-site/                   # abject.world
-```
-
-## Design by Contract
-
-Correctness over performance. Abjects state their preconditions,
-postconditions and invariants with `require`, `ensure` and `invariant` from
-`src/core/contracts.ts`. They are never disabled. From `server/auth-gate.ts`,
-the object that holds the login every socket checks:
-
-```typescript
-this.on('updateAuth', async (msg: AbjectMessage) => {
-  contractRequire(await this.isBuiltInCaller(msg.routing.from, AUTH_WRITERS as readonly string[]),
-    'AuthGate takes login changes from SettingsManager only');
-  // ...
-  contractRequire(!enabled || ((username as string) !== '' && (password as string) !== ''),
-    'a login needs a username and a password');
-  // ... apply the change ...
-  this.checkInvariants();
-});
-
-protected override checkInvariants(): void {
-  super.checkInvariants();
-  invariant(!this.authConfig.enabled || (this.authConfig.username !== '' && this.authConfig.password !== ''),
-    'AuthGate: login enabled without credentials');
-}
-```
-
-## Capability Objects
-
-| Object | What It Does |
-|--------|-------------|
-| **HttpClient** | HTTP requests with domain allow/deny; private and loopback addresses only when you list them under Private hosts |
-| **StreamClient** | Long-lived WebSocket and Server-Sent Events connections |
-| **Storage** | Persistent key-value store (SQLite), one per workspace plus one global |
-| **FileSystem** | A virtual filesystem per workspace |
-| **HostFileSystem** | Real files on your machine, through the permission broker |
-| **ShellExecutor** | Shell commands on your machine, through the permission broker |
-| **WebSearch** / **WebFetch** | Web search, and a page's readable text |
-| **WebBrowser** | Browser automation with Playwright (in the desktop app, Electron's own Chromium) |
-| **WebParser** | HTML parsing and content extraction (linkedom) |
-| **SharedState** | CRDT state that syncs with peers who share the workspace |
-| **FileTransfer** / **MediaStream** | Files and media tracks over peer connections |
-| **Timer** / **Clipboard** / **Console** / **Crypto** | Timers, the clipboard, per-object logs, hashing and secure randomness |
-| **Screenshot** / **AudioOutput** / **Speech** | Desktop only: captures, sound, text to speech and back |
-
-## From the Ashes of Fire★
-
-> Abject grew from the ashes of **Fire★** (firestr.com), a peer-to-peer
-> platform for creating and sharing distributed applications. Fire★ called it
-> **Grass Computing**: software you can touch, shape, and share directly.
-> No cloud. No landlords. Fire★ proved the vision. But it dreamed in C++ and Lua.
->
-> Abject is the next incarnation. The same soul in a new body.
-> The grass still grows. Now it thinks.
-
-| Fire★ | Abject |
-|-------|---------|
-| C++ / Qt / Lua | TypeScript / WASM / Canvas |
-| RSA 4096 | ECDSA/ECDH + AES-256-GCM |
-| Manual app sharing | LLM-mediated protocol negotiation |
-| firelocator | Signaling server |
-
-See [PHILOSOPHY.md](PHILOSOPHY.md) for the principles that carry the fire forward.
 
 ## Configuration
 
@@ -425,7 +456,8 @@ The signaling server and its optional TURN relay have their own environment
 
 ### Using with Ollama (Local LLM)
 
-Abject works with [Ollama](https://ollama.com) for fully local, private AI. Pull the recommended models:
+Abject works with [Ollama](https://ollama.com) for fully local, private AI. Pull a
+model per tier, sized to your machine, for example:
 
 ```bash
 ollama pull qwen3:32b     # Smart tier (complex reasoning, code generation)
@@ -433,7 +465,8 @@ ollama pull qwen3:8b      # Balanced tier (general purpose)
 ollama pull qwen3:4b      # Fast tier (quick tasks, low latency)
 ```
 
-Start Ollama, then configure it in Settings:
+Leave Ollama running; Abject finds it at `http://localhost:11434`. Then pick
+the models in Settings:
 1. Click the gear in the System section of the dock to open Settings, AI tab
 2. Under **1 · Credentials**, pick **Ollama** and set its URL (default: `http://localhost:11434`)
 3. Under **3 · Model Tiers**, assign a model to each tier (Smart, Balanced, Fast, and Code)
@@ -443,6 +476,90 @@ From a terminal the same is `abject setup`, or one tier at a time:
 `/set ai.tiers.smart ollama qwen3:32b`.
 
 The tier system lets Abject pick the right model for each task: heavy reasoning uses the smart tier, routine work uses balanced, quick lookups use fast, and agents draft source code on the code tier.
+
+## Working on Abject
+
+Every directory has a `README.md` that says what is in it and how it fits
+together; [ARCHITECTURE.md](ARCHITECTURE.md) walks the whole system, and
+[PHILOSOPHY.md](PHILOSOPHY.md) holds the principles. You can also extend an
+instance without touching the server: script packages in TypeScript or
+JavaScript, and abjects in any language that compiles to WebAssembly (a C++
+SDK is included), installed with `pnpm forge` ([docs/PACKAGES.md](docs/PACKAGES.md),
+[docs/WASM_ABI.md](docs/WASM_ABI.md), [examples/](examples/)).
+
+### Project Structure
+
+```
+src/
+  core/                 # Types, contracts, messages, the Abject base class
+  runtime/              # MessageBus, Mailbox, Supervisor, worker pool and bridges
+  objects/              # System objects: Registry, Factory, LLM, agents, goals, chat, workspaces, settings, windows
+  objects/capabilities/ # HttpClient, Storage, FileSystem, ShellExecutor, WebBrowser, SharedState, ...
+  objects/widgets/      # Canvas UI toolkit: windows, layouts, buttons, text, tables, charts, markdown
+  protocol/             # Negotiator, agreements, HealthMonitor
+  llm/                  # Provider interface and providers (Anthropic, OpenAI, Ollama, OpenRouter, CLI-driven, ...)
+  network/              # Transports, PeerTransport, SignalingClient, PeerRouter, binary wire codec
+  sandbox/              # Packages (WASM and script): discovery, packages.json, ingest; the WASM host
+  ui/                   # The WebGL compositor and 3D scene the browser client draws with
+server/                 # Backend: shared boot (boot.ts), desktop and headless entries, display server, gateways, whisper
+workers/                # Worker thread entries (pool, P2P, UI) and their constructor tables
+client/                 # Thin browser client: FrontendClient, transports, pairing
+cli/                    # The abject command: chat TUI, setup, service, update, doctor
+electron/               # The desktop app (Electron main process)
+native/                 # Bundled WASM system packages (the C++ KnowledgeBase)
+sdk/cpp/                # C++ SDK for writing abjects that compile to WebAssembly
+sdk/script/             # TypeScript types for script packages
+examples/               # User-loadable abject packages, WASM and script (install with pnpm forge)
+docs/                   # Specifications (PACKAGES.md, WASM_ABI.md, LLM_PROVIDERS.md, WEB_GATEWAY.md, ...)
+deploy/                 # Running the headless edition as a service (systemd unit, environment file)
+packaging/              # Package-manager manifests for the abject command
+scripts/                # forge, headless packaging, the single-binary bootstrap
+site/                   # abject.world
+```
+
+### Design by Contract
+
+Correctness over performance. Abjects state their preconditions,
+postconditions and invariants with `require`, `ensure` and `invariant` from
+`src/core/contracts.ts`. They are never disabled. From `server/auth-gate.ts`,
+the object that holds the login every socket checks:
+
+```typescript
+this.on('updateAuth', async (msg: AbjectMessage) => {
+  contractRequire(await this.isBuiltInCaller(msg.routing.from, AUTH_WRITERS as readonly string[]),
+    'AuthGate takes login changes from SettingsManager only');
+  // ...
+  contractRequire(!enabled || ((username as string) !== '' && (password as string) !== ''),
+    'a login needs a username and a password');
+  // ... apply the change ...
+  this.checkInvariants();
+});
+
+protected override checkInvariants(): void {
+  super.checkInvariants();
+  invariant(!this.authConfig.enabled || (this.authConfig.username !== '' && this.authConfig.password !== ''),
+    'AuthGate: login enabled without credentials');
+}
+```
+
+## From the Ashes of Fire★
+
+> Abject grew from the ashes of **Fire★** (firestr.com), a peer-to-peer
+> platform for creating and sharing distributed applications. Fire★ called it
+> **Grass Computing**: software you can touch, shape, and share directly.
+> No cloud. No landlords. Fire★ proved the vision. But it dreamed in C++ and Lua.
+>
+> Abject is the next incarnation. The same soul in a new body.
+> The grass still grows. Now it thinks.
+
+| Fire★ | Abject |
+|-------|---------|
+| C++ / Qt / Lua | TypeScript / WASM / Canvas |
+| RSA 4096 | ECDSA/ECDH + AES-256-GCM |
+| Manual app sharing | LLM-mediated protocol negotiation |
+| firelocator | Signaling server |
+
+See [PHILOSOPHY.md](PHILOSOPHY.md) for the principles that carry the fire forward.
 
 ## License
 

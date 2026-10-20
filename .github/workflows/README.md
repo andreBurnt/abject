@@ -5,6 +5,11 @@ version tag builds every edition on its own platform and publishes a GitHub
 Release, plus a container image. Nothing runs on ordinary pushes or pull
 requests.
 
+These workflows are all `.github/` holds: no issue templates, code owners or
+Dependabot settings. `.github/` itself has no README on purpose: GitHub shows
+a README in `.github/` on the repository's front page in place of the root
+`README.md`.
+
 ## Architecture
 
 ```
