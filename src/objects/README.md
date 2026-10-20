@@ -145,8 +145,13 @@ decisions in GoalManager, which the KnowledgeBase applies with receipts.
 GoalManager stores cited records once by hash (`evidence:<sha256>`, see
 `src/core/evidence.ts`) and sweeps the ones nothing cites; TaskReviewer
 settles what needs no model (a pattern verdict with no recorded use becomes
-an `observe_pattern` observation, a spent repair is abandoned with its
-reason) before the queue picks work. `getLearningFunnel` reports how much of
+an `observe_pattern` observation, one about an entry that is not a pattern
+becomes that entry's confirmation, dispute or no change, a spent repair is
+abandoned with its reason) before the queue picks work. Patterns grow from
+recurrence: the KnowledgeBase counts the distinct goals behind each entry's
+receipts, and when a review confirms or revises knowledge that earlier goals
+met too, its one correction offers it for the pattern language, written as
+the general problem the instances share. `getLearningFunnel` reports how much of
 the loop reaches the world model; KnowledgeBrowser shows it.
 
 The ask protocol underlies all of it. Every Abject answers `describe` (its

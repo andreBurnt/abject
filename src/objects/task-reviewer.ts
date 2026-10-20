@@ -11,12 +11,15 @@
  * It is also the sole pattern smith: goal reviews receive the goal's
  * execution record (ScrumMaster's scrum/plan scratchpad entry) and the
  * pattern language woven for the goal (matching patterns, unwritten link
- * names, and candidate-pattern lessons), and when a recurring shape
- * emerges, the reviewer grows the workspace's generative
- * pattern language (KnowledgeBase entries of type 'pattern' with
- * named Context/Forces/Therefore sections and links to related patterns)
- * via the save_pattern / update_pattern actions. ScrumMaster records what
- * happened; this object decides what it means.
+ * names, candidate-pattern lessons, and knowledge more than one goal has
+ * met), and when a recurring shape emerges, the reviewer grows the
+ * workspace's generative pattern language (KnowledgeBase entries of type
+ * 'pattern' with named Context/Forces/Therefore sections and links to
+ * related patterns) via the save_pattern / update_pattern actions. A
+ * recurrence is offered in the review's one correction: a candidate this
+ * work repeats, or knowledge the review confirmed or revised that earlier
+ * goals met too. ScrumMaster records what happened; this object decides
+ * what it means.
  *
  * Review timing: goal-bound tasks are reviewed together when their goal
  * completes or fails, because a task's own "done" is only a claim; the
@@ -103,6 +106,18 @@ const PATTERN_APPLICATIONS_BUDGET = 4000;
 const WOVEN_PATTERN_LIMIT = 4;
 /** Candidate-pattern lessons shown beside the woven patterns. */
 const CANDIDATE_LESSON_LIMIT = 6;
+/** Knowledge met in more than one goal, shown beside the candidates. */
+const RECURRING_KNOWLEDGE_LIMIT = 4;
+/** Entries a review confirmed or revised that are checked for earlier goals behind them. */
+const MET_AGAIN_LOOKUPS = 8;
+/** Knowledge met again offered for the pattern language in one correction. */
+const MAX_MET_AGAIN = 4;
+/**
+ * What a pattern is, in Alexander's words (A Pattern Language, 1977). Every
+ * prompt that asks for a pattern starts from it: a pattern generalizes a
+ * problem the workspace keeps meeting, and the instances are its evidence.
+ */
+const RECURRING_PROBLEM = 'A pattern, in Christopher Alexander\'s words, "describes a problem which occurs over and over again in our environment, and then describes the core of the solution to that problem, in such a way that you can use this solution a million times over, without ever doing it the same way twice."';
 /** Goal reviews waiting for the in-flight review to finish. */
 const MAX_PENDING_GOAL_REVIEWS = 5;
 
@@ -212,8 +227,10 @@ interface ReviewTaskExtra {
   completionCorrectionSent?: boolean;
   cancelled?: boolean;
   completionIssues?: string[];
-  /** New lessons that repeat a candidate-pattern lesson: the recurrence that promotes a candidate. */
-  recurrences?: Array<{ title: string; candidateId: string; candidateTitle: string }>;
+  /** Candidate-pattern lessons this work met again (`seen` says how): the recurrence that promotes a candidate. */
+  recurrences?: Array<{ seen: string; candidateId: string; candidateTitle: string }>;
+  /** Other knowledge this review confirmed or revised that earlier goals had met too: instances of a recurring problem. */
+  metAgain?: Array<{ id: string; title: string; goals: number; content: string }>;
   /** Patterns the goal's plan declared: their applications are recorded per goal. */
   planPatternIds?: string[];
   goalOutcome?: 'completed' | 'failed';
@@ -930,6 +947,10 @@ My work is internal maintenance of this workspace's memory. When invited to cont
     // Version references describe the claim in the review dossier. Unknown
     // historical versions remain unknown; do not substitute today's version.
     for (const effect of decision.effects) {
+      if (!effect.attempts && (effect.input.action === 'record_pattern_application' || effect.input.action === 'observe_pattern')) {
+        const lesson = await this.lessonDisposition(effect.input, extra.knowledgeRefs);
+        if (lesson) { decision = await this.changeEffect(decision, effect, { prepare: lesson }); continue; }
+      }
       if (!effect.attempts && effect.input.action === 'record_pattern_application' && effect.input.application) {
         const app = effect.input.application as Record<string, unknown>;
         const bound = this.bindApplication(extra, String(effect.input.id), app);
@@ -957,6 +978,35 @@ My work is internal maintenance of this workspace's memory. When invited to cont
     }
     extra.decisions = [...(extra.decisions ?? []).filter(d => d.id !== decision.id), decision];
     return decision;
+  }
+
+  /**
+   * A pattern verdict about an entry that is not a pattern: the reviewer
+   * judged a lesson the way it judges a pattern. What it found still bears
+   * on that lesson, so it lands as the lesson's own disposition: helpful
+   * confirms it, harmful disputes it, and no_effect or inconclusive records
+   * no change, as does a verdict whose shown version of the lesson is
+   * unknown (a confirmation binds to the claim the reviewer read). Undefined
+   * when the target is a pattern, is gone, or cannot be read; those stay
+   * pattern verdicts. The pattern fields are cleared so the journaled input
+   * reads as the disposition it became.
+   */
+  private async lessonDisposition(input: Record<string, unknown>, knowledgeRefs?: Record<string, string>): Promise<Record<string, unknown> | undefined> {
+    const id = typeof input.id === 'string' ? input.id : '';
+    const kb = id ? await this.getKbId() : undefined;
+    if (!kb) return undefined;
+    const entry = await this.request<{ type?: string } | null>(request(this.id, kb, 'get', { id }), 5000).catch(() => null);
+    if (!entry || entry.type === 'pattern') return undefined;
+    const app = input.application && typeof input.application === 'object' ? input.application as Record<string, unknown> : {};
+    const verdict = TaskReviewer.usefulnessVerdict(input.verdict ?? app.verdict);
+    const knowledgeRef = knowledgeRefs?.[id] ?? input.knowledgeRef;
+    const action = typeof knowledgeRef !== 'string' ? 'no_change' : verdict === 'helpful' ? 'confirm_entry' : verdict === 'harmful' ? 'dispute_entry' : 'no_change';
+    const evidence = input.evidence ?? app.evidence;
+    return {
+      action, evidence: typeof evidence === 'string' && evidence.trim() ? evidence : `Judged ${verdict} as if it were a pattern`,
+      knowledgeRef: action === 'no_change' ? undefined : knowledgeRef,
+      application: undefined, applicationRef: undefined, verdict: undefined, relevance: undefined, outcome: undefined, taskId: undefined, step: undefined,
+    };
   }
 
   /**
@@ -1085,6 +1135,7 @@ My work is internal maintenance of this workspace's memory. When invited to cont
       if (!effect || effect.state === 'applied' || effect.state === 'abandoned') continue;
       const before = decision;
       const error = effect.error ?? '';
+      let lesson: Record<string, unknown> | undefined;
       try {
         if (effect.state === 'needs_repair' && effect.input.action === 'record_pattern_application' && !effect.input.applicationRef
           && /Unresolved application/.test(error)) {
@@ -1098,9 +1149,17 @@ My work is internal maintenance of this workspace's memory. When invited to cont
           && /Invalid pattern usefulness verdict/.test(error)) {
           decision = await this.changeEffect(decision, effect, { repair: { ...effect.input, verdict: TaskReviewer.usefulnessVerdict(effect.input.verdict) },
             error: 'Verdict mapped to a usefulness verdict; awaiting delivery' });
+        } else if (effect.state === 'needs_repair' && /^Pattern not found/.test(error) && (lesson = await this.lessonDisposition(effect.input))) {
+          // A verdict about a lesson rather than a pattern: it lands as the
+          // lesson's own disposition (see lessonDisposition).
+          decision = await this.changeEffect(decision, effect, { repair: {
+            action: lesson.action, id: effect.input.id, evidence: lesson.evidence,
+            ...(typeof lesson.knowledgeRef === 'string' ? { knowledgeRef: lesson.knowledgeRef } : {}),
+            ...(Array.isArray(effect.input.evidenceRefs) ? { evidenceRefs: effect.input.evidenceRefs } : {}),
+          }, error: 'A verdict about a lesson, not a pattern; recorded as the lesson\'s own disposition; awaiting delivery' });
         } else if (effect.state === 'needs_repair' && /^(Pattern not found|Knowledge target unavailable)/.test(error)) {
-          // The entry it was about has since been merged or deleted (or is not
-          // a pattern at all); no repair can supply the target it lacks.
+          // The entry it was about has since been merged or deleted; no
+          // repair can supply the target it lacks.
           const reason = error.startsWith('Pattern') ? 'Its target is gone or is not a pattern entry' : 'Its target no longer exists';
           decision = await this.changeEffect(decision, effect, { state: 'abandoned', error: `${reason} (${error})` });
         } else if (effect.state === 'needs_repair' && effect.input.action === 'record_pattern_application' && /Conflicting application feedback/.test(error)) {
@@ -1444,22 +1503,30 @@ My work is internal maintenance of this workspace's memory. When invited to cont
     // asked for in the one correction; still missing after that, the report
     // says so instead of recording nothing.
     const fidelityMissing = extra.kind === 'review' && !!extra.goalId && !extra.summaryFidelityRecorded && batch.summaryFidelity === undefined;
-    // A lesson that repeats a candidate-pattern lesson is the recurrence the
-    // pattern language waits for; the one correction offers the promotion.
-    // A candidate is handled once it is archived: promotion writes the pattern
-    // and archives the candidate it absorbs.
+    // A recurrence is the moment the pattern language grows, and the one
+    // correction offers it: a candidate-pattern lesson this work repeats, and
+    // other knowledge this review met again that earlier goals met too.
+    // Either is handled once archived: the pattern absorbed it.
+    if (!extra.cancelled && extra.kind === 'review' && !extra.completionCorrectionSent && !extra.completionIssues.length) await this.findKnowledgeMetAgain(extra);
     const archived = new Set([
       ...(extra.updates ?? []).filter(u => u.action.action === 'archive_entry').map(u => String(u.action.id)),
       ...(extra.decisions ?? []).flatMap(d => d.effects).filter(e => e.input.action === 'archive_entry').map(e => String(e.input.id)),
     ]);
     const recurrences = (extra.recurrences ?? []).filter(r => !archived.has(r.candidateId));
+    const metAgain = (extra.metAgain ?? []).filter(m => !archived.has(m.id));
     extra.recurrences = [];
-    if (!extra.cancelled && extra.kind === 'review' && (missing.length || fidelityMissing || recurrences.length) && !extra.completionIssues.length && !extra.completionCorrectionSent) {
+    extra.metAgain = [];
+    if (!extra.cancelled && extra.kind === 'review' && (missing.length || fidelityMissing || recurrences.length || metAgain.length) && !extra.completionIssues.length && !extra.completionCorrectionSent) {
       extra.completionCorrectionSent = true;
       const parts: string[] = [];
       if (recurrences.length) {
-        const seen = recurrences.map(r => `- "${clipText(r.title, 120)}" repeats candidate-pattern lesson ${r.candidateId} ("${clipText(r.candidateTitle, 120)}")`).join('\n');
-        parts.push(`This work repeats a shape already recorded as a candidate pattern:\n${seen}\nA candidate seen again is ready to join the pattern language. In your next done, promote it in result.knowledgeUpdates with {action:"save_pattern", name, context, forces, therefore, evidence (name both episodes), links}, then {action:"archive_entry", id:"<candidate id>"} for each candidate the pattern absorbs; if this review already wrote that pattern, the archive alone completes it. When on reflection the shapes differ, resend the lesson as save_entry with force: true instead, or leave the candidate for a later recurrence. Send only these updates, together with anything else this correction asks for.`);
+        const seen = recurrences.map(r => `- candidate-pattern lesson ${r.candidateId} ("${clipText(r.candidateTitle, 120)}"): ${r.seen}`).join('\n');
+        parts.push(`This work repeats a shape already recorded as a candidate pattern:\n${seen}\nA candidate seen again is ready to join the pattern language. ${RECURRING_PROBLEM} In your next done, promote it in result.knowledgeUpdates with {action:"save_pattern", name, context, forces, therefore, evidence (name both episodes), links}, then {action:"archive_entry", id:"<candidate id>"} for each candidate the pattern absorbs; if this review already wrote that pattern, the archive alone completes it. When on reflection the shapes differ, resend the lesson as save_entry with force: true instead, or leave the candidate for a later recurrence. Send only these updates, together with anything else this correction asks for.`);
+      }
+      if (metAgain.length) {
+        const budget = Math.max(160, Math.floor(2400 / metAgain.length));
+        const seen = metAgain.map(m => `- "${clipText(m.title, 120)}" [id=${m.id}; met in ${m.goals} goals]: ${clipText(m.content.replace(/\s+/g, ' '), budget)}`).join('\n');
+        parts.push(`This work met again knowledge that earlier goals met too:\n${seen}\n${RECURRING_PROBLEM} Knowledge met in goal after goal is an instance of such a problem. For each, name the problem it is an instance of in terms that reach beyond the object or tool it was met in: the context where it arises, the forces that defeat the obvious approach, and the resolution that holds however the details vary. When a pattern already names that problem, update_pattern it (its Evidence gains this instance; addLinks where it leads next). When none does, write it with save_pattern: Context, Forces and Therefore for the general problem, the goals behind it in Evidence, the concrete details in Program. Archive an instance with archive_entry only when the pattern now holds everything it says. When the entry is a fact about one thing rather than an instance of a recurring problem, it stays as it is and needs no update. Send only these updates, together with anything else this correction asks for.`);
       }
       if (missing.length) {
         const budget = Math.max(0, Math.floor(12000 / missing.length) - 160);
@@ -1517,6 +1584,40 @@ My work is internal maintenance of this workspace's memory. When invited to cont
       await this.proposeLearning(taskId, effects, { evidence: 'Held predictions that cited these entries',
         assessmentRefs: [...new Set(effects.flatMap(e => e.evidenceRefs))] });
     } catch (err) { log.warn(`confirmations of cited knowledge not journaled: ${err instanceof Error ? err.message : String(err)}`); }
+  }
+
+  /**
+   * Knowledge this review met again: entries its applied confirmations and
+   * revisions touched that earlier goals had met too (the KnowledgeBase
+   * counts the distinct goals behind an entry's receipts). Knowledge met in
+   * goal after goal is an instance of a recurring problem, which is what a
+   * pattern names. A candidate-pattern lesson met again is a recurrence like
+   * a repeated save. Other knowledge is offered each time the goals behind
+   * it double (2, 4, 8, ...), so a plain fact about one thing that every goal
+   * confirms is not offered on every review. Patterns grow through their
+   * applications instead; facts about the person, and entries the person
+   * wrote, are not instances of a problem.
+   */
+  private async findKnowledgeMetAgain(extra: ReviewTaskExtra): Promise<void> {
+    const kb = await this.getKbId();
+    if (!kb) return;
+    const offered = new Set([...(extra.recurrences ?? []).map(r => r.candidateId), ...(extra.metAgain ?? []).map(m => m.id)]);
+    const touched = [...new Set((extra.decisions ?? []).flatMap(d => d.effects)
+      .filter(e => e.state === 'applied' && (e.input.action === 'confirm_entry' || e.input.action === 'update_entry'))
+      .map(e => String(e.input.id)))].filter(id => !offered.has(id)).slice(0, MET_AGAIN_LOOKUPS);
+    type Held = { id: string; title: string; content?: string; type?: string; origin?: string; tags?: string[]; archived?: boolean; knowledgeRef?: string; learning?: { goals?: number } };
+    const entries = await Promise.all(touched.map(id => this.request<Held | null>(request(this.id, kb, 'get', { id }), 3000).catch(() => null)));
+    const found: NonNullable<ReviewTaskExtra['metAgain']> = [];
+    for (const entry of entries) {
+      const goals = entry?.learning?.goals ?? 0;
+      if (!entry || goals < 2 || entry.archived || entry.type === 'pattern' || entry.origin === 'user' || entry.tags?.includes('profile')) continue;
+      // The version the correction shows is the one an update or archive binds to.
+      if (entry.knowledgeRef) (extra.knowledgeRefs ??= {})[entry.id] = entry.knowledgeRef;
+      if (entry.tags?.includes('candidate-pattern')) (extra.recurrences ??= []).push({ seen: `this goal met it again; ${goals} goals have now met it`, candidateId: entry.id, candidateTitle: entry.title });
+      else if ((goals & (goals - 1)) === 0) found.push({ id: entry.id, title: entry.title, goals, content: entry.content ?? '' });
+    }
+    if (found.length) log.info(`Review met again ${found.length} entr${found.length === 1 ? 'y' : 'ies'} earlier goals met: ${found.map(f => `"${clipText(f.title, 50)}" (${f.goals} goals)`).join(', ')}`);
+    extra.metAgain = [...(extra.metAgain ?? []), ...found.sort((a, b) => b.goals - a.goals)].slice(0, MAX_MET_AGAIN);
   }
 
   /** Observed episodes with a stated prediction and no assessment yet; GoalManager keeps the rest unresolved. */
@@ -2383,7 +2484,7 @@ My work is internal maintenance of this workspace's memory. When invited to cont
     let note: string | undefined;
     if (target && target.tags?.includes('candidate-pattern') && p >= RECURRENCE_MIN_P && extra) {
       // The same shape seen again: the candidate is ready to become a pattern.
-      if (!(extra.recurrences ??= []).some(r => r.candidateId === target.id)) extra.recurrences.push({ title, candidateId: target.id, candidateTitle: target.title });
+      if (!(extra.recurrences ??= []).some(r => r.candidateId === target.id)) extra.recurrences.push({ seen: `the new lesson "${clipText(title, 120)}" repeats it`, candidateId: target.id, candidateTitle: target.title });
       if (target.knowledgeRef) (extra.knowledgeRefs ??= {})[target.id] = target.knowledgeRef;
       note = `Repeats candidate-pattern lesson ${where}: a candidate seen again is ready for the pattern language. Promote it with save_pattern (name both episodes in its evidence) and archive_entry the candidate it absorbs.`;
     } else if (target && match![1] === 'duplicate_of') {
@@ -2561,27 +2662,35 @@ My work is internal maintenance of this workspace's memory. When invited to cont
   /**
    * The pattern language as it bears on the reviewed work: the patterns the
    * weave selects for it (links followed one hop), the link names no pattern
-   * holds yet, and the candidate-pattern lessons that match it. A candidate
-   * this work repeats is the recurrence that promotes it, so the candidates
-   * sit beside the patterns rather than waiting on a recall of their own.
+   * holds yet, the candidate-pattern lessons that match it, and the matching
+   * knowledge that more than one goal has met. A candidate this work repeats
+   * is the recurrence that promotes it, and knowledge met in goal after goal
+   * is an instance of a recurring problem, so both sit beside the patterns
+   * rather than waiting on a recall of their own. A workspace whose language
+   * is still empty grows its first patterns from them.
    */
   private async renderPatternLanguage(kb: AbjectId, focus: string, scope: string | undefined, knowledgeRefs: Record<string, string>): Promise<string> {
     type Shown = { id: string; title: string; type?: string; tags?: string[]; content?: string; snippet?: string; via?: string; knowledgeRef?: string;
       linkedFrom?: string[]; counterexamples?: Array<{ verdict: string; evidence: string }>;
-      pattern?: { context?: string; therefore?: string; evidence?: string; links?: string[] } };
-    const [woven, recalled] = await Promise.all([
+      pattern?: { context?: string; therefore?: string; evidence?: string; links?: string[] }; learning?: { goals?: number } };
+    const [woven, recalled, recurring] = await Promise.all([
       this.request<{ patterns?: Shown[]; dangling?: string[]; broken?: Array<{ name: string; archivedId: string }> }>(
         request(this.id, kb, 'weave', { query: focus, limit: WOVEN_PATTERN_LIMIT, hops: 1, scope }), 10000).catch(() => null),
       this.request<Shown[]>(
         request(this.id, kb, 'recall', { query: focus, tags: ['candidate-pattern'], limit: CANDIDATE_LESSON_LIMIT, previews: true, scope }), 10000).catch(() => []),
+      this.request<Shown[]>(
+        request(this.id, kb, 'recall', { query: focus, minGoals: 2, limit: RECURRING_KNOWLEDGE_LIMIT * 2, previews: true, scope }), 10000).catch(() => []),
     ]);
     const patterns = (woven?.patterns ?? []).filter(p => p?.id);
     const candidates = (Array.isArray(recalled) ? recalled : []).filter(c => c?.id && c.type !== 'pattern' && c.tags?.includes('candidate-pattern'));
+    const instances = (Array.isArray(recurring) ? recurring : [])
+      .filter(e => e?.id && e.type !== 'pattern' && !e.tags?.includes('candidate-pattern') && !e.tags?.includes('profile') && (e.learning?.goals ?? 0) >= 2)
+      .slice(0, RECURRING_KNOWLEDGE_LIMIT);
     // Shown versions are the ones an update or archive in this review binds to.
-    for (const e of [...patterns, ...candidates]) if (e.knowledgeRef && !knowledgeRefs[e.id]) knowledgeRefs[e.id] = e.knowledgeRef;
+    for (const e of [...patterns, ...candidates, ...instances]) if (e.knowledgeRef && !knowledgeRefs[e.id]) knowledgeRefs[e.id] = e.knowledgeRef;
 
     const perPattern = Math.max(300, Math.floor(PATTERN_LANGUAGE_BUDGET * 0.6 / Math.max(1, patterns.length)) - 120);
-    const perCandidate = Math.max(160, Math.floor(PATTERN_LANGUAGE_BUDGET * 0.25 / Math.max(1, candidates.length)) - 120);
+    const perCandidate = Math.max(160, Math.floor(PATTERN_LANGUAGE_BUDGET * 0.25 / Math.max(1, candidates.length + instances.length)) - 120);
     const describe = (p: Shown): string => {
       const s = p.pattern;
       const signals = `${p.linkedFrom?.length ? ` Linked from: ${p.linkedFrom.join(', ')}.` : ''}`
@@ -2599,7 +2708,10 @@ My work is internal maintenance of this workspace's memory. When invited to cont
     lines.push(candidates.length
       ? `Candidate-pattern lessons matching this work (each a shape seen once before):\n${candidates.map(c => `- ${c.title} [id=${c.id}]: ${clipText((c.snippet ?? c.content ?? '').replace(/\s+/g, ' '), perCandidate)}`).join('\n')}`
       : 'No candidate-pattern lessons match this work yet.');
-    lines.push('Weigh this work against the language (step 4 of How to review): update_pattern a pattern whose context it shared; promote a candidate it repeats with save_pattern, then archive_entry the candidate; write an unwritten pattern whose territory it covers; tag a new lesson whose shape could govern other goals \'candidate-pattern\'. These ride in done.result.knowledgeUpdates like any correction.');
+    if (instances.length) {
+      lines.push(`Knowledge matching this work that more than one goal has met (each an instance of something that recurs; a pattern names the problem behind its instances):\n${instances.map(e => `- ${e.title} [id=${e.id}; met in ${e.learning?.goals} goals]: ${clipText((e.snippet ?? e.content ?? '').replace(/\s+/g, ' '), perCandidate)}`).join('\n')}`);
+    }
+    lines.push('Weigh this work against the language (step 4 of How to review): update_pattern a pattern whose context it shared; promote a candidate it repeats with save_pattern, then archive_entry the candidate; when this work meets again a problem that knowledge above records from other goals, write the pattern for that problem with save_pattern, or update_pattern the pattern that already names it; write an unwritten pattern whose territory it covers; tag a new lesson whose shape could govern other goals \'candidate-pattern\'. These ride in done.result.knowledgeUpdates like any correction.');
     return lines.join('\n');
   }
 
@@ -2666,7 +2778,7 @@ My work is internal maintenance of this workspace's memory. When invited to cont
       if (entry && entry.type !== 'pattern') {
         if (entry.tags?.includes('candidate-pattern') && trail.has(id)) {
           candidates.push(`- ${entry.title} [id=${id}]`);
-          if (!recurrences.some(r => r.candidateId === id)) recurrences.push({ title: "the goal's plan applied it", candidateId: id, candidateTitle: entry.title });
+          if (!recurrences.some(r => r.candidateId === id)) recurrences.push({ seen: "the goal's plan applied it", candidateId: id, candidateTitle: entry.title });
           if (entry.knowledgeRef && !knowledgeRefs[id]) knowledgeRefs[id] = entry.knowledgeRef;
         }
         continue;
@@ -2764,6 +2876,7 @@ My work is internal maintenance of this workspace's memory. When invited to cont
 
   private async startCuration(): Promise<boolean> {
     type Entry = { id: string; title: string; type: string; tags: string[]; origin: string; usefulCount: number; archived: boolean; content: string;
+      learning?: { goals?: number };
       pattern?: { links?: string[]; aliases?: string; learning?: { applications?: Array<{ verdict: string; goalId?: string }> } } };
     const [all, patterns] = await Promise.all([
       this.request<Entry[]>(request(this.id, this.knowledgeBaseId!, 'list', { limit: 200 }), 10000).catch(() => [] as Entry[]),
@@ -2790,7 +2903,7 @@ My work is internal maintenance of this workspace's memory. When invited to cont
     if (curatable.length === 0) return false;
 
     const listing = curatable
-      .map(e => `- ${e.id} [${e.type}] useful:${e.usefulCount} tags:${e.tags.join(',') || '-'}\n  ${e.title}: ${e.content.slice(0, 220)}${language(e)}`)
+      .map(e => `- ${e.id} [${e.type}] useful:${e.usefulCount}${e.type !== 'pattern' && (e.learning?.goals ?? 0) >= 2 ? ` met in ${e.learning!.goals} goals` : ''} tags:${e.tags.join(',') || '-'}\n  ${e.title}: ${e.content.slice(0, 220)}${language(e)}`)
       .join('\n');
 
     try {
@@ -3354,7 +3467,7 @@ Use real task/step identities from the dossier. Cover the recorded predictions, 
 3. **Distill sparingly.** New reusable lessons are optional. A routine task can finish with no new lesson after recording its prediction assessments; an empty learning update list does not replace those assessments. Save a lesson only when it will help a later task in the applicable project or environment: a capability that was hard to locate, an approach that beat the obvious one (with the reason), a constraint that was invisible up front, or a user fact the task confirmed (tag user facts "profile").
 
    **Save what is true, not the route that was taken.** An entry that tells a future task which steps to run for a kind of question — look here, then check that — freezes one attempt's path as though it described the world, and the next task follows it rather than working out its own. The risk runs opposite to confidence: a task that answered the wrong question without friction yields the tidiest-looking procedure for answering it wrongly again, and writing that down is how a single wrong turn becomes the route everyone takes. Before saving steps, check the transcript against what was actually asked — a fulfilled prediction only shows the agent did what it predicted, not that the user's question was answered, so an entry resting on assessments alone rests on nothing. Record what a thing is, what it exposes, and what its output means; leave the steps to the task.
-4. **Weave the pattern language.** The dossier's Pattern language section is the weave for this work: the patterns whose context matches it, the links no pattern answers yet, and the 'candidate-pattern' lessons that match it; recall_knowledge with other terms from the goal finds more. Read it against the execution record and transcripts, and act where they meet: update_pattern a pattern whose context this work shared (sharpen its Forces, refresh its Evidence, addLinks); promote a candidate this work repeats with save_pattern and archive the candidate it absorbs; write an unwritten pattern whose territory this work covers; and tag a new lesson 'candidate-pattern' when its shape (a recurring context, forces in tension, a resolution) could govern other goals. A review where nothing meets the language records nothing here; a recurrence is the moment the language grows. Grow the pattern language, below, says how to write one.
+4. **Weave the pattern language.** The dossier's Pattern language section is the weave for this work: the patterns whose context matches it, the links no pattern answers yet, the 'candidate-pattern' lessons that match it, and the matching knowledge that more than one goal has met; recall_knowledge with other terms from the goal finds more. Read it against the execution record and transcripts, and act where they meet: update_pattern a pattern whose context this work shared (sharpen its Forces, refresh its Evidence, addLinks); promote a candidate this work repeats with save_pattern and archive the candidate it absorbs; when this work meets again a problem that knowledge from other goals records, write the pattern for that problem; write an unwritten pattern whose territory this work covers; and tag a new lesson 'candidate-pattern' when its shape (a recurring context, forces in tension, a resolution) could govern other goals. A recurrence is the moment the language grows, and a workspace with no patterns yet grows its first ones from the problems it keeps meeting; a review where nothing recurs records nothing here. Grow the pattern language, below, says how to write one.
 
    The Pattern applications section lists every pattern this goal used: the plan's use (declared, kept and dropped across re-plans, with the tasks it governed and how their predictions went) and each agent's own use. Judge each one: helpful when following it made the work go better, no_effect when it was followed and the state it promises did not come about or did not matter, harmful when following it caused a failure or a detour, inconclusive when its effect cannot be separated from other causes. A pattern a re-plan dropped asks which happened: it failed in this context (a counterexample; sharpen its Forces or narrow its Context) or the context moved on (no judgment against it). Patterns used together that both helped are evidence for a link between them; a link whose second pattern did not fit after the first is evidence against that link.
 5. **Reconcile existing knowledge with the world.** Compare the claims injected into agents with current observations, including owner-reported checks that ran before the first model action. A successful task can disprove old claims such as a command, test suite, or capability being unavailable. This matters even when no pattern was declared. Correct the existing entry's title AND content, preserving scope, observation date, and evidence; archive obsolete duplicates rather than adding a competing correction alongside them. Do not erase unrelated valid content. Fetch the full entry with recall by id before replacing an excerpt. Current entries may already be corrected: compare them with the historical claim and leave accurate revisions alone. Missing or ambiguous evidence means uncertainty, not an automatic rewrite. Prefetched entries satisfy recall only for the material shown.
@@ -3363,12 +3476,12 @@ Use real task/step identities from the dossier. Cover the recorded predictions, 
 8. **Scratchpad material stays out.** Goal-specific findings, intermediate data, and in-progress state already live on the goal's scratchpad; the knowledge base is only for lessons that outlive the goal.
 
 ## Grow the pattern language
-The workspace's memory includes a generative pattern language in the Alexander/Coplien tradition: write patterns the way Christopher Alexander and James Coplien do, where each pattern names a recurring context, lays out forces genuinely in tension, and resolves them, and the patterns link into a language that generates good solutions piecemeal. The anatomy of an entry of type 'pattern' is Context (when the pattern applies), Forces (the tensions that make the naive approach fail), Therefore (the resolution of those forces, not a mere tip), optional Contract (checkable obligations), optional Program (a worked example), Resulting context (what holds afterwards, and which patterns apply next), Evidence (how proven it is, Alexander's confidence stars in prose), and Links to related patterns. Goal reviews carry the goal's execution record near the top of the dossier; that record is your ore for pattern mining.
+The workspace's memory includes a generative pattern language in the Alexander/Coplien tradition: write patterns the way Christopher Alexander and James Coplien do, where each pattern names a recurring context, lays out forces genuinely in tension, and resolves them, and the patterns link into a language that generates good solutions piecemeal. ${RECURRING_PROBLEM} Patterns are the part of the world model that generalizes: an entry records what one thing is or does, while a pattern records a problem this workspace meets over and over and the resolution that keeps working, so the next task that meets the problem in a new form starts from the resolution. The anatomy of an entry of type 'pattern' is Context (when the pattern applies), Forces (the tensions that make the naive approach fail), Therefore (the resolution of those forces, not a mere tip), optional Contract (checkable obligations), optional Program (a worked example), Resulting context (what holds afterwards, and which patterns apply next), Evidence (how proven it is, Alexander's confidence stars in prose), and Links to related patterns. Goal reviews carry the goal's execution record near the top of the dossier; that record is your ore for pattern mining.
 
 - **Weave before writing.** The dossier's Pattern language section surfaces the existing patterns and 'candidate-pattern'-tagged lessons that match this work; recall_knowledge with further context terms surfaces more. When an existing pattern's context covers this goal, update_pattern it: refine its Forces with what this goal revealed, refresh its Evidence line (for example "proven in 3 goals"), and addLinks to related patterns.
 - **Record applications.** For patterns actually used, record_pattern_application with the observed context, evidence and a verdict (helpful, no_effect, harmful or inconclusive), with taskId for an agent's own use and without it for the plan's. Distinguish following a pattern from benefiting; include counterexamples and competing causes.
-- **Patterns are earned.** A shape seen once becomes a save_entry lesson tagged 'candidate-pattern'. Promote it with save_pattern when the shape recurs, which is the moment the dossier shows a candidate this work repeats, and archive the candidate it absorbs. Each pattern rests on a recurrence, and a language grown on recurrences stays trustworthy.
-- **Generalize.** A pattern names a recurring CONTEXT, never this goal: keep goal titles and agent names out. Name patterns as short capitalized noun phrases (like DATA THEN JUDGMENT), and let the name be evocative enough to use in conversation.
+- **Patterns are earned.** A shape seen once becomes a save_entry lesson tagged 'candidate-pattern'. The shape seen again is the moment to write the pattern: a candidate this work repeats, or knowledge the dossier shows met in more than one goal that this work meets once more. Write it with save_pattern and archive a candidate it absorbs. Each pattern rests on a recurrence, and a language grown on recurrences stays trustworthy.
+- **Generalize.** A pattern names a recurring problem and its CONTEXT, never this goal or the one object or tool it was met in: Context, Forces and Therefore speak of the problem in terms that hold wherever it turns up, the instances (the goals, objects and tools where it was met) go in Evidence, and a concrete worked example goes in Program. Keep goal titles and agent names out. Name patterns as short capitalized noun phrases (like DATA THEN JUDGMENT), and let the name be evocative enough to use in conversation.
 - **Failed goals teach too.** When a followed pattern contributed to failure, record the counterexample and refine its Context or Forces. Consider alternative causes: a transient outage does not refute a design pattern. Preserve inconclusive cases as uncertain.
 - **Link the language.** Patterns gain power from their links, and the links are learned from use like everything else. When a new pattern completes, refines, or sets up another, name it in links, and name in linkedFrom the patterns that lead to it, so it joins the language connected rather than as an island. When patterns used together in a goal both helped, add the link they share (update_pattern addLinks) and let the first one's Resulting context say what comes next; when a linked pattern did not fit after its predecessor, the link itself is the belief that failed. A link to a pattern nobody has written yet marks work for a future review; a broken link (one naming an archived pattern) gets retargeted. When you narrow a pattern's Context, read its linkedFrom: patterns that lead to it may now lead somewhere else.
 
@@ -3405,7 +3518,7 @@ Respond with ONE JSON action object inside \`\`\`json fenced code markers. Outpu
 - **Merge by topic, keep the substance.** When several entries cover one theme (e.g. three lessons about the same tool), write one umbrella entry that preserves every distinct fact, and list ALL of their ids in absorbedIds. The merge is fail-closed: it applies only when every absorbed id checks out, so list them precisely.
 - **Archive, keep delete for falsehoods.** archive_entry hides an entry but keeps it restorable in the browser; forget_entry is only for entries that are wrong.
 - **Entries with useful counts have proven themselves**: prefer merging them INTO umbrellas over archiving them away.
-- **Garden the pattern language.** Entries of type 'pattern' are Alexander/Coplien-style patterns: Context/Forces/Therefore anatomy with links to related patterns, forming a generative language rather than a list of tips. Merge patterns whose contexts have converged into one (merge_entries, then update_pattern the survivor's links); update_pattern one whose context has drifted or split; repair links that name a retitled pattern; and when a dangling link's territory is covered by ripe candidate-pattern lessons, write the missing pattern with save_pattern. Lessons from separate goals that record one recurring shape, tagged or not, are a pattern waiting to be written: write it with save_pattern (its Evidence names the goals behind it) and archive the lessons it absorbs. Each pattern's language line shows its record and its place in the graph: connect an ISLAND to the patterns it belongs with or question whether it is a pattern at all, retarget a broken link, and narrow or retire a pattern whose record is mostly no effect or harmful. A connected language beats a bag of isolated aphorisms.
+- **Garden the pattern language.** Entries of type 'pattern' are Alexander/Coplien-style patterns: Context/Forces/Therefore anatomy with links to related patterns, forming a generative language rather than a list of tips. Merge patterns whose contexts have converged into one (merge_entries, then update_pattern the survivor's links); update_pattern one whose context has drifted or split; repair links that name a retitled pattern; and when a dangling link's territory is covered by ripe candidate-pattern lessons, write the missing pattern with save_pattern. Lessons from separate goals that record one recurring shape, tagged or not, are a pattern waiting to be written, and an entry the listing shows met in several goals is an instance of a recurring problem: write the pattern for the problem with save_pattern (Context, Forces and Therefore in general terms, its Evidence naming the goals and instances behind it) and archive the lessons it absorbs. ${RECURRING_PROBLEM} Each pattern's language line shows its record and its place in the graph: connect an ISLAND to the patterns it belongs with or question whether it is a pattern at all, retarget a broken link, and narrow or retire a pattern whose record is mostly no effect or harmful. A connected language beats a bag of isolated aphorisms.
 - **A light pass is a good pass.** When the store is already tidy, finish early with done; changing little is the expected outcome.
 
 The knowledge base is a world model. Compare predictions made before actions with feedback from the world. A successful task can contain false predictions; an expected rejection can support a narrow operation expectation. Runtime verdicts compare operation status only, not the meaning of a free-text prediction. Use assess_prediction to record material semantic confirmations, contradictions, or unresolved expectations with an evidence-grounded explanation. Review semantic agreement from the evidence, preserve uncertainty, and distinguish observations from agent explanations. Missing predictions remain unknown.

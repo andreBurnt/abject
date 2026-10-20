@@ -454,9 +454,24 @@ static bool compact_pattern_learning(json& pl) {
   return changed;
 }
 
+/// How many separate goals have met a belief: the distinct goals whose
+/// learning decisions left receipts on it (saved, confirmed, revised,
+/// disputed). A belief met in several goals describes something that
+/// recurs. Receipts folded into the tally no longer name their goal.
+static int64_t receipt_goals(const json& learning) {
+  if (!learning.is_object() || !learning.contains("history") || !learning["history"].is_array()) return 0;
+  std::set<std::string> goals;
+  for (const auto& r : learning["history"]) {
+    const auto goal = r.is_object() ? str_or(r, "goalId", "") : std::string();
+    if (!goal.empty()) goals.insert(goal);
+  }
+  return static_cast<int64_t>(goals.size());
+}
+
 /// What readers of an entry get of its learning record unless they ask for
 /// the whole history: revision and scope, the live disputes and
-/// supersessions, and how many receipts stand behind it.
+/// supersessions, how many receipts stand behind it, and how many goals
+/// they came from.
 static json learning_summary(const json& learning) {
   if (!learning.is_object()) return learning;
   json s = {{"revision", int_or(learning, "revision", 0)}};
@@ -467,6 +482,7 @@ static json learning_summary(const json& learning) {
   int64_t receipts = learning.contains("history") && learning["history"].is_array() ? static_cast<int64_t>(learning["history"].size()) : 0;
   if (learning.contains("rolledUp") && learning["rolledUp"].is_object()) receipts += int_or(learning["rolledUp"], "count", 0);
   s["receipts"] = receipts;
+  s["goals"] = receipt_goals(learning);
   s["historyOmitted"] = true;
   return s;
 }
@@ -559,7 +575,7 @@ class KnowledgeBase final : public Object {
         "generative pattern-language entries with Context/Forces/Therefore "
         "sections and links to related patterns). Knowledge "
         "persists across restarts and syncs across peers.",
-        "3.8.0", "abjects:knowledge-base");
+        "3.9.0", "abjects:knowledge-base");
 
     m.method("applyLearningDecision", "Apply an authenticated journaled correction with a durable idempotent receipt")
         .param("goalId", "string", "Evidence owner goal").param("decisionId", "string", "Durable decision")
@@ -587,6 +603,7 @@ class KnowledgeBase final : public Object {
         .param("previews", "boolean", "Return compact previews instead of full entries", true)
         .param("order", "string", "Without a query: 'recent' (default) or 'worth' (user-written first, then reviewer-confirmed useful, then recent)", true)
         .param("includeLearning", "boolean", "Include each entry's whole learning history (receipts); by default only its summary", true)
+        .param("minGoals", "number", "Only entries met in at least this many goals (distinct goals behind their learning receipts)", true)
         .returns("array");
     m.method("weave",
              "Select pattern entries (type 'pattern') whose contexts match "
@@ -1548,6 +1565,7 @@ class KnowledgeBase final : public Object {
     const std::string type = str_or(p, "type", "");
     const bool previews = bool_or(p, "previews", false);
     const size_t max = static_cast<size_t>(std::clamp<int64_t>(int_or(p, "limit", 10), 1, 50));
+    const int64_t min_goals = int_or(p, "minGoals", 0);
 
     std::vector<std::string> tag_filter;
     if (p.contains("tags") && p["tags"].is_array()) {
@@ -1570,6 +1588,7 @@ class KnowledgeBase final : public Object {
         if (!e.applicable(scope)) continue;
         if (!type.empty() && e.type != type) continue;
         if (!tag_filter.empty() && !has_any_tag(e, tag_filter)) continue;
+        if (min_goals > 0 && receipt_goals(e.learning) < min_goals) continue;
         const std::string shown = e.type == "pattern" ? e.to_presented_json()["content"].get<std::string>() : e.content;
         rows.push_back({&e, kb::make_snippet(shown, query_terms), hit.score, true});
         if (rows.size() >= max) break;
@@ -1590,6 +1609,7 @@ class KnowledgeBase final : public Object {
       }
       for (const Entry* e : candidates) {
         if (!e->applicable(scope)) continue;
+        if (min_goals > 0 && receipt_goals(e->learning) < min_goals) continue;
         // Patterns are stored as JSON; the snippet shows the prose a reader sees.
         const std::string shown = e->type == "pattern" ? e->to_presented_json()["content"].get<std::string>() : e->content;
         rows.push_back({e, clip_utf8(shown, 160), 0, false});

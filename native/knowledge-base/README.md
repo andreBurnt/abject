@@ -60,8 +60,11 @@ TypeScript callers read its message shapes from `src/core/knowledge.ts`
   `accessCount` in memory and write all counters as one small key
   (`knowledge-base:access`) at most once a minute through a `@Timer` wakeup;
   on load the map wins wherever it is ahead of an entry. Replies carry a
-  learning summary (revision, scope, disputes, supersessions, receipt count)
-  unless `includeLearning: true` asks for the whole history.
+  learning summary (revision, scope, disputes, supersessions, receipt count,
+  and `goals`: how many distinct goals left receipts on the entry) unless
+  `includeLearning: true` asks for the whole history. `recall` with
+  `minGoals` keeps only entries met in at least that many goals: knowledge
+  that keeps recurring, which is what a pattern grows from.
 - **Distillation** runs on load and at most every 30 minutes, piggybacked on
   writes rather than a timer. It archives `learned` entries never accessed
   within 7 days, `learned`/`reference` entries idle for 30 days, and the least

@@ -11,7 +11,7 @@
 
   const exact = await call(await dep('KnowledgeBase'), 'match', { pattern: 'GraphViewer|abjects:registry' });
 
-3. **get** fetches one full entry by id. Scan with previews first, then get the winners. An entry's `learning` comes as a summary (revision, scope, disputes, supersessions, how many receipts stand behind it); pass `includeLearning: true` for the receipts themselves.
+3. **get** fetches one full entry by id. Scan with previews first, then get the winners. An entry's `learning` comes as a summary (revision, scope, disputes, supersessions, how many receipts stand behind it, and `goals`: how many separate goals have met it); pass `includeLearning: true` for the receipts themselves. recall with `minGoals: 2` keeps only knowledge met in more than one goal.
 
   const entry = await call(await dep('KnowledgeBase'), 'get', { id: hits[0].id });
 

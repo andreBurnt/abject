@@ -1,6 +1,6 @@
 {
   "name": "KnowledgeBaseCpp",
-  "version": "3.8.0",
+  "version": "3.9.0",
   "abi": 1,
   "wasm": "main.wasm",
   "scope": "workspace",
@@ -201,6 +201,15 @@
               "type": {
                 "kind": "primitive",
                 "primitive": "boolean"
+              }
+            },
+            {
+              "description": "Only entries met in at least this many goals (distinct goals behind their learning receipts)",
+              "name": "minGoals",
+              "optional": true,
+              "type": {
+                "kind": "primitive",
+                "primitive": "number"
               }
             }
           ],
@@ -680,6 +689,6 @@
       "system",
       "knowledge"
     ],
-    "version": "3.8.0"
+    "version": "3.9.0"
   }
 }
