@@ -230,7 +230,7 @@ test('JSON-encoded project selections populate and refresh configuration and app
 
   const alphaDetails = browser.updates.get(detailsId) ?? [];
   const alphaGrants = browser.updates.get(grantsId) ?? [];
-  assert.equal(alphaDetails[0]?.label, 'Configuration — Alpha');
+  assert.equal(alphaDetails[0]?.label, 'Configuration: Alpha');
   assert.equal(alphaDetails.find(item => item.value === 'root')?.secondary, '/projects/alpha');
   assert.equal(alphaDetails.find(item => item.value === 'check')?.secondary, 'check-Alpha');
   assert.deepEqual(alphaGrants.map(item => item.value), ['rule:1', 'rule:3']);
@@ -244,7 +244,7 @@ test('JSON-encoded project selections populate and refresh configuration and app
 
   const betaDetails = browser.updates.get(detailsId) ?? [];
   const betaGrants = browser.updates.get(grantsId) ?? [];
-  assert.equal(betaDetails[0]?.label, 'Configuration — Beta');
+  assert.equal(betaDetails[0]?.label, 'Configuration: Beta');
   assert.equal(betaDetails.find(item => item.value === 'root')?.secondary, '/projects/beta');
   assert.equal(betaDetails.find(item => item.value === 'verify')?.secondary, 'verify-Beta');
   assert.match(betaDetails.find(item => item.value === 'security')?.secondary ?? '', /^Untrusted/);
@@ -297,6 +297,7 @@ type ShowInternals = {
   rightBodyId?: AbjectId;
   listWidgetId: AbjectId;
   tabBarId: AbjectId;
+  detailEmptyId: AbjectId;
   detailsWidgetId: AbjectId;
   grantsWidgetId: AbjectId;
   grantRowId: AbjectId;
@@ -310,6 +311,7 @@ class ShowHarness extends ExternalProjectBrowser {
   readonly calls: RecordedCall[] = [];
   private layoutSeq = 0;
   private widgetSeq = 0;
+  readonly layoutParents = new Map<AbjectId, AbjectId>();
 
   protected override async discoverDep(name: string): Promise<AbjectId | null> {
     if (name === 'WidgetManager') return this.wmId;
@@ -340,7 +342,16 @@ class ShowHarness extends ExternalProjectBrowser {
       if (method === 'createWindowAbject') return 'window' as unknown as T;
       if (method === 'createVBox' || method === 'createNestedVBox' ||
           method === 'createNestedHBox' || method === 'createNestedScrollableVBox') {
-        return `layout-${this.layoutSeq++}` as unknown as T;
+        const layoutId = `layout-${this.layoutSeq++}` as unknown as AbjectId;
+        const parentLayoutId = payload.parentLayoutId as AbjectId | undefined;
+        if (parentLayoutId) this.layoutParents.set(layoutId, parentLayoutId);
+        return layoutId as unknown as T;
+      }
+      if (method === 'createSection') {
+        const sectionId = `section-${this.layoutSeq++}` as unknown as AbjectId;
+        const parentLayoutId = payload.parentLayoutId as AbjectId | undefined;
+        if (parentLayoutId) this.layoutParents.set(sectionId, parentLayoutId);
+        return { sectionId } as unknown as T;
       }
       if (method === 'create') {
         const specs = (payload.specs as unknown[] | undefined) ?? [];
@@ -369,9 +380,26 @@ async function shownBrowser(): Promise<{ browser: ShowHarness; internals: ShowIn
 
 function childrenOf(browser: ShowHarness, layoutId: AbjectId | undefined): LayoutChildSpec[] {
   if (!layoutId) return [];
+  // Section cards and nested layouts are created inside a parent layout, so
+  // containment resolves transitively: a widget parented into a section card
+  // counts as living inside the scroll body that holds the card.
+  const descendants = new Set<AbjectId>([layoutId]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const [child, parent] of browser.layoutParents) {
+      if (descendants.has(parent) && !descendants.has(child)) {
+        descendants.add(child);
+        grew = true;
+      }
+    }
+  }
   return browser.calls
-    .filter(c => c.method === 'addLayoutChildren' && c.to === layoutId)
-    .flatMap(c => (c.payload.children as LayoutChildSpec[] | undefined) ?? []);
+    .filter(c => (c.method === 'addLayoutChildren' || c.method === 'addLayoutChild') &&
+      c.to !== undefined && descendants.has(c.to))
+    .flatMap(c => c.method === 'addLayoutChildren'
+      ? (c.payload.children as LayoutChildSpec[] | undefined) ?? []
+      : [c.payload as unknown as LayoutChildSpec]);
 }
 
 test('right pane pins the tab header and puts overflowing content in a scrollable body', async () => {
@@ -398,8 +426,8 @@ test('right pane pins the tab header and puts overflowing content in a scrollabl
   const paneChildren = browser.calls.filter(c => c.method === 'addLayoutChild' && c.to === tabHeader.to);
   assert.deepEqual(
     paneChildren.map(c => (c.payload as { widgetId: AbjectId }).widgetId),
-    [internals.tabBarId],
-    'only the pinned tab header may be a direct child of the pane',
+    [internals.tabBarId, internals.detailEmptyId],
+    'only the pinned tab header and the empty-state placeholder may be direct children of the pane',
   );
 });
 
