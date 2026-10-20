@@ -1,5 +1,23 @@
 [
   {
+    "version": "0.15.12",
+    "date": "2026-10-20",
+    "title": "Leaking abjects restart; the rest keep running",
+    "summary": "When an abject's code uses too much memory, Abject now works out which abject is responsible and restarts only that one, with its data intact, so the rest of its worker thread keeps running instead of running out of memory. The agy provider also works again on agy 1.3.4, with its newer models available.",
+    "highlights": [
+      "Per-abject memory accounting: memory use is now measured inside each sandboxed abject, so heap usage is pinned on the abject whose code holds it instead of being guessed.",
+      "Automatic relief for leaking abjects: a user abject holding more than a quarter of its thread's memory ceiling (or the largest one when a thread or the shared heap is near its limit) is restarted in a fresh sandbox with its data kept. If it fills up again within ten minutes, it is stopped instead, and its saved copy is kept.",
+      "Built-in objects are never restarted for memory; only user-created and package abjects are. This works in the desktop, headless and p2p editions.",
+      "agy provider model list refreshed for agy 1.3.4: Gemini 4 Argon, Gemini 3.8 Flash, Claude Opus 5.5 and Claude Sonnet 5.5 are now selectable (thanks to andreBurnt).",
+      "The README has been rewritten as a project landing page: screenshots up front, the Ask Protocol as the central idea, and one Configuration section with environment variables and the Ollama walkthrough."
+    ],
+    "fixes": [
+      "Requests routed through the agy provider failed on agy 1.3.4 because the tier defaults still named retired Gemini 3.7 Flash models. The defaults now use Gemini 3.8 Flash at the same effort levels.",
+      "Saved settings that point at retired agy models (older Flash and Pro lines, Claude Sonnet 4.6 and Opus 4.6 Thinking) are moved to their current successors when settings load.",
+      "These model migrations now also apply to the vision, fallback and decision model choices, not just the tier choices, so a fallback pinned to a retired model no longer keeps failing."
+    ]
+  },
+  {
     "version": "0.15.11",
     "date": "2026-10-20",
     "title": "Patterns From Lessons That Keep Coming Back",
