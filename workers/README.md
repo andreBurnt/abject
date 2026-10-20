@@ -52,7 +52,8 @@ WASM and script packages need no entry: the generic `WasmAbject` and
 editions' entries. Spawns and kills objects in this thread, delivers bus
 messages, keeps the direct worker-to-worker routes, signals child processes at
 shutdown, releases an object when it unregisters (so a stopped object can be
-collected), and reports heap use every 30 seconds to HeapMonitor.
+collected), and reports heap use every 30 seconds to HeapMonitor
+(`heap-probe.ts`).
 
 ### abject-worker-node.ts, abject-worker-headless.ts
 
@@ -77,6 +78,19 @@ The dedicated UI worker (desktop, dedicated workers on): hosts `BackendUI`
 on a `WorkerBus`. Each UI WebSocket and each paired remote browser arrives as
 a transferred `MessagePort` (`ws-relay` or `webrtc-relay`), wrapped as a
 `MessagePortUITransport`.
+
+### heap-probe.ts
+
+`startHeapProbe(port, objectCount)`: posts `worker:heap` (used, committed and
+limit bytes, object count) now and every 30 seconds. Every worker runs it, the
+pool's and both dedicated ones (P2P and UI report as `p2p` and `ui`): in the
+desktop app all threads share one heap cage, so HeapMonitor needs every
+thread's share to see the sum. Where the thread runs sandboxes, each report
+also carries what every user abject's sandbox holds (`sandboxes`, from
+`src/core/sandbox-memory.ts`); that measurement waits for the next garbage
+collection, so it starts with each report and is posted in one of its own
+when it is in, seconds later. HeapMonitor restarts a user abject that holds
+too much from these readings.
 
 ## Message protocols
 
@@ -118,7 +132,9 @@ worker sends `ready`, `p2p-ready`, `peer-id`, `remote-message`,
 - Workers are created by `server/node-worker-adapter.ts`: through tsx from
   TypeScript in a source run, as compiled `.js` from `dist-server/` otherwise
   (`pnpm bind` builds every entry here). Each gets a
-  heap ceiling (`ABJECTS_WORKER_MAX_OLD_SPACE_MB`, or sized from memory).
+  heap ceiling (`ABJECTS_WORKER_MAX_OLD_SPACE_MB`, or sized from memory; in
+  the desktop app, sized to the heap cage every thread shares, see
+  `src/runtime/heap-cage.ts`).
 - Placement across pool workers is deterministic
   (`workerIndexForId(objectId, workerCount)` in `src/runtime/worker-pool.ts`).
 - Workers inherit the main thread's environment when created, so

@@ -285,7 +285,12 @@ registers tsx inside the worker first (worker threads do not inherit tsx's
 loader) and drops tsx's `watch:` messages. `planWorkerHeaps()` and
 `workerHeapMb()` size each worker's heap ceiling: `ABJECTS_WORKER_MAX_OLD_SPACE_MB`,
 or three quarters of memory less 512 MB shared across all planned workers,
-between 512 MB and 8 GB.
+between 512 MB and 8 GB. Under Electron every isolate (main and all workers)
+allocates from one ~4 GB pointer-compression cage (`src/runtime/heap-cage.ts`),
+and a ceiling the cage cannot hold never fires: the cage fills first and V8
+aborts the whole app. There each worker's ceiling is 45% of the cage after
+512 MB for the main thread (about 1.6 GB), so a runaway worker is stopped and
+recovered instead.
 
 ### signaling-server.ts
 
@@ -310,7 +315,7 @@ call.
 | `ABJECTS_AUTH_USER` / `ABJECTS_AUTH_PASSWORD` | unset | A login for every socket (both or neither); one saved in the settings replaces it |
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `TYPESAFE_API_KEY` | unset | Provider keys handed to LLMObject at boot |
 | `ABJECTS_WORKER_COUNT` | cores - 1, at most 8 | Pool size; `0` turns the pool off, so pool objects run on the main thread |
-| `ABJECTS_WORKER_MAX_OLD_SPACE_MB` | sized from memory | Heap ceiling per worker thread |
+| `ABJECTS_WORKER_MAX_OLD_SPACE_MB` | sized from memory (desktop app: from the shared heap cage) | Heap ceiling per worker thread |
 | `ABJECTS_DEDICATED_WORKERS` | on | `0` runs the P2P layer (and on a desktop, BackendUI) on the main thread |
 | `ABJECTS_ALLOWED_ORIGINS` | unset | More web origins allowed to open the UI socket (comma or space separated), beside `ABJECTS_CLIENT_ORIGIN` (set by Electron) and the dev client on `VITE_CLIENT_PORT` (default 5174, not in a packaged app). See `src/network/origin-policy.ts` |
 | `ABJECTS_NATIVE_DIR` | found | The bundled packages directory (the `abject` command sets it for an install) |
@@ -372,9 +377,18 @@ WorkspaceManager spawns it. A new terminal op goes into
   desktop app, the dev client or `ABJECTS_ALLOWED_ORIGINS` is refused, and the
   dev client's origin is not allowed in a packaged app.
 - **UI worker death.** If the UI worker runs out of heap, window and widget
-  requests fail fast with `WORKER_DEAD` until restart. Raise
-  `ABJECTS_WORKER_MAX_OLD_SPACE_MB`, and look for a client send-queue backlog in
-  the log.
+  requests fail fast with `WORKER_DEAD` until restart. Look for a client
+  send-queue backlog in the log. Outside the desktop app,
+  `ABJECTS_WORKER_MAX_OLD_SPACE_MB` raises the ceiling.
+- **One heap for the whole desktop app.** Under Electron the main thread and
+  every worker share one ~4 GB heap cage. When it fills, V8 aborts the app
+  from whichever thread allocates next, so the fatal lines name a small heap
+  (`Allocation failed - JavaScript heap out of memory` with tens of MB). The
+  ceilings above keep one runaway worker from filling it, and HeapMonitor logs
+  `Process heap elevated` / `CRITICAL` with every thread's share. A user
+  abject (generated or package code) that holds more than a quarter of its
+  thread's ceiling is restarted before it gets that far: look for
+  `holds ...MB in its sandbox ... restarting it` from HeapMonitor.
 - **NodeStorage names.** Storage is constructed with a `storage.json` path,
   but the file it opens is `storage.db` in the same directory.
 

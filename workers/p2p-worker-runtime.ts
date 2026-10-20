@@ -49,6 +49,7 @@ import { SignalingRelayObject } from '../src/objects/signaling-relay.js';
 import { PeerDiscoveryObject } from '../src/objects/peer-discovery.js';
 import type { PeerId } from '../src/core/identity.js';
 import { Log } from '../src/core/timed-log.js';
+import { startHeapProbe } from './heap-probe.js';
 import type { Abject } from '../src/core/abject.js';
 import type { TransferListItem } from 'node:worker_threads';
 import type { WorkerBus as WorkerBusType } from '../src/runtime/worker-bus.js';
@@ -426,6 +427,9 @@ port.on('message', async (data: { type: string; [key: string]: unknown }) => {
       log.warn(`Unknown message type: ${type}`);
   }
 });
+
+// Report this isolate's heap like every other worker (see workers/heap-probe.ts).
+startHeapProbe(port, () => p2pObjects.length);
 
 // Signal ready to WorkerBridge (enables waitReady() on main thread)
 port.postMessage({ type: 'ready' });

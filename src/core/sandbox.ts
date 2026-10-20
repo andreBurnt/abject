@@ -38,6 +38,7 @@
 import * as vm from 'node:vm';
 import { Buffer } from 'node:buffer';
 import { types as utilTypes } from 'node:util';
+import { trackSandbox, type SandboxOwner } from './sandbox-memory.js';
 import * as acorn from 'acorn';
 import { require as contractRequire, requireNonEmpty, requirePositive, invariant } from './contracts.js';
 
@@ -708,6 +709,12 @@ export interface SandboxOptions {
   onInterrupt?: (err: SandboxTimeLimitError) => void;
   /** An error nobody awaits, such as one thrown by a timer callback. */
   onUncaught?: (err: Error) => void;
+  /**
+   * The abject whose code this is, so the memory the sandbox holds can be
+   * put down to it (sandbox-memory.ts). Asked when memory is measured, since
+   * an object learns its id after it is built.
+   */
+  owner?: () => SandboxOwner;
 }
 
 export type SandboxOutcome =
@@ -760,6 +767,7 @@ export class Sandbox {
       microtaskMode: 'afterEvaluate',
       codeGeneration: { strings: false, wasm: false },
     });
+    trackSandbox(this.ctx, this);
     const boot = BOOTSTRAP.runInContext(this.ctx, { timeout: BOOT_MS }) as Boot;
     // Read once, before any untrusted code has run.
     const api = boot(this.hostEntry, JSON.stringify(config));
@@ -769,6 +777,11 @@ export class Sandbox {
   /** Stopped for good: nothing more runs. */
   get stopped(): boolean {
     return this.stoppedReason !== undefined;
+  }
+
+  /** The abject whose code this is, if it said. */
+  get owner(): SandboxOwner | undefined {
+    return this.options.owner?.();
   }
 
   /** No helper call is waiting for an answer and no timer is set: only a new call can run code. */

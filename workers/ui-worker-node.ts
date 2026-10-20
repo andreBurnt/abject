@@ -21,6 +21,7 @@ import type { WorkerInboundMessage } from '../src/runtime/worker-bridge.js';
 import { BackendUI, ClientMeta } from '../server/backend-ui.js';
 import { MessagePortUITransport } from '../server/ui-transport.js';
 import { Log } from '../src/core/timed-log.js';
+import { startHeapProbe } from './heap-probe.js';
 
 if (!parentPort) {
   throw new Error('ui-worker-node.ts must be run inside a worker_threads Worker');
@@ -117,6 +118,10 @@ port.on('message', async (data: { type: string; [key: string]: unknown }) => {
       log.warn(`Unknown message type: ${type}`);
   }
 });
+
+// Report this isolate's heap like every other worker: it is a share of the
+// budget the whole process draws from (see workers/heap-probe.ts).
+startHeapProbe(port, () => (backendUI ? 1 : 0));
 
 // Signal ready
 port.postMessage({ type: 'ready' });

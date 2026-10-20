@@ -12,6 +12,7 @@ import { error as errorMessage } from '../core/message.js';
 import type { MessageBus } from './message-bus.js';
 import { Log } from '../core/timed-log.js';
 import type { TrackedChild } from './child-processes.js';
+import type { SandboxHeap } from '../core/sandbox-memory.js';
 
 const log = new Log('WorkerBridge');
 
@@ -70,6 +71,12 @@ export interface WorkerHeapSample {
   /** Objects this worker currently hosts, for attributing growth. */
   objectCount: number;
   at: number;
+  /**
+   * What each abject whose code runs in a sandbox here holds, from the
+   * latest finished measurement (src/core/sandbox-memory.ts). Absent when the
+   * thread runs no sandboxes or the measurement could not be attributed.
+   */
+  sandboxes?: SandboxHeap;
 }
 
 /** Message types sent from worker to main thread. */

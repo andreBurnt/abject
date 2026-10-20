@@ -8,6 +8,7 @@
 import { Worker as NodeWorker } from 'node:worker_threads';
 import * as os from 'node:os';
 import type { WorkerLike } from '../src/runtime/worker-bridge.js';
+import { sharedHeapCageMb } from '../src/runtime/heap-cage.js';
 
 /** Workers the process will run (pool plus dedicated), for sizing heaps. */
 let plannedWorkers = 1;
@@ -20,19 +21,37 @@ export function planWorkerHeaps(totalWorkers: number): void {
   plannedWorkers = Math.max(1, Math.floor(totalWorkers));
 }
 
+/** Kept for the main thread out of a shared heap cage, with GC headroom. */
+const CAGE_MAIN_RESERVE_MB = 512;
+/**
+ * The part of a shared cage (after the main thread's reserve) one worker may
+ * grow into. A runaway worker stops at it, while the rest of the threads still
+ * have the other 55% between them: about 2 GB, where each rests near 35 MB
+ * (measured Oct 2026, desktop edition, 11 isolates, 331 MB together).
+ */
+const CAGE_RUNAWAY_SHARE = 0.45;
+
 /**
  * The heap ceiling for each worker: ABJECTS_WORKER_MAX_OLD_SPACE_MB if set,
  * otherwise three quarters of the machine's memory (less 512 MB for the main
  * thread and the system) shared across the planned workers, between 512 MB
  * and 8 GB. A fixed 8 GB on a 2 to 4 GB VM let a runaway worker take the
  * whole machine down rather than be stopped at its own limit.
+ *
+ * Where every isolate shares one heap cage (the desktop app, see
+ * src/runtime/heap-cage.ts), a ceiling the cage cannot hold never fires: the
+ * cage fills first and V8 aborts the whole process. There the ceiling is the
+ * runaway share of the cage instead, so a worker that keeps growing is stopped
+ * at its own limit and recovered while the process lives.
  */
-export function workerHeapMb(totalMemBytes = os.totalmem(), workers = plannedWorkers): number {
+export function workerHeapMb(totalMemBytes = os.totalmem(), workers = plannedWorkers, cageMb = sharedHeapCageMb()): number {
   const envMb = Number(process.env.ABJECTS_WORKER_MAX_OLD_SPACE_MB);
   if (Number.isFinite(envMb) && envMb > 0) return envMb;
   const totalMb = totalMemBytes / (1024 * 1024);
   const share = Math.floor(((totalMb - 512) * 0.75) / Math.max(1, workers));
-  return Math.min(8192, Math.max(512, share));
+  const ceiling = Math.min(8192, Math.max(512, share));
+  if (cageMb === undefined) return ceiling;
+  return Math.min(ceiling, Math.floor((cageMb - CAGE_MAIN_RESERVE_MB) * CAGE_RUNAWAY_SHARE));
 }
 
 /** Running compiled (dist-server or the desktop app): workers are .js, not .ts. */

@@ -278,6 +278,8 @@ export * from './core/contracts.js';
 export * from './core/pattern.js';
 export { Sandbox, SandboxTimeLimitError, SandboxStoppedError, SandboxStuckError, SandboxSourceError, COMPILE_SLICE_MS } from './core/sandbox.js';
 export type { SandboxOptions, SandboxOutcome } from './core/sandbox.js';
+export { SandboxMeter, measureSandboxMemory, sandboxCount } from './core/sandbox-memory.js';
+export type { SandboxHeap, SandboxOwner } from './core/sandbox-memory.js';
 export { formatManifestAsDescription } from './core/introspect.js';
 export type { PeerId, PeerIdentity, PeerContact, PeerConnectionState } from './core/identity.js';
 export { derivePeerId, derivePeerIdFromJwk, deriveSessionKey, aesEncrypt, aesDecrypt } from './core/identity.js';

@@ -159,13 +159,17 @@ export function createDesktopUi(): UiLayer {
       // with no route, and requests to it die on the no-worker-bridge path.
       bridge.onLocalRegistered = (id) => bus.registerDedicatedBridge(id, bridge);
       bridge.onLocalUnregistered = (id) => bus.unregisterDedicatedBridge(id);
+      uiBridge.onHeapSample = (sample) => { ctx.dedicatedHeap.set('ui', sample); };
       uiBridge.onDead = (code) => {
+        ctx.dedicatedHeap.delete('ui');
         ctx.log.error('==================================================================');
         ctx.log.error(`UI WORKER DIED (exit code ${code}): the desktop UI is gone.`);
         ctx.log.error('Window, widget, and scene requests now fail fast with WORKER_DEAD');
         ctx.log.error('until the server restarts. If the cause was "JS heap out of');
-        ctx.log.error('memory", raise ABJECTS_WORKER_MAX_OLD_SPACE_MB or check for a');
-        ctx.log.error('client send-queue backlog in the lines above.');
+        ctx.log.error('memory", check for a client send-queue backlog in the lines');
+        ctx.log.error('above. Outside the desktop app ABJECTS_WORKER_MAX_OLD_SPACE_MB');
+        ctx.log.error('raises the ceiling; in it, every thread shares one heap cage');
+        ctx.log.error('and HeapMonitor\'s "Process heap" lines say who holds it.');
         ctx.log.error('==================================================================');
       };
 

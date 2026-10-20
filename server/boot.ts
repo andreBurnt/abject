@@ -95,6 +95,8 @@ import { ingestAllExtensions } from '../src/sandbox/extensions.js';
 import type { MCPBridgeConfig } from '../src/objects/mcp-bridge.js';
 import { NodeWorkerAdapter, planWorkerHeaps, workerHeapMb } from './node-worker-adapter.js';
 import { DedicatedWorkerBridge } from '../src/runtime/dedicated-worker-bridge.js';
+import type { WorkerHeapSample } from '../src/runtime/worker-bridge.js';
+import { sharedHeapCageMb } from '../src/runtime/heap-cage.js';
 import { loadAuthConfig, SessionStore, type AuthConfig } from './auth.js';
 import { AuthGate } from './auth-gate.js';
 import { CliServer } from './cli-server.js';
@@ -148,6 +150,11 @@ export interface BootContext {
   alog: Log;
   /** Dedicated worker threads (UI and P2P) are on. */
   dedicatedWorkers: boolean;
+  /**
+   * The latest heap reading of each dedicated worker ('ui', 'p2p'), filled
+   * from its bridge and read by HeapMonitor beside the pool's readings.
+   */
+  dedicatedHeap: Map<string, WorkerHeapSample>;
   wsPort: number;
   registryId: AbjectId;
   authConfig: AuthConfig;
@@ -260,8 +267,10 @@ export async function bootServer(options: BootOptions): Promise<void> {
     edition: options.edition,
     ready: () => serving,
   };
+  const heapCageMb = sharedHeapCageMb();
   alog.info(`Abject ${instanceSource.version} (${options.edition}) on Node ${process.versions.node}; ` +
-    `${workerCount} pool worker(s), heap ceiling ${workerHeapMb()} MB each`);
+    `${workerCount} pool worker(s), heap ceiling ${workerHeapMb()} MB each` +
+    (heapCageMb !== undefined ? `, every thread sharing one ${heapCageMb} MB heap cage` : ''));
 
   // Create runtime
   const runtime = getRuntime({
@@ -357,9 +366,11 @@ export async function bootServer(options: BootOptions): Promise<void> {
     return id;
   }
 
+  const dedicatedHeap = new Map<string, WorkerHeapSample>();
   const ctx: BootContext = {
     runtime, log, alog,
     dedicatedWorkers: DEDICATED_WORKERS,
+    dedicatedHeap,
     wsPort: WS_PORT,
     registryId,
     authConfig, sessionStore, instanceSource,
@@ -471,10 +482,10 @@ export async function bootServer(options: BootOptions): Promise<void> {
   runtime.objectFactory.registerConstructor('SettingsManager', () => new SettingsManager());
   runtime.objectFactory.registerConstructor('PermissionBroker', () => new PermissionBroker());
   // Main-thread only, and absent from workerEligible on purpose: it reads the
-  // pool's heap reports, and an object watching for a worker to die cannot
-  // live inside one.
+  // pool's and the dedicated workers' heap reports, and an object watching
+  // for a worker to die cannot live inside one.
   runtime.objectFactory.registerConstructor('HeapMonitor',
-    () => new HeapMonitor({ pool: runtime.workerPool }));
+    () => new HeapMonitor({ pool: runtime.workerPool, dedicated: dedicatedHeap }));
   runtime.objectFactory.registerConstructor('Identity', () => new IdentityObject());
   runtime.objectFactory.registerConstructor('PeerRegistry', () => new PeerRegistry());
   runtime.objectFactory.registerConstructor('RemoteRegistry', () => new RemoteRegistry());
@@ -667,6 +678,8 @@ export async function bootServer(options: BootOptions): Promise<void> {
     // bridge mapping instead of becoming a worker-hosted id with no route.
     bridge.onLocalRegistered = (id) => bus.registerDedicatedBridge(id, bridge);
     bridge.onLocalUnregistered = (id) => bus.unregisterDedicatedBridge(id);
+    bridge.onHeapSample = (sample) => { dedicatedHeap.set('p2p', sample); };
+    bridge.onDead = () => { dedicatedHeap.delete('p2p'); };
 
     // Register all P2P object IDs on the main bus before worker init
     const p2pObjectIds = [identityId, peerRegistryId, remoteRegistryId, signalingRelayId, peerDiscoveryId,

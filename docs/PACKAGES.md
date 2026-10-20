@@ -234,6 +234,14 @@ draws.
   read back before its first handler runs (for a WASM module, before
   `abject_init`), after a supervised restart too. Saves of either runtime are
   coalesced, about one a second.
+- **Memory is watched.** A script abject whose sandbox holds more than a
+  quarter of its thread's heap ceiling (about 430 MB in the desktop app) is
+  restarted by HeapMonitor: its source comes up in a fresh sandbox with
+  `this.data` carried across, and a notification says so. Whatever the
+  code kept outside `this.data` (module-level arrays, caches, closures) is
+  gone; `show` runs again if it was on screen. One that fills up again within
+  ten minutes is stopped for the session. So keep what must survive in
+  `this.data`, and bound what you keep anywhere else.
 - **A clone is an ordinary object.** Cloning a package abject drops the
   package owner and the `package` tag, so the copy is editable and persists as
   a user object.

@@ -432,7 +432,7 @@ TURN relay so peers behind symmetric NAT or cell networks can still connect, see
 | `HTTP_PORT` / `HTTP_BIND` | `WS_PORT+5` / `127.0.0.1` | The HTTP gateway's port and address, when it is enabled (see [docs/WEB_GATEWAY.md](docs/WEB_GATEWAY.md)) |
 | `ABJECTS_AUTH_USER` / `ABJECTS_AUTH_PASSWORD` | - | A login for every socket (both or neither); also set in Settings or `abject setup`. A terminal on the same machine gets in with the owner token in `<data dir>/instance.json` |
 | `ABJECTS_WORKER_COUNT` | CPU cores - 1 (max 8) | Worker thread pool size (`0` turns the pool off) |
-| `ABJECTS_WORKER_MAX_OLD_SPACE_MB` | sized from memory | Heap ceiling per worker (default: three quarters of memory less 512 MB, shared across workers, 512 MB to 8 GB) |
+| `ABJECTS_WORKER_MAX_OLD_SPACE_MB` | sized from memory | Heap ceiling per worker (default: three quarters of memory less 512 MB, shared across workers, 512 MB to 8 GB; in the desktop app, where every thread shares one ~4 GB heap, about 1.6 GB) |
 | `ABJECTS_DEDICATED_WORKERS` | on | `0` keeps the peer layer and the display server on the main thread |
 | `ABJECTS_PACKAGE_DIRS` | - | Extra package directories ([docs/PACKAGES.md](docs/PACKAGES.md)) |
 | `ABJECTS_ALLOWED_ORIGINS` | - | Web pages allowed to open the UI WebSocket besides the desktop app and the dev client (`http://127.0.0.1:VITE_CLIENT_PORT`, default 5174), comma-separated, e.g. `https://abject.example.com` for a client served through a reverse proxy that forwards `/ws`. Pages of any other origin are refused; the CLI gateway refuses all pages |

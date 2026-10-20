@@ -270,9 +270,19 @@ All but `file-edit.ts` and `tool-output.ts` import Node built-ins (`fs`,
   `require`/`fetch`/`process` are refused with a reach-it-by-message hint
   (`SandboxSourceError`). `compileBody` (JobManager), `compileExpression`
   (TriggerManager), `installHandlers` (ScriptableAbject), `checkHandlers`
-  (compile checks, forge). Do not enable `async_hooks.createHook` in a
+  (compile checks, forge). The `owner` option names the abject whose code it
+  is, for memory attribution. Do not enable `async_hooks.createHook` in a
   process that runs sandboxes: Node aborts when a slice is stopped inside a
   promise continuation while a hook is enabled.
+- **sandbox-memory.ts**: what each sandbox in a thread holds. Every Sandbox
+  is a V8 context, and `vm.measureMemory` measures each context but does not
+  say which is which: it answers newest first. So every sandbox context is
+  recorded as it is made (held weakly) and a measurement is read against the
+  record; when V8 reports a context the record lacks, the reading is left
+  unattributed. `measureSandboxMemory()` gives each owning abject's bytes
+  (`SandboxHeap`); `SandboxMeter` keeps the latest, one measurement at a time.
+  A measurement waits for the next garbage collection, so it takes seconds.
+  Used by the worker heap probe and HeapMonitor.
 
 ### Agents, goals and decisions
 

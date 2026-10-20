@@ -196,6 +196,15 @@ to a dead peer with `WORKER_DEAD`. `register()` posts `bus:registered` to main;
 `onUnregistered` lets the worker entry release its references. The worker side
 that drives it is `workers/worker-runtime.ts`.
 
+### heap-cage.ts
+
+`sharedHeapCageMb()`: the V8 heap budget every isolate in the process
+shares, or undefined. Under Electron (pointer compression in one shared cage)
+the main thread and all workers allocate from the same 4096 MB, so a worker's
+own ceiling above what is left never fires and a full cage aborts the whole
+process. Plain Node gives each isolate its own space. Read by
+`server/node-worker-adapter.ts` (worker ceilings) and HeapMonitor (the sum).
+
 ### child-processes.ts
 
 Child processes this thread started that must not outlive the app (MCP
@@ -214,6 +223,9 @@ Set in `server/boot.ts`:
   main thread). The default is the CPU count minus one, between 1 and 8.
 - `ABJECTS_DEDICATED_WORKERS=0` keeps the P2P (and UI) objects on the main
   thread.
+- `ABJECTS_WORKER_MAX_OLD_SPACE_MB` sets each worker's heap ceiling (otherwise
+  sized from memory, or from the shared heap cage in the desktop app; see
+  `server/node-worker-adapter.ts`).
 - `DEBUG` turns on the `LoggingInterceptor`.
 
 ## Adding things

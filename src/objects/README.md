@@ -270,7 +270,7 @@ Per-workspace UI.
 | `object-catalog.ts` | ObjectCatalog | global, worker | Cached snapshot of every registry source (system, local and remote workspaces), refreshed on timers, for browsers and agents |
 | `cassette-recorder.ts` | CassetteRecorder | global, worker | Records HttpClient exchanges per caller typeId as replayable evidence |
 | `instance-info.ts` | InstanceInfo | global, main | Version, readiness, uptime, platform, edition and `display` for abjects; the same report backs `GET /healthz` |
-| `heap-monitor.ts` | HeapMonitor | global, main | Watches every isolate's heap (pool workers report samples) and logs regime changes |
+| `heap-monitor.ts` | HeapMonitor | global, main | Watches every isolate's heap (pool, UI and P2P workers report samples) and logs regime changes; in the desktop app also the sum of all isolates against the heap cage they share, naming each thread's share when it climbs. Restarts a user abject whose sandbox holds more than a quarter of its thread's ceiling (or the largest on a thread or cage gone critical) with its data kept, and stops one that needs it again within ten minutes, its saved copy kept; built-in objects are never restarted |
 | `worker-recovery.ts` | WorkerRecovery | global, main | Told when a pool worker dies; has WorkspaceManager, SkillRegistry and the Supervisor rebuild what it hosted |
 | `app-updater.ts` | AppUpdater | global, desktop (packaged app), main | Downloads and installs app updates; GlobalSettings' Updates tab drives it |
 
@@ -364,7 +364,7 @@ ChatBrowser, the roster window, is under Per-workspace UI.
 | File | Object | Runs | Role |
 |------|--------|------|------|
 | `packages.ts` | Packages | global, worker | Lists installed packages, edits `packages.json` (enable, directories, settings), serves `getSettings` and system-scope package data |
-| `scriptable-abject.ts` | ScriptableAbject | on demand, worker | Abject whose behavior is a JavaScript handler map run in a `Sandbox` (`src/core/sandbox.ts`): messages, replies and `this.data` cross as copies, each handler or timer may run 1 s without pausing (past that the call fails and the object goes on), timers stop with the object or its source; emits `sourceUpdated` |
+| `scriptable-abject.ts` | ScriptableAbject | on demand, worker | Abject whose behavior is a JavaScript handler map run in a `Sandbox` (`src/core/sandbox.ts`): messages, replies and `this.data` cross as copies, each handler or timer may run 1 s without pausing (past that the call fails and the object goes on), timers stop with the object or its source; emits `sourceUpdated`. `freeMemory` (HeapMonitor only) restarts it in a fresh sandbox with its data, or stops it with its saved copy kept |
 | `wasm-abject.ts` | WasmAbject | on demand, worker | Host side of [docs/WASM_ABI.md](../../docs/WASM_ABI.md): forwards messages to a WebAssembly module referenced by `wasm:sha256:` |
 | `organism.ts` | Organism | on demand, worker | Composite Abject with its own internal registry; organelles (ScriptableAbjects) behind one interface |
 

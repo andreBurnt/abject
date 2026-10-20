@@ -533,62 +533,112 @@ export class ScriptableAbject extends Abject {
 
       return withKeyedLock(`${this.id}:source-activation`, async () => {
         if (expectedSource !== undefined && expectedSource !== this._source) return { success: false, conflict: true, error: 'Source changed since the expected base; read it and reconcile' };
-        this.activating = true;
-        try {
-          const deadline = Date.now()+10000;
-          while (this.activeUserCalls > 0 && Date.now()<deadline) await new Promise(resolve=>setTimeout(resolve,25));
-          if (this.activeUserCalls > 0) return {success:false,error:'Live handlers are still running; reconcile their effects before activation'};
-        // The new source compiles in a sandbox of its own before anything
-        // changes; the old one keeps running until the new one has shown.
-        const previousSource = this._source;
-        const previousList = this.handlerList;
-        const previousData = this.readData();
-        const prepared = this.prepareSource(source, previousData);
-        if ('error' in prepared) return { success: false, error: prepared.error, ...(prepared.errorLine !== undefined ? { errorLine: prepared.errorLine } : {}) };
-        const old = this.sandbox;
-        // Only an object that was on screen comes back on screen. Re-showing
-        // one that was not opened a window nobody asked for, and failed the
-        // update outright on an instance with no display. The old hide still
-        // runs either way: it is how the old lifecycle lets go of what it holds.
-        const wasShowing = this._showing;
-        const reshow = async (): Promise<void> => {
-          if (wasShowing && this._handlerFunctions.has('show')) await this.runLifecycle('show', msg);
-        };
-        if (this._handlerFunctions.has('hide')) {
-          try { await this.runLifecycle('hide', msg); }
-          catch (err) {
-            prepared.sandbox.dispose('the update was rolled back');
-            let rollbackError: string | undefined;
-            try { old.writeData(previousData); await reshow(); } catch (restore) { rollbackError = String(restore); }
-            return { success: false, error: `Previous lifecycle could not deactivate: ${String(err)}`, rolledBack: !rollbackError, rollbackError };
-          }
-        }
-        // The new handlers start from the data as the old hide left it.
-        prepared.sandbox.writeData(this.readData());
-        const result = this.activate(prepared, source);
-
-        if (wasShowing && this._handlerFunctions.has('show')) {
-          try { await this.runLifecycle('show', msg); }
-          catch (err) {
-            let rollbackError: string | undefined;
-            const failed = this.sandbox;
-            try {
-              if (this._handlerFunctions.has('hide')) await this.runLifecycle('hide', msg);
-              old.writeData(previousData);
-              this.activate({ sandbox: old, list: previousList }, previousSource);
-              await reshow();
-            } catch (restore) { rollbackError = String(restore); }
-            if (this.sandbox !== failed) failed.dispose('its activation failed');
-            return { success: false, error: `Activation failed: ${String(err)}`, rolledBack: !rollbackError, rollbackError };
-          }
-        }
-        old.dispose('its source was replaced');
-        return result;
-        } finally { this.activating = false; }
+        return this.activateSource(source, msg, { announce: true, interrupt: false });
       });
     });
 
+    // HeapMonitor's call when this object's sandbox holds more memory than one
+    // object may (src/objects/heap-monitor.ts). A restart brings the same
+    // source up in a fresh sandbox with `this.data` carried across, which
+    // frees whatever the code piled up outside its data. When a restart did
+    // not free it, HeapMonitor asks for `stop`: the object stops for this
+    // session and its saved copy is kept, so it loads again next time.
+    this.on('freeMemory', async (msg: AbjectMessage) => {
+      if (!await this.isBuiltInCaller(msg.routing.from, ['HeapMonitor'])) {
+        return { success: false, error: 'Only HeapMonitor restarts or stops an object for the memory it holds' };
+      }
+      const { stop, heldBytes, limitBytes } = msg.payload as { stop?: boolean; heldBytes: number; limitBytes: number };
+      const mb = (n: number): string => `${Math.round(n / (1024 * 1024))} MB`;
+      const name = this.manifest.name;
+      if (stop) {
+        log.error(`[${name}] held ${mb(heldBytes)} again soon after a restart (one object may hold ${mb(limitBytes)}); stopping it, its saved copy kept`);
+        void this.notify(`${name} filled up its memory again right after a restart (${mb(heldBytes)}), so it was stopped to keep everything else running. Its saved copy is kept, and it loads again next time.`, 'warning', 15_000);
+        const factoryId = await this.discoverDep('Factory');
+        if (!factoryId) return { success: false, error: 'Factory unavailable' };
+        // An event, not a request: the reply would come back to an object
+        // that has just stopped.
+        this.send(event(this.id, factoryId, 'kill', { objectId: this.id, keepSnapshot: true }));
+        return { success: true, stopped: true };
+      }
+      const result = await withKeyedLock(`${this.id}:source-activation`, () =>
+        this.activateSource(this._source, msg, { announce: false, interrupt: true }));
+      if (!result.success) {
+        log.warn(`[${name}] could not be restarted to free ${mb(heldBytes)}: ${result.error}`);
+        return result;
+      }
+      log.warn(`[${name}] held ${mb(heldBytes)} (one object may hold ${mb(limitBytes)}); restarted it in a fresh sandbox with its data`);
+      void this.notify(`${name} was holding ${mb(heldBytes)} of memory, so it was restarted to free it. Its data was kept.`, 'warning', 15_000);
+      return { success: true, restarted: true };
+    });
+
     this.installDefaultCloseHandler();
+  }
+
+  /**
+   * Bring `source` up in a fresh sandbox carrying `this.data` across: the old
+   * lifecycle hides, the new one shows if the object was on screen, and a
+   * failure on the way puts the old sandbox back. A source update waits for
+   * live handlers to finish and announces the new source; a restart
+   * (`interrupt`) fails whatever is still running and announces nothing,
+   * since the source is the same. Callers hold the source-activation lock.
+   */
+  private async activateSource(
+    source: string, msg: AbjectMessage, { announce, interrupt }: { announce: boolean; interrupt: boolean },
+  ): Promise<ApplyResult & { conflict?: boolean; rolledBack?: boolean; rollbackError?: string }> {
+    this.activating = true;
+    try {
+      if (!interrupt) {
+        const deadline = Date.now() + 10000;
+        while (this.activeUserCalls > 0 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 25));
+        if (this.activeUserCalls > 0) return { success: false, error: 'Live handlers are still running; reconcile their effects before activation' };
+      }
+      // The new source compiles in a sandbox of its own before anything
+      // changes; the old one keeps running until the new one has shown.
+      const previousSource = this._source;
+      const previousList = this.handlerList;
+      const previousData = this.readData();
+      const prepared = this.prepareSource(source, previousData);
+      if ('error' in prepared) return { success: false, error: prepared.error, ...(prepared.errorLine !== undefined ? { errorLine: prepared.errorLine } : {}) };
+      const old = this.sandbox;
+      // Only an object that was on screen comes back on screen. Re-showing
+      // one that was not opened a window nobody asked for, and failed the
+      // update outright on an instance with no display. The old hide still
+      // runs either way: it is how the old lifecycle lets go of what it holds.
+      const wasShowing = this._showing;
+      const reshow = async (): Promise<void> => {
+        if (wasShowing && this._handlerFunctions.has('show')) await this.runLifecycle('show', msg);
+      };
+      if (this._handlerFunctions.has('hide')) {
+        try { await this.runLifecycle('hide', msg); }
+        catch (err) {
+          prepared.sandbox.dispose('the update was rolled back');
+          let rollbackError: string | undefined;
+          try { old.writeData(previousData); await reshow(); } catch (restore) { rollbackError = String(restore); }
+          return { success: false, error: `Previous lifecycle could not deactivate: ${String(err)}`, rolledBack: !rollbackError, rollbackError };
+        }
+      }
+      // The new handlers start from the data as the old hide left it.
+      prepared.sandbox.writeData(this.readData());
+      const result = this.activate(prepared, source, announce);
+
+      if (wasShowing && this._handlerFunctions.has('show')) {
+        try { await this.runLifecycle('show', msg); }
+        catch (err) {
+          let rollbackError: string | undefined;
+          const failed = this.sandbox;
+          try {
+            if (this._handlerFunctions.has('hide')) await this.runLifecycle('hide', msg);
+            old.writeData(previousData);
+            this.activate({ sandbox: old, list: previousList }, previousSource, announce);
+            await reshow();
+          } catch (restore) { rollbackError = String(restore); }
+          if (this.sandbox !== failed) failed.dispose('its activation failed');
+          return { success: false, error: `Activation failed: ${String(err)}`, rolledBack: !rollbackError, rollbackError };
+        }
+      }
+      old.dispose(interrupt ? 'it was restarted' : 'its source was replaced');
+      return result;
+    } finally { this.activating = false; }
   }
 
   /**
@@ -724,7 +774,7 @@ export class ScriptableAbject extends Abject {
   static readonly PROTECTED_HANDLERS = new Set([
     'getSource', 'getData', 'updateSource', 'persistSnapshot', 'probe',
     'describe', 'ask', 'getRegistry',
-    'ping', 'addDependent', 'removeDependent',
+    'ping', 'addDependent', 'removeDependent', 'freeMemory',
   ]);
 
   /** Keys on the this-proxy that must not be overwritten by user handler code. */
@@ -764,6 +814,7 @@ export class ScriptableAbject extends Abject {
       },
       onInterrupt: (err) => log.warn(`[${this.manifest.name}] ${err.message} Its calls in flight failed and its timers were cleared.`),
       onUncaught: (err) => log.warn(`[${this.manifest.name}] uncaught error in a timer callback: ${err.message}`),
+      owner: () => ({ id: this.id, name: this.manifest.name }),
     });
   }
 
@@ -1034,9 +1085,10 @@ export class ScriptableAbject extends Abject {
 
   /**
    * Make a prepared sandbox the live one: its handlers replace the old ones
-   * on the bus and the manifest follows. The caller disposes the old sandbox.
+   * on the bus and the manifest follows; `announce` tells dependents the
+   * source changed. The caller disposes the old sandbox.
    */
-  private activate(prepared: { sandbox: Sandbox; list: HandlerList }, source: string): ApplyResult {
+  private activate(prepared: { sandbox: Sandbox; list: HandlerList }, source: string, announce = true): ApplyResult {
     const previousUserMethods = new Set(this._userMethods);
     for (const method of this._userMethods) this.off(method);
     this._userMethods.clear();
@@ -1051,7 +1103,7 @@ export class ScriptableAbject extends Abject {
 
     // Tell dependents the source changed: a Negotiator that connected this
     // object to another regenerates the proxy between them.
-    this.changed('sourceUpdated', { objectId: this.id, methods: Array.from(this._userMethods) });
+    if (announce) this.changed('sourceUpdated', { objectId: this.id, methods: Array.from(this._userMethods) });
 
     return { success: true, ...(added.length > 0 ? { manifestMethodsAdded: added } : {}), ...(removed.length > 0 ? { manifestMethodsRemoved: removed } : {}) };
   }
