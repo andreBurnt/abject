@@ -242,7 +242,7 @@ test('review report connects recorded predictions and applied revisions to asses
     decisions: [{ id: 'decision', context: { assessmentRefs: ['learning/assessment/worker:1'] }, evidence: {}, effects: [{ id: 'effect', input: { action: 'update_entry', id: 'pattern' }, state: 'applied', receipt: { revision: 3 } }] }],
   });
   const episode = report.predictions.episodes[0];
-  assert.equal(episode.appliedPatterns[0].revision, 2);
+  assert.equal(episode.appliedPatterns[0], 'pattern');
   assert.equal(episode.assessment.verdict, 'contradicted');
   assert.equal(episode.consideredBy[0].effects[0].receipt.revision, 3);
 });

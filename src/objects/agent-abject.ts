@@ -4107,7 +4107,7 @@ The registered object must implement these handlers to participate in the agent 
   }
 
   private decisionScope(entry: TaskEntry): { goalId?: string; taskId: string; onBehalfOf: string } {
-    return { goalId: entry.config.budgetGoalId ?? entry.goalId ?? entry.incomingGoalId, taskId: entry.state.id, onBehalfOf: this.agentNameOf(entry) };
+    return { goalId: entry.config?.budgetGoalId ?? entry.goalId ?? entry.incomingGoalId, taskId: entry.state.id, onBehalfOf: this.agentNameOf(entry) };
   }
 
   /**
@@ -4158,7 +4158,7 @@ The registered object must implement these handlers to participate in the agent 
   private startStepJudgment(entry: TaskEntry): void {
     const task = entry.state;
     const action = task.action, result = task.lastResult;
-    if (!action || !result || entry.config.intermediateActions.includes(String(action.action))) return;
+    if (!action || !result || (entry.config?.intermediateActions ?? []).includes(String(action.action))) return;
     const record = entry.predictions?.at(-1);
     const scope = this.decisionScope(entry);
     const taskSummary = AgentAbject.summarizeTask(task.task).slice(0, 600);
