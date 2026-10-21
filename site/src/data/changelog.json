@@ -1,5 +1,20 @@
 [
   {
+    "version": "0.15.13",
+    "date": "2026-10-21",
+    "title": "Your Notes Reach the Agents Doing the Work",
+    "summary": "When you add a note to a running goal, the agents already working on it now get that note at their next step, not just at the next planning round. Agents also start each task with a briefing on where the goal stands, including any notes you have left.",
+    "highlights": [
+      "Notes you add while a goal is running now go straight to every agent working on that goal or its sub-goals; each agent sees your note at its next step, so a change of plan takes effect mid-task.",
+      "Each agent's task briefing now lists the notes left on its goal and on the goals above it, so an agent that starts later still knows what you asked for."
+    ],
+    "fixes": [
+      "Agents no longer stumble when they judge a step from a record that is only partly written.",
+      "Patterns an agent applied are now recorded as ids, so the agent learns from the right pattern after a task.",
+      "The task reviewer copes better with unusual cases when it looks back over finished work."
+    ]
+  },
+  {
     "version": "0.15.12",
     "date": "2026-10-20",
     "title": "Leaking abjects restart; the rest keep running",
