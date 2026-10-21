@@ -16,6 +16,7 @@ type BrowserInternals = {
   detailsWidgetId: AbjectId;
   grantsWidgetId: AbjectId;
   grantRowId: AbjectId;
+  configSectionIds: AbjectId[];
   activeTab: number;
   selected?: string;
   handleChanged(fromId: AbjectId, aspect: string, value?: unknown): Promise<void>;
@@ -211,6 +212,9 @@ test('JSON-encoded project selections populate and refresh configuration and app
   internals.detailsWidgetId = detailsId;
   internals.grantsWidgetId = grantsId;
   internals.grantRowId = grantRowId;
+  // Since the pane redesign the details list is carried by a Configuration
+  // section card: the tab toggle shows/hides the cards, not the list itself.
+  internals.configSectionIds = [detailsId];
   internals.projects = [
     project('Alpha', '/projects/alpha'),
     project('Beta', '/projects/beta', { trusted: false }),
@@ -297,6 +301,7 @@ type ShowInternals = {
   rightBodyId?: AbjectId;
   listWidgetId: AbjectId;
   tabBarId: AbjectId;
+  configSectionIds: AbjectId[];
   detailEmptyId: AbjectId;
   detailsWidgetId: AbjectId;
   grantsWidgetId: AbjectId;

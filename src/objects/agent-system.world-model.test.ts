@@ -192,10 +192,11 @@ test('review completion retains malformed effects, links assessments, and does n
       evidence:'Owner verification contradicts the no-tests claim for these project inputs',evidenceRefs:['learning/task/worker'],
       assessments:[{taskId:'worker',step:1,verdict:'contradicted',explanation:'The tests ran and passed'}],
       knowledgeUpdates:[{action:'archive_entry',id:stale.id},null,{action:'archive_entry',id:'missing-target'}],
+      summaryFidelity:{verdict:'consistent',explanation:'Owner verification contradicts the no-tests claim for these project inputs'},
     }});
     assert.equal(result.accepted,true); assert.equal(result.result.decisions[0].effects[0].state,'applied');
-    assert.equal(result.result.pending.length,2); assert.equal(result.result.pending[1].input.id,'missing-target');
-    assert.equal(result.result.decisions[0].evidence['learning/assessment/worker:1'].verdict,'contradicted');
+    assert.equal(result.result.pending.length,2); assert.equal(result.result.pending[1].knowledgeId,'missing-target'); assert.equal(result.result.pending[1].action,'archive_entry');
+    const ev=await f.reviewer.call(f.goals.id,'getLearningEvidence',{goalId:f.goalId,decisionId:result.result.decisions[0].id}) as any; assert.equal(ev['learning/assessment/worker:1'].verdict,'contradicted');
     await f.reviewer.call(f.goals.id,'ackReview',{goalId:f.goalId,report:result.result});
     assert.equal((await f.runtime.call(f.goals.id,'pendingReviews')).length,0);
     const pending=await f.runtime.call(f.goals.id,'pendingLearningDecisions'); assert.equal(pending.length,1);
@@ -208,8 +209,9 @@ test('missing semantic evidence stays actionable, repair is claimed once, and jo
   const f=await fixture();
   try {
     const stale=await f.seed('Uncertain','Unknown');
-    const result=await f.runtime.call(f.reviewer.id,'completeReview',{taskId:'review',result:{unresolvedReason:'No evidence association supplied',knowledgeUpdates:[{action:'archive_entry',id:stale.id}]}});
-    const d=result.result.decisions[0]; assert.equal(d.effects[0].state,'needs_repair'); assert.equal(d.effects[0].original.id,stale.id);
+    const result=await f.runtime.call(f.reviewer.id,'completeReview',{taskId:'review',result:{unresolvedReason:'No evidence association supplied',knowledgeUpdates:[{action:'archive_entry',id:stale.id}],summaryFidelity:{verdict:'unverifiable',explanation:'No evidence association supplied'}}});
+    const d=result.result.decisions[0]; assert.equal(d.effects[0].state,'needs_repair'); assert.equal(d.effects[0].knowledgeId,stale.id);
+    const persistedD:any=f.storage.values.get(`:goals:learning:${f.goalId}`); assert.equal(persistedD.scratchpad[`learning/decision/${d.id}`].effects[0].original.id,stale.id);
     assert.equal((await f.reviewer.call(f.goals.id,'claimLearningRepair',{goalId:f.goalId,decisionId:d.id})).success,true);
     assert.equal((await f.reviewer.call(f.goals.id,'claimLearningRepair',{goalId:f.goalId,decisionId:d.id})).success,false);
     assert.equal((await f.runtime.call(f.kb.id,'get',{id:stale.id})).archived,false);
@@ -370,6 +372,7 @@ test('revising an assessment queues reconsideration of dependent knowledge witho
     const result=await f.runtime.call(f.reviewer.id,'completeReview',{taskId:'review',result:{
       evidence:'Owner ran 198 tests',evidenceRefs:['learning/task/worker'],assessments:[{taskId:'worker',step:1,verdict:'contradicted',explanation:'The test suite ran'}],
       knowledgeUpdates:[{action:'update_entry',id:entry.id,content:'Tests are available for these project inputs'}],
+      summaryFidelity:{verdict:'consistent',explanation:'Owner ran 198 tests'},
     }});
     assert.equal(result.result.status,'complete');
     await f.reviewer.call(f.goals.id,'recordPredictionAssessment',{goalId:f.goalId,taskId:'worker',step:1,expectedRevision:1,verdict:'unresolved',explanation:'The owner evidence needs a scope check',evidenceRefs:['learning/task/worker']});
@@ -388,7 +391,7 @@ test('a failed replacement leaves its dependent retirement pending even when arc
     const extra=(f.reviewer as any).taskExtras.get('review'); extra.knowledgeRefs[replacement.id]='stale-version';
     const response=await f.runtime.call(f.reviewer.id,'completeReview',{taskId:'review',result:{evidence:'Owner ran tests',evidenceRefs:['learning/task/worker'],assessments:[{taskId:'worker',step:1,verdict:'contradicted',explanation:'The test suite ran'}],knowledgeUpdates:[
       {action:'archive_entry',id:old.id},{action:'update_entry',id:replacement.id,content:'Tests pass'},
-    ]}});
+      ],summaryFidelity:{verdict:'consistent',explanation:'Owner ran tests'}}});
     assert.equal(response.result.decisions[0].effects[0].state,'proposed');
     assert.equal(response.result.decisions[0].effects[1].state,'needs_repair');
     assert.equal((await f.runtime.call(f.kb.id,'get',{id:old.id})).archived,false);

@@ -244,5 +244,6 @@ test('review report connects recorded predictions and applied revisions to asses
   const episode = report.predictions.episodes[0];
   assert.equal(episode.appliedPatterns[0], 'pattern');
   assert.equal(episode.assessment.verdict, 'contradicted');
-  assert.equal(episode.consideredBy[0].effects[0].receipt.revision, 3);
+  assert.deepStrictEqual(episode.consideredBy[0], { decisionId: 'decision',
+    effects: [{ effectId: 'effect', action: 'update_entry', knowledgeId: 'pattern', state: 'applied' }] });
 });

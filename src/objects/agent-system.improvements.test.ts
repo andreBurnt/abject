@@ -134,7 +134,7 @@ test('prediction is recorded before the action and semantic agreement stays unkn
     const runtime: any = await f.add(new Runtime()), goals = await f.add(new Endpoint('GoalManager'));
     runtime.goalManagerId = goals.id;
     const events: any[] = []; goals.on('recordObservation', msg => { events.push(msg.payload); return { success: true }; });
-    const entry: any = { goalId: 'goal', payloads: [], state: { id: 'task', step: 0, action: { action: 'call', expect: 'receiver rejects invalid input', expectOutcome: 'failure', patterns: [{ id: 'p', revision: 2, why: 'Validate before writes' }] } } };
+    const entry: any = { goalId: 'goal', payloads: [], state: { id: 'task', step: 0, task: 'Record the expected outcome before the action runs', action: { action: 'call', expect: 'receiver rejects invalid input', expectOutcome: 'failure', patterns: [{ id: 'p', revision: 2, why: 'Validate before writes' }] } } };
     await runtime.preparePrediction(entry);
     assert.equal(events[0].observation.kind, 'prediction'); assert.equal(events[0].observation.outcome, undefined);
     entry.state.action.expect = 'rewritten after execution';
@@ -281,6 +281,7 @@ test('review prioritizes stale task claims over profiles and corrects knowledge 
     reviewer.taskExtras.get('reconcile').knowledgeRefs = Object.fromEntries(await Promise.all([stale, duplicate, user].map(async ({id}) => [id, (await caller.call(kb.id, 'get', {id})).knowledgeRef])));
     const result = {
       assessments: [{ taskId: 'worker', step: 1, verdict: 'contradicted', explanation: 'The registered test script ran 195 tests successfully.' }],
+      summaryFidelity: { verdict: 'misreported', explanation: 'The user-facing claim that no test script exists is contradicted by the registered script passing 195 tests.' },
       knowledgeUpdates: [
         { action: 'update_entry', id: stale.id, title: 'Repository test script verified', content: 'The registered test script passed 195 tests in the reviewed workspace. Evidence: worker step 1. Recheck current project configuration on later runs.', evidence: 'worker step 1 and owner completion evidence' },
         { action: 'archive_entry', id: duplicate.id, evidence: 'Obsolete duplicate contradicted by worker step 1' },
@@ -541,7 +542,7 @@ test('runtime captures application receipts before acting and reviewer settles p
     const content = JSON.stringify({ format: 1, name: 'RESTORE', context: 'settings', forces: 'live state can conceal lost data', therefore: 'restore and compare', evidence: 'candidate', links: [] });
     const { id } = await caller.call(kb.id, 'remember', { title: 'RESTORE', type: 'pattern', content });
     const selected = await caller.call(kb.id, 'get', { id });
-    const entry: any = { goalId, patternSelections: { [id]: selected.patternRef }, state: { id: 'worker', step: 0,
+    const entry: any = { goalId, patternSelections: { [id]: selected.patternRef }, state: { id: 'worker', step: 0, task: 'Record the expected outcome before the action runs',
       action: { action: 'call', expect: 'The restored value is unchanged', expectOutcome: 'success',
         patterns: [{ id, why: 'Check restored settings', revision: 999, applicationRef: 'model-invented' }] } } };
     await runtime.preparePrediction(entry);
@@ -568,7 +569,7 @@ test('runtime captures application receipts before acting and reviewer settles p
     assert.equal((await act(feedback)).learningStatus, 'saved');
     const history = await caller.call(kb.id, 'patternHistory', { id });
     assert.equal(history.applications.length, 1); assert.equal(history.applications[0].patternRevision, 1);
-    const completion = await caller.call(reviewer.id, 'completeReview', { taskId: 'review', result: 'All predictions held' });
+    const completion = await caller.call(reviewer.id, 'completeReview', { taskId: 'review', result: 'All predictions held', summaryFidelity: { verdict: 'consistent', explanation: 'Summary matches the recorded outcome' } });
     assert.equal(completion.accepted, true); assert.equal(completion.result.status, 'partial');
     assert.equal(completion.result.predictions.contradicted, 1); assert.equal(completion.result.predictions.supported, 0);
     assert.equal(completion.result.patterns.harmful, 1); assert.equal(completion.result.patterns.unresolved, 0);
@@ -602,11 +603,11 @@ test('interrupted pattern applications cannot be credited as useful and rejected
     assert.equal((await act({ action: 'record_pattern_application', id: 'pattern', application: { taskId: 'interrupted', step: 1, verdict: 'inconclusive', evidence: 'No completed observation' } })).learningStatus, 'saved');
     const update = { action: 'update_entry', id: 'fact', content: 'revised fact' };
     assert.equal((await act(update)).learningStatus, 'rejected');
-    let report = (await caller.call(reviewer.id, 'completeReview', { taskId: 'review' })).result;
+    let report = (await caller.call(reviewer.id, 'completeReview', { taskId: 'review', result: { summaryFidelity: { verdict: 'consistent', explanation: 'The reported pending set matches the reviewer\'s own evidence' } } })).result;
     assert.equal(report.pending.length, 1); assert.equal(report.patterns.inconclusive, 1);
     rejectUpdate = false;
     assert.equal((await act(update)).learningStatus, 'saved');
-    report = (await caller.call(reviewer.id, 'completeReview', { taskId: 'review' })).result;
+    report = (await caller.call(reviewer.id, 'completeReview', { taskId: 'review', result: { summaryFidelity: { verdict: 'consistent', explanation: 'The repaired review matches the recorded evidence' } } })).result;
     assert.equal(report.pending.length, 0); assert.equal(report.predictions.unresolved, 1);
     assert.equal(report.attempts.filter((u: any) => u.status === 'rejected').length, 2, 'attempt evidence survives repair');
   } finally { await f.stop(); }
@@ -662,7 +663,7 @@ test('one review completion records predictions and applications via their owner
     assert.match(dossier, /Only 2000 characters were displayed/);
     const first = await caller.call(reviewer.id, 'completeReview', { taskId: 'review', result: 'All predictions aligned; no learnings' });
     assert.equal(first.accepted, false); assert.match(first.reason, /assessments/);
-    const result = { assessments: predictions.map(p => ({ taskId: 'worker', step: p.step, verdict: p.step === 1 ? 'contradicted' : 'supported', explanation: p.actual })), applications: [{ id, application: { taskId: 'worker', step: 1, verdict: 'inconclusive', evidence: 'The page was fetched but most of its body was not displayed' } }] };
+    const result = { summaryFidelity: { verdict: 'consistent', explanation: 'The reported outcome matches the newest verification record' }, assessments: predictions.map(p => ({ taskId: 'worker', step: p.step, verdict: p.step === 1 ? 'contradicted' : 'supported', explanation: p.actual })), applications: [{ id, application: { taskId: 'worker', step: 1, verdict: 'inconclusive', evidence: 'The page was fetched but most of its body was not displayed' } }] };
     const complete = await caller.call(reviewer.id, 'completeReview', { taskId: 'review', result });
     assert.equal(complete.accepted, true); assert.equal(complete.result.status, 'complete');
     assert.equal(complete.result.predictions.supported, 16); assert.equal(complete.result.predictions.contradicted, 1); assert.equal(complete.result.predictions.unresolved, 0);
@@ -791,7 +792,10 @@ test('registered project scope follows task switches and goal evidence without a
   try {
     const owner = await f.add(new Endpoint('ExternalCreator')), outsider = await f.add(new Endpoint('Unrelated'));
     const projects: any = await f.add(new Projects());
-    projects.projects.set('first', { name: 'first', root: '/tmp/first' }); projects.projects.set('second', { name: 'second', root: '/tmp/second' });
+    const firstRoot = await mkdtemp(path.join(process.cwd(), '.abjects', 'test-first-')); // ExternalProjectRegistry.rootPresent refuses missing roots, so use a real directory
+    await owner.call(projects.id, 'addProject', { name: 'first', root: firstRoot }); // the task starts on project first, so the goal-scope fallback must see it registered
+    const secondRoot = await mkdtemp(path.join(process.cwd(), '.abjects', 'test-second-')); // ExternalProjectRegistry.rootPresent refuses missing roots, so use a real directory
+    await owner.call(projects.id, 'addProject', { name: 'second', root: secondRoot }); // provision the production way: setTaskProject resolves through ExternalProjectRegistry
     const runtime: any = await f.add(new Runtime());
     const entry: any = { agentId: owner.id, state: { id: 'work', task: 'Review repository', llmMessages: [] }, config: { knowledgeScope: 'project:first', terminalActions: {}, intermediateActions: [] } };
     runtime.taskEntries.set('work', entry);

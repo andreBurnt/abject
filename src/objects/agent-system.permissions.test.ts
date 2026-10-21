@@ -260,14 +260,13 @@ test('existing skill grants apply only to the registered SkillAgent through the 
   const f = await fixture();
   try {
     const skill = await f.add(new Endpoint('SkillAgent')); f.workspace.childIds.push(skill.id);
-    f.project.autonomy = 'read';
-    await f.brokerCall(f.shell.id, 'updateSkillPermissions', { skillName: 'fixture-skill', allowedCommands: ['touch'] });
-    const file = path.join(f.projectRoot, 'skill-output');
-    const payload = { command: 'touch', args: [file], cwd: f.projectRoot, skillName: 'fixture-skill', taskId: 'task' };
+    f.project.autonomy = 'ask'; // read-only commands would auto-accept for any local caller; only the skill grant may cover this one
+    await f.brokerCall(f.shell.id, 'updateSkillPermissions', { skillName: 'fixture-skill', allowedCommands: ['printf'] });
+    const payload = { command: 'printf', args: ['fixture'], cwd: f.projectRoot, skillName: 'fixture-skill', taskId: 'task' };
     await assert.rejects(f.client.call(f.shell.id, 'exec', payload));
     const result = await skill.call(f.shell.id, 'exec', payload);
     assert.equal(result.exitCode, 0); assert.equal(result.permission.callerId, skill.id);
-    assert.equal(result.permission.taskId, 'task'); assert((await fs.stat(file)).isFile());
+    assert.equal(result.permission.taskId, 'task'); assert.equal(result.stdout, 'fixture');
   } finally { await f.stop(); }
 });
 
@@ -326,7 +325,7 @@ test('learning observations connect provider provenance, prediction and owner pe
     runtime.goalManagerId = goals.id;
     const permission = { authority: f.host.id, callerId: f.client.id, taskId: 'task', operation: 'write', decision: 'deny', reason: 'Read-only mode' };
     const execution = { provider: 'codex-cli', model: 'fixture', transport: 'stream-json', nativeAccess: 'restricted', contextVersion: 'abject-bus-v1' };
-    const entry: any = { goalId: 'goal', state: { id: 'task', step: 0, execution,
+    const entry: any = { goalId: 'goal', state: { id: 'task', task: 'Connect provider provenance evidence', step: 0, execution,
       action: { action: 'write', expect: 'The file is updated', expectOutcome: 'success' },
       lastResult: { success: false, error: 'Permission denied', data: { permission } } } };
     await runtime.recordPrediction(entry);

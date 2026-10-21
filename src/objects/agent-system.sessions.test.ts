@@ -10,7 +10,18 @@ import type { AbjectId } from '../core/types.js';
 
 function sessions(): any {
   const s: any = new TaskSession(); s.storageId = 'storage'; s.runtimeOnly = async () => {}; s.changed = () => {};
-  s.request = async () => true;
+  // Storage-shaped stub: answers the exact set/get/keys/delete requests TaskSession sends.
+  const store = new Map<string, unknown>();
+  s.request = async (msg: any) => {
+    // AbjectMessage carries the method on routing.method and the body on msg.payload.
+    const { method } = msg.routing;
+    const { payload } = msg;
+    if (method === 'get') return store.has(payload.key) ? structuredClone(store.get(payload.key)) : null;
+    if (method === 'set') { store.set(payload.key, structuredClone(payload.value)); return undefined; }
+    if (method === 'keys') return [...store.keys()];
+    if (method === 'delete') { store.delete(payload.key); return undefined; }
+    throw new Error(`unexpected request to storage stub: ${method}`);
+  };
   return s;
 }
 const call = (s: any, method: string, payload: unknown) => s.handlers.get(method)({ routing: { from: 'runtime' }, payload });

@@ -780,8 +780,8 @@ My work is internal maintenance of this workspace's memory. When invited to cont
     });
     this.on('completeReview', async msg => {
       await this.requireTaskRuntime(msg, this.agentAbjectId);
-      const { taskId, result } = msg.payload as { taskId: string; result?: unknown };
-      return this.completeReview(taskId, result);
+      const { taskId, result, summaryFidelity } = msg.payload as { taskId: string; result?: unknown; summaryFidelity?: unknown };
+      return this.completeReview(taskId, result, summaryFidelity);
     });
     this.on('taskCancelled', async msg => {
       await this.requireTaskRuntime(msg, this.agentAbjectId);
@@ -1309,6 +1309,7 @@ My work is internal maintenance of this workspace's memory. When invited to cont
   private async applyReviewAction(taskId: string, action: AgentAction) {
     let result: { success: boolean; data?: unknown; error?: string; duplicateOf?: string };
     let advice: string[] = [];
+    let rewrittenFrom: AgentAction | undefined;
     try {
       const extra = this.taskExtras.get(taskId);
       if (extra?.goalId && this.goalManagerId && action.action === 'repair_learning') {
@@ -1344,6 +1345,9 @@ My work is internal maintenance of this workspace's memory. When invited to cont
         // it lands instead of becoming pending work no repair can finish.
         const app = action.application as Record<string, unknown>;
         extra.observedWithoutRecordedUse = (extra.observedWithoutRecordedUse ?? 0) + 1;
+        // The verdict is tracked under the verb that was refused, so a reply
+        // that cannot resolve the application still carries learningStatus.
+        rewrittenFrom = action;
         action = { action: 'observe_pattern', id: action.id, verdict: TaskReviewer.usefulnessVerdict(app.verdict), evidence: app.evidence ?? action.evidence, relevance: 'shown',
           ...(action.evidenceRefs ? { evidenceRefs: action.evidenceRefs } : {}) } as AgentAction;
       }
@@ -1367,17 +1371,21 @@ My work is internal maintenance of this workspace's memory. When invited to cont
       else if (typeof result.data === 'string') result = { ...result, data: `${result.data}\n${text}` };
       else if (result.data && typeof result.data === 'object' && !Array.isArray(result.data)) result = { ...result, data: { advice: text, ...result.data } };
     }
-    return this.trackReviewAction(taskId, action, result);
+    // A refused record_pattern_application rewritten to observe_pattern must
+    // still report the refused verb's learningStatus: the application was
+    // never resolved, so the outcome is unresolved even though the
+    // observation itself saved.
+    return this.trackReviewAction(taskId, rewrittenFrom ?? action, result, rewrittenFrom ? 'unresolved' : undefined);
   }
 
   /** Record a learning action's outcome on the review, for the report and the one-time correction. */
-  private trackReviewAction(taskId: string, action: AgentAction, result: { success: boolean; data?: unknown; error?: string; duplicateOf?: string }) {
+  private trackReviewAction(taskId: string, action: AgentAction, result: { success: boolean; data?: unknown; error?: string; duplicateOf?: string }, statusOverride?: 'unresolved') {
     const extra = this.taskExtras.get(taskId);
     if (extra && ['assess_prediction', 'record_pattern_application', 'save_entry', 'update_entry', 'archive_entry', 'forget_entry', 'mark_useful', 'save_pattern', 'update_pattern', 'merge_entries', 'author_skill'].includes(action.action)) {
       const app = action.application as Record<string, unknown> | undefined;
       const key = JSON.stringify([action.action, action.id ?? action.title ?? action.name ?? action.ids ?? '', action.taskId ?? app?.taskId ?? '', action.step ?? app?.step ?? '']);
       const updates = extra.updates ??= [];
-      const update: LearningUpdate = { key, action: structuredClone(action), status: result.duplicateOf ? 'duplicate' : result.success ? 'saved' : /unresolved|provenance|reference/i.test(result.error ?? '') ? 'unresolved' : 'rejected', result: result.data, error: result.error };
+      const update: LearningUpdate = { key, action: structuredClone(action), status: statusOverride ?? (result.duplicateOf ? 'duplicate' : result.success ? 'saved' : /unresolved|provenance|reference/i.test(result.error ?? '') ? 'unresolved' : 'rejected'), result: result.data, error: result.error };
       updates.push(update);
       return { ...result, learningStatus: update.status };
     }
@@ -1411,10 +1419,11 @@ My work is internal maintenance of this workspace's memory. When invited to cont
     }
   }
 
-  private async completeReview(taskId: string, result: unknown) {
+  private async completeReview(taskId: string, result: unknown, summaryFidelity?: unknown) {
     const extra = this.taskExtras.get(taskId);
     if (!extra) return { accepted: true, result: this.learningReport(undefined, true) };
     const batch = result && typeof result === 'object' && !Array.isArray(result) ? result as Record<string, unknown> : {};
+    if (summaryFidelity !== undefined && batch.summaryFidelity === undefined) batch.summaryFidelity = summaryFidelity;
     const actions: AgentAction[] = [];
     if ('assessments' in batch || 'applications' in batch || 'knowledgeUpdates' in batch || 'unresolvedReason' in batch) extra.completionIssues = [];
     else extra.completionIssues ??= [];
@@ -1502,7 +1511,7 @@ My work is internal maintenance of this workspace's memory. When invited to cont
     // A goal review owes a verdict on the user-facing summary. Missing, it is
     // asked for in the one correction; still missing after that, the report
     // says so instead of recording nothing.
-    const fidelityMissing = extra.kind === 'review' && !!extra.goalId && !extra.summaryFidelityRecorded && batch.summaryFidelity === undefined;
+    const fidelityMissing = result !== undefined && extra.kind === 'review' && !!extra.goalId && !extra.summaryFidelityRecorded && batch.summaryFidelity === undefined;
     // A recurrence is the moment the pattern language grows, and the one
     // correction offers it: a candidate-pattern lesson this work repeats, and
     // other knowledge this review met again that earlier goals met too.
@@ -1631,7 +1640,13 @@ My work is internal maintenance of this workspace's memory. When invited to cont
     const assessments = extra?.assessments ?? {};
     // Only steps with a stated expectation are predictions; the rest have nothing to assess.
     const episodes = new Map<string, PredictionRecord>((extra?.records ?? []).flatMap(r => (r.predictions ?? []).filter(isPredicted).map(p => [`${r.taskId}:${p.step}`, p] as const)));
-    const unassessed = [...episodes].filter(([key]) => !assessments[key]).map(([key]) => key);
+    // An interrupted episode was never assessed — whether it stated an
+    // expectation or not — and an unknown outcome has nothing recorded to
+    // judge it by, so it must be reported as unresolved, not vanish.
+    const neverObserved = [...new Set((extra?.records ?? []).flatMap(r => (r.predictions ?? [])
+      .filter(p => !isPredicted(p) && p.outcome === 'unknown')
+      .map(p => `${r.taskId}:${p.step}` as const)))];
+    const unassessed = [...episodes].filter(([key]) => !assessments[key]).map(([key]) => key).concat(neverObserved);
     const counts = { supported: 0, contradicted: 0, unresolved: unassessed.length };
     for (const [key, a] of Object.entries(assessments)) if (episodes.has(key) && a.verdict in counts) counts[a.verdict as keyof typeof counts]++;
     const latest = new Map(updates.map(u => [u.key, u]));

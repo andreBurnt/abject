@@ -125,7 +125,8 @@ test('a workspace goal runs Scrum through the global LLM, accounts usage and del
     assert.equal(record.goalId, goalId);
     assert.equal(record.agentName, 'ScrumMaster');
     assert.equal(record.status, 'accepted');
-    assert.equal(record.outbox[0].payload.success, true);
+    const full = await client.call(sessions.id, 'get', { id: record.id });
+    assert.equal(full.outbox[0].payload.success, true, 'delivered result recorded with its payload');
     assert.deepEqual(await client.call(goals.id, 'getTasksForGoal', { goalId }), [], 'internal planning creates no fake work tuple');
   } finally {
     for (const object of [...objects].reverse()) await object.stop();
