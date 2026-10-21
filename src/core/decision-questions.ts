@@ -384,12 +384,12 @@ export function interjectionQuestions(hasPendingQuestion: boolean): Questions {
     status_question: criterion('Asks how it is going without changing the work.', {
       examples: ['how is it going?'],
     }),
-    fitting_constraint: criterion('Adds a detail or preference that fits the current plan, so nothing in flight is wasted; it can wait for the next planning step.', {
-      notFor: 'A detail that changes what a task in `in_flight` is doing.',
+    fitting_constraint: criterion('Adds a detail or preference that every task in `in_flight` can follow as its description stands, so nothing in flight is wasted; it can wait for the next planning step.', {
+      notFor: 'A note that changes what a task in `in_flight` is doing, asks for something a task description rules out, or rules out something a task description asks for.',
       examples: ['use blue for the buttons too'],
     }),
-    redirect: criterion('Changes scope, target, or approach, or contradicts a task in `in_flight`, so in-flight work may be wasted.', {
-      examples: ['actually make it a countdown instead'],
+    redirect: criterion('Changes scope, target, or approach, or contradicts a task in `in_flight` (asks for what its description rules out, or rules out what it asks for), so in-flight work may be wasted.', {
+      examples: ['actually make it a countdown instead', 'delete those instead of fixing them, while the task says to delete nothing', 'go ahead and commit it, while the task says not to commit'],
     }),
     stop: criterion('Asks to stop, cancel, or abandon the goal.', {
       examples: ['never mind, cancel this'],

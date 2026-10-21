@@ -223,6 +223,30 @@ export class GoalManager extends Abject {
     return this.agentAbjectId;
   }
 
+  /** A goal and every goal under it. */
+  private goalAndDescendants(goalId: GoalId): GoalId[] {
+    const found: GoalId[] = [];
+    const visit = (id: GoalId): void => {
+      if (found.includes(id)) return;
+      found.push(id);
+      for (const child of this.goals.get(id)?.childIds ?? []) visit(child);
+    };
+    visit(goalId);
+    return found;
+  }
+
+  /** The newest user notes on a goal and the goals above it, oldest first, as a task briefing carries them. */
+  private notesOn(goal: Goal): Array<{ note: string; at: number }> {
+    const notes: Array<{ note: string; at: number }> = [];
+    const seen = new Set<GoalId>();
+    for (let g: Goal | undefined = goal; g && !seen.has(g.id); g = g.parentId ? this.goals.get(g.parentId) : undefined) {
+      seen.add(g.id);
+      for (const { note, at } of g.interjections ?? []) notes.push({ note, at });
+    }
+    return notes.sort((a, b) => a.at - b.at).slice(-GoalManager.BRIEFING_NOTES);
+  }
+  private static readonly BRIEFING_NOTES = 10;
+
   /**
    * The agent task(s) a request comes from. A job's call names its task
    * through JobManager; an agent's own `call` action is the task of that
@@ -880,7 +904,7 @@ export class GoalManager extends Abject {
             },
             {
               name: 'appendGoalNote',
-              description: 'Queue a user interjection on a running or paused goal. ScrumMaster weighs pending interjections at every decision point (planning, review scrums, mid-round checks) and may re-plan, continue, stop, or ask for clarification. Emits goalInterjection.',
+              description: 'Queue a user interjection on a running or paused goal. ScrumMaster weighs pending interjections at every decision point (planning, review scrums, mid-round checks) and may re-plan, continue, stop, or ask for clarification; the agents working on the goal and its sub-goals hear it at their next step. Only the chat may add one. Emits goalInterjection.',
               parameters: [
                 { name: 'goalId', type: { kind: 'primitive', primitive: 'string' }, description: 'Goal ID' },
                 { name: 'note', type: { kind: 'primitive', primitive: 'string' }, description: 'The note text' },
@@ -2196,7 +2220,7 @@ reviews results and either plans another round or completes/fails the goal.
     describeMessages(this.manifest, [
       { name: 'readGoalContext', description: 'Read a linked conversation message or prior goal result/data. Full values are retained in the current scratchpad with provenance. Omit selectors for the context index.', parameters: { goalId: protocolText, 'sourceGoalId?': protocolText, 'messageId?': protocolText, 'key?': protocolText } },
       { name: "recordPredictionAssessment", description: "TaskReviewer records its interpretation separately from observed execution evidence; repeated assessments are acknowledged without overwriting.", parameters: { "goalId": protocolText, "taskId": protocolText, "step": protocolNumber, "verdict": protocolText, "explanation": protocolText } },
-      { name: "getGoalBriefing", description: "Bounded task briefing with selected scratchpad values and references to complete evidence.", parameters: { "goalId": protocolText, "keys?": { kind: 'array', elementType: protocolText } } },
+      { name: "getGoalBriefing", description: "Bounded task briefing with selected scratchpad values, the user's newest notes on the goal and the goals above it, and references to complete evidence.", parameters: { "goalId": protocolText, "keys?": { kind: 'array', elementType: protocolText } } },
       { name: "recordTaskEvidence", description: "Preserve a task record before terminal notification.", parameters: { "goalId": protocolText, "taskId": protocolText, "record": protocolObject } },
       { name: "recordObservation", description: "Idempotently record an observation for the next scrum.", parameters: { "goalId": protocolText, "operationId": protocolText, "observation": protocolObject } },
       { name: "recordPlan", description: "Record an evidence-backed plan revision; stale revisions conflict.", parameters: { "goalId": protocolText, "operationId": protocolText, "expectedRevision": protocolNumber, "plan": protocolObject } },
@@ -2667,10 +2691,19 @@ reviews results and either plans another round or completes/fails the goal.
      * goal.interjections (not the scratchpad, so they are never mistaken for
      * task outputs). ScrumMaster reads pending notes at every decision point
      * and marks them incorporated once a committed decision weighed them.
+     *
+     * The agents already working on the goal hear each note too, at their
+     * next step, and agents that start later read the goal's notes in their
+     * briefing: a note that only reached the planner waited for the round to
+     * end while those agents carried on against it. Agents take a note as the
+     * user's own word, so only the chat the user types into may add one.
      */
     this.on('appendGoalNote', async (msg: AbjectMessage) => {
       const { goalId, note } = msg.payload as { goalId: GoalId; note: string };
       requireNonEmpty(note, 'note');
+      if (!(await this.isBuiltInCaller(msg.routing.from, ['Chat']))) {
+        throw new Error('Only the chat adds user notes to a goal');
+      }
       const goal = this.goals.get(goalId);
       if (!goal || (goal.status !== 'active' && goal.status !== 'paused')) return false;
 
@@ -2685,6 +2718,10 @@ reviews results and either plans another round or completes/fails the goal.
       // against the plan and in-flight work.
       this.changed('goalInterjection', { goalId, parentId: goal.parentId, note, at });
       this.syncGoalToSharedState(goal);
+      // The note covers the work under the goal as well, so tasks of its
+      // sub-goals hear it too.
+      const runtimeId = await this.taskRuntime();
+      if (runtimeId) this.send(event(this.id, runtimeId, 'goalNote', { goalIds: this.goalAndDescendants(goalId), note, at }));
       return true;
     });
 
@@ -2864,7 +2901,9 @@ reviews results and either plans another round or completes/fails the goal.
       const goal = this.goals.get(goalId);
       if (!goal) return null;
       const all = Object.keys(goal.scratchpad);
-      const selected = keys.length ? keys : all.filter(k => !k.startsWith('learning/') && !k.startsWith('tasks/') && k !== CONVERSATION_CONTEXT_KEY);
+      // The spend ledger ('resources') is GoalManager's budget record, read with
+      // getBudget; its per-call receipts are no use to a working agent.
+      const selected = keys.length ? keys : all.filter(k => !k.startsWith('learning/') && !k.startsWith('tasks/') && k !== CONVERSATION_CONTEXT_KEY && k !== 'resources');
       const scratchpad: Record<string, unknown> = {};
       let remaining = 12000;
       const omitted: string[] = [];
@@ -2875,6 +2914,7 @@ reviews results and either plans another round or completes/fails the goal.
         else omitted.push(key);
       }
       return { title: goal.title, description: goal.description, status: goal.status, scratchpad,
+        notes: this.notesOn(goal),
         conversationContext: await this.goalContextBriefing(goal),
         scratchpadIndex: all.slice(0, 100), scratchpadKeyCount: all.length, omitted: omitted.slice(0, 100), omittedCount: omitted.length,
         readMore: 'Use readGoalData({goalId,key}) for complete values; getGoal({goalId}) lists all keys.' };

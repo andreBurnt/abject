@@ -203,6 +203,8 @@ interface CheckVerdict {
    * Advisory text only: it never changes `passed` or anything the gate reads.
    */
   advisory?: string;
+  /** mutationsSinceVerify when this verdict was recorded, so a later step can tell whether anything changed since. */
+  mutationsAtRun?: number;
 }
 
 /** The last bash command's outcome, as the tier judgment reads it (bounded). */
@@ -1589,6 +1591,7 @@ clean result I did not observe.`;
       extra.lastVerify = verdict;
       extra.mutationsSinceVerify = 0;
     }
+    verdict.mutationsAtRun = extra.mutationsSinceVerify;
 
     // A file this task just edited that no longer parses is a mechanical
     // failure with a known cause and a known undo. Restoring it beats leaving
@@ -1942,6 +1945,7 @@ clean result I did not observe.`;
 
     if (full) extra.lastVerify = verdict; else extra.lastCheck = verdict;
     if (verdict.passed && command === (project.verifyCommand ?? project.checkCommand)) extra.mutationsSinceVerify = 0;
+    verdict.mutationsAtRun = extra.mutationsSinceVerify;
     this.audit(extra, `verify(${full ? 'full' : 'check'}) exit=${outcome.exitCode} new=${verdict.newFailures.length} foreign=${verdict.foreignFailures.length}${verdict.inconclusive ? ' inconclusive' : ''}`);
     await this.adviseAttribution(extra, verdict, baseline);
 
@@ -2408,6 +2412,7 @@ clean result I did not observe.`;
     await this.writeGoalData(extra, SESSION_KEY, {
       summary,
       taskId: extra.taskId,
+      project: extra.project?.name,
       outcome: { success: outcome.success && gate.ok, error: outcome.error, cancelled: extra.cancelled === true },
       report, verification: gate, decisions: [...extra.decisions], permissionEvidence: extra.permissionEvidence ?? [],
       previous: prev?.summary ? prev.summary.slice(0, 4000) : undefined,
@@ -2837,8 +2842,10 @@ clean result I did not observe.`;
         }
         lines.push(`Trusted: ${extra.project.trusted}${extra.project.trusted ? '' : ' — this project\'s own instruction files are NOT loaded'}`);
         lines.push(`Protected paths (will not be written): ${this.protectedPathsFor(extra).join(', ')}`);
-        const status = extra.project.vcs === 'git' ? await this.gitStatusLine(extra) : undefined;
-        if (status) lines.push(status);
+        const tree = extra.project.vcs === 'git' ? await this.treeState(extra) : undefined;
+        if (tree) lines.push(tree.clean
+          ? 'Working tree is clean.'
+          : `${this.treeLine(extra, tree)} Preserve existing work except where this task explicitly asks you to review, modify, or commit it.`);
 
         const others = await this.siblings(extra);
         if (others.length > 0) lines.push(`\n${this.renderSiblings(others)}`);
@@ -2846,6 +2853,12 @@ clean result I did not observe.`;
         const prior = await this.readGoalData<{ summary?: string }>(extra, SESSION_KEY);
         if (prior?.summary) {
           lines.push(`\nWhere the previous task in this goal left off:\n${prior.summary.slice(0, 4000)}${prior.summary.length > 4000 ? `\n[Handoff excerpt. Read the complete report, decisions and audit with read_scratchpad key=${SESSION_KEY}.]` : ''}`);
+        } else {
+          const earlier = await this.linkedHandoff(extra);
+          if (earlier) {
+            lines.push(`\nThis goal follows an earlier one in the conversation that did not finish ("${earlier.title ?? earlier.goalId}", ${earlier.status ?? 'unfinished'}). Where its last task on this project left off:\n${earlier.summary.slice(0, 4000)}` +
+              `\n[${earlier.summary.length > 4000 ? 'Handoff excerpt. ' : ''}Facts in it about files and test results are as of then; the git line above is as of now. Full handoff: {"action":"read_context","sourceGoalId":"${earlier.goalId}","key":"${SESSION_KEY}"}.]`);
+          }
         }
       } else {
         const all = await this.listProjects();
@@ -2861,6 +2874,8 @@ clean result I did not observe.`;
       }
     } else {
       lines.push('The previous action result is already in the conversation above.');
+      const state = await this.whereThingsStand(extra);
+      if (state) lines.push(state);
     }
 
     if (extra.baseline) {
@@ -2881,7 +2896,107 @@ clean result I did not observe.`;
     // Recovery is where the strongest model earns its cost; ordinary file work
     // is what the code tier is for.
     const tier = extra.lastResult?.startsWith('Error:') ? await this.recoveryTier(extra) : 'code';
-    return { observation: lines.join('\n'), tier };
+    // After the first turn the observation is only the state as of this step,
+    // and the next one restates it, so earlier copies need not stay.
+    return { observation: lines.join('\n'), tier, ...(extra.lastResult ? { current: true } : {}) };
+  }
+
+  /**
+   * The project's state for this step, read fresh each turn after the first.
+   *
+   * A long task's earlier results get trimmed from its conversation, and
+   * without this it spent steps re-running git status and the test command
+   * to find out what it already knew. Stated here, read by the runtime this
+   * step, it is current evidence and needs no checking.
+   */
+  private async whereThingsStand(extra: TaskExtra): Promise<string | undefined> {
+    if (!extra.project) return undefined;
+    const lines: string[] = [];
+    const tree = extra.project.vcs === 'git' ? await this.treeState(extra) : undefined;
+    if (tree) lines.push(tree.clean ? `Git: ${tree.head ? `HEAD ${tree.head}; ` : ''}working tree clean.` : this.treeLine(extra, tree));
+    const mine = this.touchedFiles(extra).sort();
+    lines.push(mine.length ? `Files this task changed (${mine.length}): ${mine.join(', ')}` : 'Files this task changed: none yet.');
+
+    const latest = [extra.lastVerify, extra.lastCheck].filter((v): v is CheckVerdict => !!v).sort((a, b) => b.outcome.at - a.outcome.at)[0];
+    if (latest) {
+      const o = latest.outcome;
+      const tests = o.testSummary ? `; ${o.testSummary.passed ?? '?'} passed, ${o.testSummary.failed ?? '?'} failed of ${o.testSummary.tests ?? '?'}` : '';
+      const minutes = Math.round((Date.now() - o.at) / 60_000);
+      const changes = extra.mutationsSinceVerify - (latest.mutationsAtRun ?? Number.NaN);
+      const since = changes === 0 ? 'nothing has changed since, so it still holds'
+        : changes > 0 ? `${changes} change(s) since, so it is out of date` : 'whether anything changed since is not known';
+      lines.push(`Last \`${o.command}\` (${minutes < 1 ? 'under a minute' : `${minutes} min`} ago): exit ${o.exitCode}${tests}; ${since}.`);
+      const failing = o.exitCode === 0 ? [] : ExternalCreator.failingTestsOf(o.output) ?? o.signatures;
+      if (failing.length) lines.push(`Failing in that run: ${failing.join('; ')}`);
+    } else {
+      lines.push('No check or verify has run in this task yet.');
+    }
+    return `\nWhere things stand (read by the runtime for this step, so there is no need to check it again):\n${lines.map(l => `- ${l}`).join('\n')}`;
+  }
+
+  /** HEAD and the uncommitted paths as git reports them now; undefined when git cannot say. */
+  private async treeState(extra: TaskExtra): Promise<{ head?: string; clean: boolean; staged: string[]; unstaged: string[]; untracked: string[] } | undefined> {
+    try {
+      const [head, status] = await Promise.all([this.git(extra, 'log -1 --oneline'), this.git(extra, 'status --porcelain=v1')]);
+      if (status.exitCode !== 0) return undefined;
+      const staged: string[] = [], unstaged: string[] = [], untracked: string[] = [];
+      for (const line of status.stdout.split('\n').filter(Boolean)) {
+        const file = line.slice(3).split(' -> ').at(-1)!;
+        if (line.startsWith('??')) { untracked.push(file); continue; }
+        if (line[0] !== ' ') staged.push(file);
+        if (line[1] !== ' ') unstaged.push(file);
+      }
+      return { head: head.exitCode === 0 ? head.stdout.trim() : undefined,
+        clean: staged.length + unstaged.length + untracked.length === 0, staged, unstaged, untracked };
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** One line for a dirty tree, marking which files this task wrote. */
+  private treeLine(extra: TaskExtra, tree: { head?: string; staged: string[]; unstaged: string[]; untracked: string[] }): string {
+    const mine = new Set(this.touchedFiles(extra).map(f => f.split(path.sep).join('/')));
+    const mark = (files: string[]) => files.map(f => mine.has(f) ? `${f} (yours)` : f).join(', ');
+    const parts = [
+      tree.staged.length ? `staged ${tree.staged.length}: ${mark(tree.staged)}` : 'nothing staged',
+      tree.unstaged.length ? `changed and not staged ${tree.unstaged.length}: ${mark(tree.unstaged)}` : '',
+      tree.untracked.length ? `untracked ${tree.untracked.length}: ${mark(tree.untracked)}` : '',
+    ].filter(Boolean);
+    return `Git: ${tree.head ? `HEAD ${tree.head}; ` : ''}${parts.join('; ')}.`;
+  }
+
+  /** Test names from the Node test runner's closing recap of failures, when it printed one. */
+  private static failingTestsOf(output: string): string[] | undefined {
+    const recap = ExternalCreator.stripAnsi(output).split(/^✖ failing tests:\s*$/m)[1];
+    if (!recap) return undefined;
+    const names = [...recap.matchAll(/^✖ (.+?) \([\d.]+m?s\)\s*$/gm)].map(m => m[1]);
+    return names.length ? [...new Set(names)] : undefined;
+  }
+
+  /**
+   * The handoff the conversation's newest earlier goal left on this project,
+   * when that goal did not finish and this goal has no handoff of its own yet.
+   * "Continue" after a stop starts a new goal, and without this its first
+   * task began as if nothing had been done.
+   */
+  private async linkedHandoff(extra: TaskExtra): Promise<{ goalId: string; title?: string; status?: string; summary: string } | undefined> {
+    if (!extra.goalId || !extra.project) return undefined;
+    this.goalManagerId = await this.resolveDep('GoalManager', this.goalManagerId);
+    if (!this.goalManagerId) return undefined;
+    try {
+      const index = await this.call<{ sources?: Array<{ sourceGoalId: string; available: boolean; title?: string; status?: string; keys?: string[] }> }>(
+        this.goalManagerId, 'readGoalContext', { goalId: extra.goalId }, 15_000);
+      const newest = index?.sources?.at(-1);
+      if (!newest?.available || newest.status === 'completed' || !newest.keys?.includes(SESSION_KEY)) return undefined;
+      const imported = await this.call<{ value?: { summary?: string; project?: string } }>(
+        this.goalManagerId, 'readGoalContext', { goalId: extra.goalId, sourceGoalId: newest.sourceGoalId, key: SESSION_KEY }, 15_000);
+      const handoff = imported?.value;
+      if (!handoff?.summary) return undefined;
+      const sameProject = handoff.project ? handoff.project === extra.project.name : handoff.summary.includes(`- Project ${extra.project.name} at `);
+      return sameProject ? { goalId: newest.sourceGoalId, title: newest.title, status: newest.status, summary: handoff.summary } : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   private static readonly COMMAND_OUTCOME_QUESTIONS: Record<string, DecisionQuestion> = {
@@ -3088,7 +3203,7 @@ An external project is a named directory holding a body of work. It may be softw
 
 # Response format
 
-Emit JSON actions in \`\`\`json code blocks, and nothing else. Batch independent checks in one response. For a short mechanical sequence whose only dependency is successful exit, one bash command may use && to stop on failure; report its combined status honestly. Inspect results before decisions that depend on their content. Emit done, fail, and ask_user alone.
+Emit JSON actions in \`\`\`json code blocks, and nothing else. Batch independent reads, searches and checks in one response, one block each: every response is a model call that rereads the whole conversation, so three reads sent together cost one call instead of three. For a short mechanical sequence whose only dependency is successful exit, one bash command may use && to stop on failure; report its combined status honestly. Inspect results before decisions that depend on their content. Emit done, fail, and ask_user alone.
 
 For a fresh Git review, group status, diff statistics, and recent commit conventions into the initial inspection, then review the changes and applicable validation evidence. For execution of an approved proposal, retrieve and reuse that review, grouping, and complete commit messages; do not automatically read the full diff again. Batch independent freshness checks. Staging and staged inspection can share one command, but inspect their results before committing. Commit creation followed by commit metadata and final status can share one command with &&. Keep named verification commands separate so their own exit status and evidence can be reused.
 
@@ -3127,6 +3242,8 @@ Live project configuration and observed results take precedence over historical 
 6. **Say what you did not verify.** When a project declares no commands, there is nothing to run — report exactly what you changed and that it was not verified. Never let silence imply a pass.
 7. **Keep oldText small.** Just enough context to be unique, no padding.
 8. **Delegation is a message to any object.** Discover collaborators by name and use Ask to establish how they can help, their constraints, and the appropriate messages. Reuse relevant answers while their assumptions hold. Use describe when exact interface parameters are needed; it does not replace contextual Ask collaboration. Then message the receiver with a self-contained request, including durable input references and the remaining outcome rather than asking it to rediscover completed work. Inside a submit_job, discovery is dep(name) / find(name). Other objects may message your runTask the same way.
+
+9. **Use the state you are given.** After the first step, each observation ends with "Where things stand": git HEAD, the staged, changed and untracked files, the files you changed, and the last check or verify with its failing tests and whether anything changed since. The runtime reads it fresh for that step, so use it instead of running git status, git log or the test command again to find out where things are.
 
 Report in your done result: what changed, which command proved it, and anything you could not check.`;
   }

@@ -1711,6 +1711,8 @@ So:
 
   Every constraint in the description comes from the user. Choices they left open (what form the result takes, how and where it appears, its layout) stay open for the team to decide: "create a diagram" becomes a goal for a diagram, with its presentation left to the team.
 
+  Write what is to be done, not the state things are in. Counts, versions, commit ids and lists of changed files copied from earlier messages go stale as soon as work starts, and the team measures them anyway, so leave them out unless the user named them as the target. When the user asks to continue or retry earlier work, name that goal by its title and ask the team to pick up where it left off: the earlier goal's results and handoff stay linked to the new one.
+
   Do NOT pre-decide tasks. ScrumMaster owns task decomposition; the team's capabilities inform how the work splits, not your guess.
 
   Simple request:

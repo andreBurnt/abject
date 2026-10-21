@@ -2498,7 +2498,9 @@ ${record.length > 0
       request(this.id, this.goalManagerId, 'getTasksForGoal', { goalId }),
     ).catch(() => [] as Array<{ id: string; fields: Record<string, unknown> }>);
     const inFlight = tasks.filter(t => !['done', 'permanently_failed', 'cancelled'].includes(String(t.fields.status)))
-      .map(t => ({ description: String(t.fields.description ?? '').slice(0, 200), status: t.fields.status }));
+      // Whole descriptions: what a task was told to do or not do is often
+      // past its first sentence, and a note is judged against exactly that.
+      .map(t => ({ description: String(t.fields.description ?? ''), status: t.fields.status }));
     const outcome = await this.askDecision('scrum.interjection', {
       goal: { title: goal.title, description: goal.description.slice(0, 2000) },
       note: notes.map(n => n.note).join('\n').slice(0, 2000),
@@ -2516,7 +2518,7 @@ ${record.length > 0
     if (outcome.mode === 'act' && benign && inFlight.length > 0) {
       const status = intent.choice === 'status_question'
         ? `Working on it: ${inFlight.slice(0, 3).map(t => t.description.slice(0, 80)).join('; ')}.`
-        : 'Noted. The current work continues, and your note will be weighed at the next planning step.';
+        : 'Noted. The agents working on it have your note now, and the next planning step weighs it too.';
       await this.request(request(this.id, this.goalManagerId, 'reportGoalProgress', { goalId, message: status }), 10000).catch(() => { /* best effort */ });
       return { defer: true };
     }

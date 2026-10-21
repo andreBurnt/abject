@@ -21,7 +21,7 @@ import { AbjectId, AbjectMessage, InterfaceId } from '../core/types.js';
 import { withKeyedLock } from '../core/keyed-lock.js';
 import { Abject } from '../core/abject.js';
 import { request, event } from '../core/message.js';
-import { requireDefined } from '../core/contracts.js';
+import { requireDefined, requireNonEmpty } from '../core/contracts.js';
 import type { JobResult } from './job-manager.js';
 import { PROFILE_TAG } from '../core/knowledge.js';
 import type { ContentPart } from '../llm/provider.js';
@@ -100,6 +100,13 @@ export interface AgentMessage {
   /** Body was replaced by an elision stub at the soft budget threshold.
    *  Marks it so a later pass doesn't elide an already-elided message. */
   elided?: boolean;
+  /**
+   * A step's observation, until the next one arrives. The runtime header
+   * (task line, notes, retained evidence) is restated on every step, so an
+   * older copy is cut back to its step line; a `current` observation was
+   * only the state as of its step, and its body goes too.
+   */
+  stepObservation?: { stepLine: string; headerChars: number; current: boolean };
 }
 
 /**
@@ -130,6 +137,13 @@ export interface ObserveReply {
    * for the affordances it plans with.
    */
   chunkable?: boolean;
+  /**
+   * Set when this observation only reports the state as of this step (a
+   * status, a gate, what changed so far), so the next observation replaces
+   * it. Once a newer one arrives the runtime keeps only its step line, rather
+   * than carrying every step's copy of the same report in the conversation.
+   */
+  current?: boolean;
 }
 
 /**
@@ -471,6 +485,15 @@ interface TaskEntry {
   recallContext?: string;
   goalRecallText?: string;
   /**
+   * The user's notes on this task's goal, oldest first: those in the briefing
+   * at task start, then each one GoalManager forwards while the task runs
+   * (goalNote). The planner wrote the task before the newer ones, so they are
+   * the user's latest word on it.
+   */
+  goalNotes?: Array<{ note: string; at: number }>;
+  /** How many of goalNotes the conversation has already shown the model. */
+  goalNotesShown?: number;
+  /**
    * How many leading system messages the conversation opens with (one for
    * the cacheable prefix, one for the volatile remainder, or fewer when a
    * half is empty). Trimming reads this instead of assuming a single system
@@ -532,6 +555,8 @@ interface TaskEntry {
   pendingPrediction?: { step: number; action: AgentAction; at: number };
   /** Whether the last observe callback declared its observation as bulk. */
   observationChunkable?: boolean;
+  /** Whether the last observe callback declared its observation as state-only (ObserveReply.current). */
+  observationCurrent?: boolean;
   /** Oversized observations/results held whole, addressed by read_chunk. */
   payloads?: StoredPayload[];
   /** Older bodies retained by TaskSession; references survive compaction/resume. */
@@ -1537,7 +1562,7 @@ The registered object must implement these handlers to participate in the agent 
       status: entry.settling && outstandingOperation ? 'partial' : entry.state.phase === 'done' && entry.candidateAccepted ? 'accepted' : entry.state.phase === 'error' ? 'partial' : 'running',
       snapshot: encodeAgentState({ state: entry.state, config: entry.config, systemPrompt: entry.systemPrompt,
         taskPrompt: entry.taskPrompt, responseSchema: entry.responseSchema, dispatchTupleId: entry.dispatchTupleId, predictions: entry.predictions,
-        injectedKnowledge: entry.injectedKnowledge, knowledgeScopes: entry.knowledgeScopes, refreshKnowledgePrompt: entry.refreshKnowledgePrompt, patternSelections: entry.patternSelections, payloads: entry.payloads, archivedPayloads: entry.archivedPayloads, payloadSeq: entry.payloadSeq, pendingPrediction: entry.pendingPrediction, specialist,
+        injectedKnowledge: entry.injectedKnowledge, knowledgeScopes: entry.knowledgeScopes, refreshKnowledgePrompt: entry.refreshKnowledgePrompt, patternSelections: entry.patternSelections, payloads: entry.payloads, archivedPayloads: entry.archivedPayloads, payloadSeq: entry.payloadSeq, pendingPrediction: entry.pendingPrediction, goalNotes: entry.goalNotes, goalNotesShown: entry.goalNotesShown, specialist,
         children: [...this.delegations.values()].filter(d=>d.parentTaskId===entry.state.id) }),
       outstandingOperation, ...(usage?{usage}:{}),
       ...(entry.delivery ? { outbox: [entry.delivery] } : {}),
@@ -1824,7 +1849,7 @@ The registered object must implement these handlers to participate in the agent 
           systemPrompt: stored.systemPrompt, taskPrompt: stored.taskPrompt, responseSchema: stored.responseSchema,
           goalId: current.goalId, dispatchTupleId: stored.dispatchTupleId, parentTaskId: current.parentId, predictions: stored.predictions, injectedKnowledge: stored.injectedKnowledge, patternSelections: stored.patternSelections,
           knowledgeScopes: stored.knowledgeScopes, refreshKnowledgePrompt: stored.refreshKnowledgePrompt,
-          payloads: stored.payloads, archivedPayloads: stored.archivedPayloads, payloadSeq: stored.payloadSeq, pendingPrediction: undefined, sessionId: p.id, sessionRevision: resumed.session.revision };
+          payloads: stored.payloads, archivedPayloads: stored.archivedPayloads, payloadSeq: stored.payloadSeq, pendingPrediction: undefined, goalNotes: stored.goalNotes, goalNotesShown: stored.goalNotesShown, sessionId: p.id, sessionRevision: resumed.session.revision };
         for (const child of stored.children ?? []) this.delegations.set(child.taskId,{...child,status:child.status==='done'?'done':'error',error:child.status==='done'?undefined:'Interrupted child: inspect its session before continuing'});
         this.taskEntries.set(taskId, entry); this.taskOrder.unshift(taskId);
         let queue = this.agentTaskQueues.get(agent.agentId);
@@ -2379,6 +2404,30 @@ The registered object must implement these handlers to participate in the agent 
       this.pausedGoals.add(goalId);
       log.info(`pauseTasksByGoal: goal ${goalId.slice(0, 8)} paused`);
       return true;
+    });
+
+    /**
+     * A note the user sent on a running goal, forwarded by GoalManager with
+     * the goal and the goals under it. Every live task working on one of
+     * them gets it at its next step; tasks that start later read it in their
+     * briefing. Answers how many tasks it reached.
+     */
+    this.on('goalNote', async (msg: AbjectMessage) => {
+      if (!(await this.isBuiltInCaller(msg.routing.from, ['GoalManager']))) return 0;
+      const { goalIds, note, at } = msg.payload as { goalIds: string[]; note: string; at: number };
+      requireNonEmpty(note, 'note');
+      let reached = 0;
+      for (const entry of this.taskEntries.values()) {
+        if (entry.finished || entry.state.phase === 'done' || entry.state.phase === 'error') continue;
+        const goalId = entry.goalId ?? entry.incomingGoalId ?? entry.config.budgetGoalId;
+        if (!goalId || !goalIds.includes(goalId)) continue;
+        const notes = entry.goalNotes ??= [];
+        // A task that started after the note already has it from its briefing.
+        if (!notes.some(n => n.at === at && n.note === note)) notes.push({ note, at });
+        reached++;
+      }
+      log.info(`goalNote: goal ${goalIds[0]?.slice(0, 8)} note reaches ${reached} running task(s)`);
+      return reached;
     });
 
     this.on('resumeTasksByGoal', async (msg: AbjectMessage) => {
@@ -3287,7 +3336,7 @@ The registered object must implement these handlers to participate in the agent 
             else entry.lastObservationLlmContent = undefined;
             if (obsData.tier) entry.observeTier = obsData.tier;
             entry.observationChunkable = obsData.chunkable === true;
-
+            entry.observationCurrent = obsData.current === true;
 
             setPhase('thinking');
             break;
@@ -3905,7 +3954,7 @@ The registered object must implement these handlers to participate in the agent 
       this.llmId = await this.cachedDepOrThrow('LLM', this.llmId);
       const llmResult = await this.request<{ content: string; execution?: ExecutionProvenance }>(
         request(this.id, this.llmId, 'complete', {
-          messages: task.llmMessages.map(({ retainedPage: _page, elided: _elided, ...message }) => message),
+          messages: AgentAbject.forModel(task.llmMessages),
           onBehalfOf: this.registeredAgents.get(entry.agentId)?.name,
           goalId: entry.config.budgetGoalId ?? entry.goalId ?? entry.incomingGoalId, taskId: entry.state.id,
           // Thinking / action decisions run on 'smart' regardless of the observe
@@ -4655,6 +4704,9 @@ The registered object must implement these handlers to participate in the agent 
     // Add last action result
     this.addActionResultToConversation(entry);
 
+    // The user's notes that arrived since the last step, read last
+    this.addGoalNotesToConversation(entry);
+
     // Runtime checks on the step just taken (decision sites): hints the model
     // reads before choosing, or, where a site is promoted to act, a stop or
     // an unchanged retry after a transient failure.
@@ -4676,7 +4728,7 @@ The registered object must implement these handlers to participate in the agent 
     // Build the request first: its message id is the correlation id the
     // chunk events come back with, which is how a chunk finds its own task.
     const streamRequest = request(this.id, this.llmId, 'stream', {
-      messages: task.llmMessages.map(({ retainedPage: _page, elided: _elided, ...message }) => message),
+      messages: AgentAbject.forModel(task.llmMessages),
       // Thinking is the JSON-action-decision step. Tier comes from the
       // agent's per-state observe hint, floored at 'balanced' (never 'fast'
       // — haiku drops the action envelope under load), then adjusted for
@@ -4790,12 +4842,21 @@ The registered object must implement these handlers to participate in the agent 
       const goal = await this.request<{
         title?: string; description?: string; status?: string;
         scratchpad?: Record<string, unknown>; scratchpadIndex?: string[]; scratchpadKeyCount?: number; omitted?: string[]; conversationContext?: unknown;
+        notes?: Array<{ note: string; at: number }>;
       } | null>(
         request(this.id, this.goalManagerId, 'getGoalBriefing', { goalId, keys: tasks?.find(t => t.id === dispatchTupleId)?.fields.consumes ?? [] }),
         5000,
       );
       // The goal in the user's words, for the knowledge recall that follows.
       if (entry && goal) entry.goalRecallText = [goal.title, goal.description].filter(Boolean).join('\n').slice(0, 1500);
+      // The briefing shows every note so far, so the step reminders carry
+      // them from the first step and the mid-task delivery skips them.
+      const notes = goal?.notes ?? [];
+      if (entry && notes.length > 0) {
+        const known = entry.goalNotes ?? [];
+        entry.goalNotes = [...notes, ...known.filter(k => !notes.some(n => n.at === k.at && n.note === k.note))];
+        entry.goalNotesShown = notes.length;
+      }
 
       if (!tasks) return '';
 
@@ -4841,6 +4902,9 @@ The registered object must implement these handlers to participate in the agent 
       }
       ctx += `\nTasks:\n${lines.join('\n')}`;
       ctx += `\n\nUse this progress to guide your actions. If tasks have failed, consider whether to retry with a different approach (replan) or work with partial results.`;
+      if (notes.length > 0) {
+        ctx += `\n\n## The User's Notes on This Goal\nThe user sent these while the goal was running, oldest first. They are newer than the plan, so where one differs from your task description, follow the note and say in your result what you did differently because of it.\n${notes.map(n => `- "${n.note}"`).join('\n')}`;
+      }
 
       // Current task's contract: what it must write, what it will read.
       if (currentProduces.length > 0 || currentConsumes.length > 0) {
@@ -5261,13 +5325,16 @@ This task belongs to a goal whose id is \`${entry.goalId}\` — you never need t
     // the goal in the model's recency window on every step, and framing the
     // first step explicitly stops a model from reading an empty "no previous
     // result" as "no task was given".
-    const taskLine = `Task: ${AgentAbject.summarizeTask(task.task)}`;
+    const taskLine = `Task: ${AgentAbject.summarizeTask(task.task)}${AgentAbject.goalNotesLine(entry)}`;
     const firstStep = task.step === 0
       ? '\nThis is the first step of this attempt. Reuse retained conversation, handoffs and evidence before choosing what remains to do.'
       : '';
     const retained = [...new Set([...(entry.payloads ?? []).map(p => p.id), ...Object.keys(entry.archivedPayloads ?? {})])];
-    const header = `[Step ${task.step + 1}/${task.maxSteps}]${urgency}\n${taskLine}${firstStep}`
+    const stepLine = `[Step ${task.step + 1}/${task.maxSteps}]`;
+    const header = `${stepLine}${urgency}\n${taskLine}${firstStep}`
       + (retained.length ? `\nRetained evidence (read_chunk or readPayload through the bus): ${retained.join(', ')}` : '');
+    this.shortenEarlierObservations(entry);
+    const stepObservation = { stepLine, headerChars: header.length + 1, current: entry.observationCurrent === true };
 
     // If agent provided llmContent (e.g. screenshot), use it directly
     if (entry.lastObservationLlmContent) {
@@ -5288,6 +5355,7 @@ This task belongs to a goal whose id is \`${entry.goalId}\` — you never need t
       task.llmMessages.push({
         role: 'user',
         content,
+        stepObservation,
       });
       entry.lastObservationLlmContent = undefined;
       return;
@@ -5311,8 +5379,67 @@ This task belongs to a goal whose id is \`${entry.goalId}\` — you never need t
     task.llmMessages.push({
       role: 'user',
       content: `${header}\n${observation}`,
+      stepObservation,
     });
   }
+
+  /**
+   * Cut earlier steps' observations back once a newer one is on its way.
+   * Their header (task line, notes, retained evidence) is restated in the
+   * newest one, so an older copy keeps only its step line and body; a
+   * `current` observation reported only the state as of its step, so its
+   * body goes too. Each message is shortened once, the step after it was
+   * sent, so the cached prompt prefix before it is untouched.
+   */
+  private shortenEarlierObservations(entry: TaskEntry): void {
+    for (const message of entry.state.llmMessages) {
+      const mark = message.stepObservation;
+      if (!mark) continue;
+      delete message.stepObservation;
+      if (mark.current) {
+        message.content = `${mark.stepLine} (state as of this step; a later step reports it again)`;
+        continue;
+      }
+      if (typeof message.content === 'string') {
+        if (message.content.length >= mark.headerChars) message.content = `${mark.stepLine}\n${message.content.slice(mark.headerChars)}`;
+        continue;
+      }
+      const [first, ...rest] = message.content;
+      if (first?.type === 'text' && first.text.length >= mark.headerChars) {
+        message.content = [{ ...first, text: `${mark.stepLine}\n${first.text.slice(mark.headerChars)}` }, ...rest];
+      }
+    }
+  }
+
+  /**
+   * Notes the user sent on the goal since the last step, as one message the
+   * model reads just before it decides. Once shown, the step reminders keep
+   * them beside the task line, where trimming the conversation cannot drop
+   * them.
+   */
+  private addGoalNotesToConversation(entry: TaskEntry): void {
+    const notes = entry.goalNotes ?? [];
+    const fresh = notes.slice(entry.goalNotesShown ?? 0);
+    if (fresh.length === 0) return;
+    entry.goalNotesShown = notes.length;
+    entry.state.llmMessages.push({
+      role: 'user',
+      content: `[Note from the user]\nThe user sent ${fresh.length === 1 ? 'a note' : 'notes'} about this goal while you were working:\n`
+        + fresh.map(n => `"${n.note}"`).join('\n')
+        + '\nThis is newer than your task description. Where it changes what your task should do, follow it, and say in your result what you did differently because of it. '
+        + 'If it means your task should not go on as planned, replan and say why. If it concerns another part of the goal, carry on with yours. It needs no reply.',
+    });
+  }
+
+  /** The user's notes already shown, for the per-step task line. */
+  private static goalNotesLine(entry: TaskEntry): string {
+    const shown = (entry.goalNotes ?? []).slice(0, entry.goalNotesShown ?? 0);
+    if (shown.length === 0) return '';
+    const quoted = shown.slice(-AgentAbject.NOTE_REMINDERS)
+      .map(n => `"${AgentAbject.summarizeTask(n.note)}"`).join(' ');
+    return `\nThe user's notes on this goal, newest last (they win where they differ from the task): ${quoted}`;
+  }
+  private static readonly NOTE_REMINDERS = 5;
 
   /** One-line task statement for per-step reminders. */
   private static summarizeTask(task: string): string {
@@ -6015,6 +6142,11 @@ This task belongs to a goal whose id is \`${entry.goalId}\` — you never need t
    *  is a handful of messages and 4k each is far under the budget. */
   private static readonly TRUNCATION_FLOOR_CHARS = 4000;
 
+  /** The conversation as the model receives it, without the runtime's bookkeeping on each message. */
+  private static forModel(messages: AgentMessage[]): AgentMessage[] {
+    return messages.map(({ retainedPage: _page, elided: _elided, stepObservation: _step, ...message }) => message);
+  }
+
   private markConversationObserved(entry: TaskEntry): void {
     for (const message of entry.state.llmMessages) if (message.retainedPage) message.retainedPage.seen = true;
   }
@@ -6058,7 +6190,7 @@ This task belongs to a goal whose id is \`${entry.goalId}\` — you never need t
 
     const retry = request(this.id, this.llmId!, 'stream', {
       ...(original.payload as Record<string, unknown>),
-      messages: entry.state.llmMessages.map(({ retainedPage: _page, elided: _elided, ...message }) => message),
+      messages: AgentAbject.forModel(entry.state.llmMessages),
     });
     this.streamingEntries.set(retry.header.messageId, entry);
     const sent = { count: entry.state.llmMessages.length, chars: conversationTextChars(entry.state.llmMessages) };
