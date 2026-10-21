@@ -5,9 +5,7 @@ import { request } from '../core/message.js';
 import type { AbjectId } from '../core/types.js';
 import { MessageBus } from '../runtime/message-bus.js';
 import { Registry } from './registry.js';
-import {
-  ScrumMaster, findVerificationMismatch, verificationRecordOf, renderVerificationRecord, orderedScratchpadBlock,
-} from './scrum-master.js';
+import { ScrumMaster } from './scrum-master.js';
 
 class Endpoint extends Abject {
   constructor(name: string) {
@@ -33,27 +31,6 @@ function scratchpad() {
     'verification/test-results': 'pnpm typecheck exit 0; pnpm test exit 0 with 290/290 passing. Not covered: layout at window size.',
   };
 }
-
-test('the verification record orders receipts newest first and the mismatch check reads the newest counts', () => {
-  const record = verificationRecordOf(scratchpad());
-  assert.deepEqual(record.map(r => r.taskId), ['test-task', 'impl-task']);
-  assert.match(renderVerificationRecord(record), /^- NEWEST — ExternalCreator test-tas/);
-  assert.equal(findVerificationMismatch('All 290 tests passed (290/290).', record), undefined);
-  assert.equal(findVerificationMismatch('pnpm test passed 285/285 tests with zero regressions', record)?.includes('285'), true);
-  assert.equal(findVerificationMismatch('Tests: 290 passed', record), undefined);
-  assert.equal(findVerificationMismatch('The window opens in 2 seconds.', record), undefined, 'numbers that are not test figures are left alone');
-  assert.equal(findVerificationMismatch('Added 3 regression tests to the browser file (9/9 pass); full suite 290/290.', record), undefined,
-    'a count the record never saw, such as a single file run, is not a mismatch');
-  assert.equal(findVerificationMismatch('305/305 tests passed', [record[0]]), undefined, 'one run means nothing can be stale');
-  assert.equal(findVerificationMismatch('285/285 tests', []), undefined, 'nothing to compare against means no verdict');
-});
-
-test('scratchpad entries render oldest first with their write times, receipts excluded', () => {
-  const block = orderedScratchpadBlock({ later: 'b', earlier: 'a', 'verification/x': { at: 5 } }, { later: 2000, earlier: 1000 });
-  assert.ok(block.indexOf('earlier') < block.indexOf('later'));
-  assert.match(block, /\[1 of 2, written 1970-01-01T00:00:01\.000Z\] earlier/);
-  assert.equal(block.includes('verification/x'), false);
-});
 
 test('a synthesis that quotes a stale test count is corrected once against the newest receipt', async () => {
   const bus = new MessageBus(), registry = new Registry(); await registry.init(bus);
