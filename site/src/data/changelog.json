@@ -1,5 +1,27 @@
 [
   {
+    "version": "0.15.14",
+    "date": "2026-10-22",
+    "title": "Goals you can watch, calls you can stop",
+    "summary": "Running goals now show up as live cards that tell you what each agent is doing as it does it, and stopping an AI call ends it right away. Notes you add partway through a goal reach the right agent, and the plan only changes when your note calls for it.",
+    "highlights": [
+      "Goal cards: each goal shows its state, question, plan, tasks, result and notes on one card, and every running task keeps a short trail of its recent steps. In chat, a running goal appears as a live card with timers that tick every second.",
+      "The Goals window now has the list beside the open card, with filters and search; on narrow screens (below 760 px) it shows one pane at a time.",
+      "Task progress is easier to read: a task shows \"step 3\" and only names its step limit near the end (\"step 27 of 30 · 3 left\"), because the limit is a ceiling, not an estimate of the work.",
+      "Goal cards say what an agent is actually doing (for example \"call SettingsManager.ask: How do I create a preset\") rather than only the verb it used.",
+      "Kill in the LLM monitor now stops a call immediately, even before its first word arrives; a stopped call is not retried or sent to another provider. The OpenAI provider closes its connection, and abject-backed providers receive a new providerCancel message (documented in docs/LLM_PROVIDERS.md and the script SDK types).",
+      "Notes added during a goal are checked against the tasks in progress and the agents doing them: a note that changes the work, or makes it another agent's kind of work, replans right away, while one that fits the current plan waits for the next planning step.",
+      "Changes to settings, presets, records and other data an existing object keeps are handled by messaging that object. Writing a new object, or changing what an existing one does, is left to the object-creation agent."
+    ],
+    "fixes": [
+      "On Wayland, web pages running offscreen can no longer open native dialogs (confirm, print, file picker), which could crash the desktop app.",
+      "A cancelled question now counts as declined; a question nobody answered is still treated as unanswered.",
+      "Actions where the model nests its arguments under the action's name are now read correctly instead of failing.",
+      "A registered external project can only be replaced by name by a trust authority, not by any caller.",
+      "When a class has several instances (Name, Name-2, ...), caller identity now carries the shared manifest name, so they are recognized as the same kind of object."
+    ]
+  },
+  {
     "version": "0.15.13",
     "date": "2026-10-21",
     "title": "Your Notes Reach the Agents Doing the Work",
