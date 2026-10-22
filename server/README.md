@@ -321,6 +321,7 @@ call.
 | `ABJECTS_NATIVE_DIR` | found | The bundled packages directory (the `abject` command sets it for an install) |
 | `ABJECTS_PACKAGE_DIRS` | unset | More package directories (path-delimiter separated); see `docs/PACKAGES.md` |
 | `ABJECTS_SIGNALING_URLS` | unset | Use only these signaling servers (comma-separated), pinned |
+| `ABJECTS_OFFLINE` | unset | `1`: PeerRegistry dials no signaling server, pinned (overrides `ABJECTS_SIGNALING_URLS`). Remote UI and model catalogs are not affected |
 | `ABJECTS_PEER_ADMISSION` | `open` | `allowlist` pins allowlist mode: only allowed peers connect |
 | `ABJECTS_ALLOWED_PEERS` | unset | Peer ids always allowed (comma-separated) |
 | `DEBUG` | unset | Runtime debug logging |

@@ -521,8 +521,18 @@ export class PeerRegistry extends Abject {
     });
 
     // Provisioning pins (a hosted image, an org member's machine): read once.
+    // ABJECTS_OFFLINE=1 pins the list empty: PeerRegistry dials no signaling
+    // server, not even the first-run default, and none can be added at runtime.
     const signalingUrls = envList('ABJECTS_SIGNALING_URLS');
-    if (signalingUrls.length > 0) {
+    const offline = (typeof process !== 'undefined' && process.env?.ABJECTS_OFFLINE) || '';
+    if (offline && offline !== '0' && offline !== '1') {
+      log.warn(`ABJECTS_OFFLINE: ignoring "${offline}" (use 1 or 0)`);
+    }
+    if (offline === '1') {
+      if (signalingUrls.length > 0) log.warn('ABJECTS_OFFLINE=1: ignoring ABJECTS_SIGNALING_URLS');
+      this.pinnedSignalingUrls = [];
+      this.fixedSignaling = true;
+    } else if (signalingUrls.length > 0) {
       const valid = signalingUrls.filter(isSignalingUrl);
       for (const bad of signalingUrls.filter(u => !isSignalingUrl(u))) {
         log.warn(`ABJECTS_SIGNALING_URLS: ignoring ${bad} (not a ws:// or wss:// URL)`);
@@ -1929,7 +1939,7 @@ export class PeerRegistry extends Abject {
 
   private async setFixedSignalingImpl(fixed: boolean): Promise<{ success: boolean; error?: string }> {
     if (!fixed && this.pinnedSignalingUrls) {
-      return { success: false, error: 'Signaling servers are fixed by ABJECTS_SIGNALING_URLS' };
+      return { success: false, error: 'Signaling servers are fixed by ABJECTS_SIGNALING_URLS or ABJECTS_OFFLINE' };
     }
     this.fixedSignaling = fixed;
     await this.persistNetworkPolicy();

@@ -2113,7 +2113,7 @@ Interface: abjects:peer-network`;
         text: 'Use only these servers (ignore servers learned from peers and contacts)' }, 26);
     await this.request(request(this.id, this.fixedSignalingCheckboxId, 'addDependent', {}));
     this.sigPinnedNoteId = await this.addWidget(sigCard,
-      { type: 'label', windowId: this.windowId, text: 'Fixed by ABJECTS_SIGNALING_URLS when this instance was started.',
+      { type: 'label', windowId: this.windowId, text: 'Fixed by ABJECTS_SIGNALING_URLS or ABJECTS_OFFLINE when this instance was started.',
         style: { color: this.theme.textMeta, fontSize: 11 } }, 18);
     await this.setShown(this.sigPinnedNoteId, false);
     const sigEmpty = this.emptySpec('No signaling servers', 'Enter a server URL above and press Connect to find peers on the network.');

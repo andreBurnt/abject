@@ -437,6 +437,7 @@ TURN relay so peers behind symmetric NAT or cell networks can still connect, see
 | `ABJECTS_PACKAGE_DIRS` | - | Extra package directories ([docs/PACKAGES.md](docs/PACKAGES.md)) |
 | `ABJECTS_ALLOWED_ORIGINS` | - | Web pages allowed to open the UI WebSocket besides the desktop app and the dev client (`http://127.0.0.1:VITE_CLIENT_PORT`, default 5174), comma-separated, e.g. `https://abject.example.com` for a client served through a reverse proxy that forwards `/ws`. Pages of any other origin are refused; the CLI gateway refuses all pages |
 | `ABJECTS_SIGNALING_URLS` | - | Use only these signaling servers (comma-separated `ws://`/`wss://`); servers learned from peers and the public default are never used (see [WHISPER.md](WHISPER.md)) |
+| `ABJECTS_OFFLINE` | - | `1`: peer networking (PeerRegistry) dials no signaling server, not even the public default on first run, and none can be added at runtime (overrides `ABJECTS_SIGNALING_URLS`). Remote UI and model-catalog fetches are not affected |
 | `ABJECTS_PEER_ADMISSION` | `open` | `allowlist`: connect only with allowed peers (Network → Servers & Peers → Who Can Connect, or `ABJECTS_ALLOWED_PEERS`) |
 | `ABJECTS_ALLOWED_PEERS` | - | Peer IDs always allowed to connect (comma-separated) |
 | `ABJECT_PREFIX` | `ctrl+a` | The `abject` chat's chord prefix |
