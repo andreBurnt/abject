@@ -437,18 +437,17 @@ function taskRows(
       const last = trail?.steps[trail.steps.length - 1];
       const max = trail?.maxSteps;
       const open = opts.isOpen(rowId) ?? true;
-      const fraction = last && max ? Math.min(1, last.step / max) : undefined;
-      const nearLimit = fraction !== undefined && max !== undefined && max - (last?.step ?? 0) <= Math.max(1, Math.round(max * 0.1));
+      // The step limit is a ceiling, not an estimate of the work, so it shows only near the end.
+      const nearLimit = !!last && !!max && max - last.step <= Math.max(1, Math.round(max * 0.2));
       rows.push({
         id: rowId, kind: 'task', depth, click: 'toggle', expanded: open,
         text: taskTitle(task), bold: true,
         ...(agent ? { badge: agent } : {}),
         iconName: open ? 'chevronDown' : 'chevronRight', iconColorRole: 'live', textColorRole: 'primary',
-        ...(last && max ? {
-          meta: nearLimit ? `step ${last.step} of ${max} · ${max - last.step} left` : `step ${last.step} of ${max}`,
+        ...(last ? {
+          meta: nearLimit && max ? `step ${last.step} of ${max} · ${Math.max(0, max - last.step)} left` : `step ${last.step}`,
           metaColorRole: nearLimit ? 'caution' as ColorRole : 'tertiary' as ColorRole,
         } : {}),
-        ...(fraction !== undefined ? { bar: { fraction, role: nearLimit ? 'caution' as ColorRole : 'live' as ColorRole } } : {}),
       });
       if (open && trail && trail.steps.length > 0) stepRows(rows, task, trail, depth + 1, true, opts);
       continue;

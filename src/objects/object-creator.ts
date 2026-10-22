@@ -535,7 +535,9 @@ export class ObjectCreator extends Abject {
             'Handles creation, modification, investigation, fixing, redesigning, and integration tasks — any work involving building, changing, or explaining an Abject\'s behavior. ' +
             'Its deploy actions carry the owner, registry, and persistence context that direct Factory/Registry calls bypass, ' +
             'and it can clone an existing object server-side (no source size limit). ' +
-            'Uses the universal ask protocol to discover and learn about objects dynamically.',
+            'Uses the universal ask protocol to discover and learn about objects dynamically. ' +
+            'Its work is an object\'s source: writing a new Abject or changing what an existing one does. ' +
+            'Settings, presets, records and other data an existing object keeps change through that object\'s own methods, which is messaging work rather than source work.',
           canExecute: true,
           config: {
             maxSteps: 30,

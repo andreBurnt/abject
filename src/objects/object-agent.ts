@@ -418,7 +418,7 @@ When asked about a task, describe which objects you would message and what you w
       name: 'ObjectAgent',
       description:
         'Interacts with whatever objects the Registry lists, on the host and inside this system, by asking them what they do and sending them messages. ' +
-        'Discovers objects via Registry, learns their capabilities via ask, then messages them to accomplish tasks: fetching data, one-off reads, writes, and commands through capability objects, orchestrating existing objects at runtime. ' +
+        'Discovers objects via Registry, learns their capabilities via ask, then messages them to accomplish tasks: fetching data, one-off reads, writes, and commands through capability objects, adding or changing what an existing object keeps (a setting, a preset, a record) through its own methods, orchestrating existing objects at runtime. ' +
         'Carries no fixed picture of the system; when asked whether it can do something, it consults the Registry and answers from what is registered right now. ' +
         'When no other agent obviously owns a task, ask this one. ' +
         'Object source authoring goes to a creation agent; sustained work inside a registered external project goes to the external project agent; interactive web browsing goes to a web-browsing agent; installed skill flows go to a skill-execution agent.',

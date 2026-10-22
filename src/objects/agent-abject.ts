@@ -923,6 +923,32 @@ function assignedPatternsOf(raw: unknown): Array<{ id: string; why: string }> | 
   return out.length ? out : undefined;
 }
 
+/** Fields of an action that say how it went or why, not what it does. */
+const ACTION_ASIDES = new Set(['action', 'target', 'method', 'expect', 'reasoning', 'learned', 'note']);
+
+/**
+ * Words for an action a model sent without reasoning: its verb, whom it
+ * addresses and the first thing it says, so the goal tree reads
+ * "call SettingsManager.ask: How do I create a preset" rather than "call...".
+ */
+function actionProgressText(action: Record<string, unknown>): string {
+  const verb = String(action.action);
+  const target = typeof action.target === 'string' ? action.target : undefined;
+  const method = typeof action.method === 'string' ? action.method : undefined;
+  const head = target ? `${verb} ${target}${method ? `.${method}` : ''}` : verb;
+  const firstText = (fields: Record<string, unknown>): string | undefined => {
+    for (const [key, value] of Object.entries(fields)) {
+      if (ACTION_ASIDES.has(key)) continue;
+      if (typeof value === 'string' && value.trim()) return value.replace(/\s+/g, ' ').trim();
+    }
+    return undefined;
+  };
+  const payload = action.payload && typeof action.payload === 'object' && !Array.isArray(action.payload)
+    ? action.payload as Record<string, unknown> : undefined;
+  const said = firstText(action) ?? (payload ? firstText(payload) : undefined);
+  return said ? `${head}: ${said}` : head;
+}
+
 export class AgentAbject extends Abject {
   private llmId?: AbjectId;
   private jobManagerId?: AbjectId;
@@ -2626,17 +2652,17 @@ The registered object must implement these handlers to participate in the agent 
       phase: newPhase,
     }));
 
-    // Update goal progress via GoalManager. Prefer the action's reasoning —
-    // the same rich text JobManager shows as the job description — over the
-    // bare verb, so the goal tree reads "Sanitize the control characters in
-    // the report field" instead of "shell...".
+    // Update goal progress via GoalManager. Prefer the action's reasoning,
+    // the same rich text JobManager shows as the job description, so the goal
+    // tree reads "Sanitize the control characters in the report field"; an
+    // action without one is described by what it addresses and says.
     if (entry.goalId && this.goalManagerId) {
       const agentName = this.registeredAgents.get(entry.agentId)?.name ?? 'Agent';
       const reasoning = typeof entry.state.action?.reasoning === 'string'
         ? entry.state.action.reasoning.trim()
         : '';
       const msg = newPhase === 'acting' && entry.state.action?.action
-        ? (reasoning ? reasoning.slice(0, 140) : `${entry.state.action.action}...`)
+        ? (reasoning || actionProgressText(entry.state.action as Record<string, unknown>)).slice(0, 140)
         : `${newPhase} (step ${entry.state.step + 1}/${entry.state.maxSteps})`;
       this.send(event(this.id, this.goalManagerId, 'updateProgress', {
         goalId: entry.goalId,
