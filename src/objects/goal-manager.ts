@@ -66,6 +66,13 @@ export interface ProgressEntry {
   agentName: string;
   message: string;
   phase?: string;
+  /** The task (its TupleSpace id) this entry reports on; absent for the planner's own lines. */
+  taskId?: string;
+  /** The reporting agent's step (1-based) and step budget, when it runs in steps. */
+  step?: number;
+  maxSteps?: number;
+  /** When this entry first arrived; `timestamp` moves forward as identical repeats fold into it. */
+  since?: number;
   /**
    * Peer that authored this entry. Absent on entries written before
    * collaborative sync existed and on purely local goals. Each peer
@@ -839,6 +846,9 @@ export class GoalManager extends Abject {
                 { name: 'message', type: { kind: 'primitive', primitive: 'string' }, description: 'Progress message' },
                 { name: 'phase', type: { kind: 'primitive', primitive: 'string' }, description: 'Current phase', optional: true },
                 { name: 'agentName', type: { kind: 'primitive', primitive: 'string' }, description: 'Agent reporting progress', optional: true },
+                { name: 'taskId', type: { kind: 'primitive', primitive: 'string' }, description: 'Task (TupleSpace id) this entry reports on', optional: true },
+                { name: 'step', type: { kind: 'primitive', primitive: 'number' }, description: 'The agent\'s current step, from 1', optional: true },
+                { name: 'maxSteps', type: { kind: 'primitive', primitive: 'number' }, description: 'The agent\'s step budget', optional: true },
               ],
               returns: { kind: 'primitive', primitive: 'undefined' },
             },
@@ -2506,8 +2516,9 @@ reviews results and either plans another round or completes/fails the goal.
     });
 
     this.on('updateProgress', async (msg: AbjectMessage) => {
-      const { goalId, message, phase, agentName } = msg.payload as {
+      const { goalId, message, phase, agentName, taskId, step, maxSteps } = msg.payload as {
         goalId: GoalId; message: string; phase?: string; agentName?: string;
+        taskId?: string; step?: number; maxSteps?: number;
       };
       const goal = this.goals.get(goalId);
       if (!goal || goal.status !== 'active') return;
@@ -2518,8 +2529,9 @@ reviews results and either plans another round or completes/fails the goal.
       // dependent) without bound, and only log actual transitions.
       const last = goal.progress[goal.progress.length - 1];
       const isRepeat = !!last && last.message === message && last.phase === phase
-        && last.agentName === (agentName ?? 'Unknown');
+        && last.agentName === (agentName ?? 'Unknown') && last.taskId === taskId && last.step === step;
       if (isRepeat) {
+        last.since ??= last.timestamp;
         last.timestamp = Date.now();
       } else {
         log.info(`updateProgress ${goalId.slice(0, 8)} phase=${phase ?? '?'} agent=${agentName ?? '?'}: ${message.slice(0, 80)}`);
@@ -2528,6 +2540,9 @@ reviews results and either plans another round or completes/fails the goal.
           agentName: agentName ?? 'Unknown',
           message,
           phase,
+          ...(typeof taskId === 'string' && taskId ? { taskId } : {}),
+          ...(Number.isFinite(step) ? { step } : {}),
+          ...(Number.isFinite(maxSteps) ? { maxSteps } : {}),
           peerId: this.selfPeerId,
         });
         if (goal.progress.length > 200) goal.progress.splice(0, goal.progress.length - 200);

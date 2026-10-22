@@ -26,6 +26,7 @@ import { require as precondition, invariant } from '../core/contracts.js';
 import type { AgentAction } from './agent-abject.js';
 import type { ContentPart } from '../llm/provider.js';
 import { Log } from '../core/timed-log.js';
+import { oneLine, resultText, type ProgressLike } from './goal-tree.js';
 import { parseAbjectUrl, imageMimeForPath } from './widgets/markdown-image-resolver.js';
 
 const log = new Log('Chat');
@@ -106,6 +107,8 @@ const MAX_CONVERSATION_ENTRIES = 40;
 const MAX_STEPS = 20;
 /** Leading mark on the activity header (the kit's sigil ring). */
 const THINKING_TEXT = '◉ Thinking…';
+/** Progress lines of a running goal kept for its card (GoalManager keeps 200). */
+const GOAL_PROGRESS_KEPT = 200;
 
 /** How long the answer to "does this instance have a display" is trusted. */
 const DISPLAY_CHECK_TTL_MS = 60_000;
@@ -136,9 +139,14 @@ export interface ChatActivityGoal {
   parentId?: string;
   title: string;
   description?: string;
-  status: 'active' | 'completed' | 'failed';
+  status: 'active' | 'paused' | 'completed' | 'failed';
   latestMessage?: string;
   latestAgent?: string;
+  createdAt?: number;
+  /** GoalManager's progress log, which the card files under each task as steps. */
+  progress?: ProgressLike[];
+  /** The question the goal paused to ask. */
+  question?: string;
 }
 
 export interface ChatActivityTask {
@@ -150,6 +158,10 @@ export interface ChatActivityTask {
   attempts: number;
   maxAttempts: number;
   dependsOn?: string[];
+  scrumNumber?: number;
+  /** One line of what it produced, or why it failed. */
+  result?: string;
+  error?: string;
 }
 
 /** The live "thinking / goal progress" state the window shows under the log. */
@@ -246,6 +258,8 @@ export class Chat extends Abject {
    * user-initiated pause, which resumes only when asked to.
    */
   private clarificationPending = false;
+  /** The question the paused goal asked, shown pinned on its card. */
+  private pendingQuestion?: string;
 
   private conversationHistory: ConversationEntry[] = [];
   private turnContext?: ConversationContext;
@@ -271,6 +285,8 @@ export class Chat extends Abject {
     parentId?: string;
     latestMessage?: string;
     latestAgent?: string;
+    createdAt?: number;
+    progress?: ProgressLike[];
     /** Final synthesized result (set on goalCompleted) / error (on goalFailed).
      * Surfaced through agentObserve so a step that timed out still sees the
      * outcome once it lands, instead of re-planning duplicate goals. */
@@ -761,6 +777,7 @@ export class Chat extends Abject {
             description: data.description,
             status: 'active',
             parentId: data.parentId,
+            createdAt: Date.now(),
           });
           this.fetchGoalTasks(data.goalId).then(() => this.scheduleActivityRefresh());
           this.scheduleActivityRefresh();
@@ -769,7 +786,7 @@ export class Chat extends Abject {
       }
 
       if (aspect === 'goalUpdated') {
-        const data = value as { goalId: string; parentId?: string; message?: string; phase?: string; agentName?: string };
+        const data = value as { goalId: string; parentId?: string; message?: string; phase?: string; agentName?: string; progress?: ProgressLike[] };
         // Lazily seed the goal entry if we missed its creation event
         // (e.g. it was created before our subscription took effect).
         if (!this.liveGoals.has(data.goalId)
@@ -786,9 +803,9 @@ export class Chat extends Abject {
 
         const entry = this.liveGoals.get(data.goalId);
         if (entry) {
-          if (data.message) this.updateActivityHeader(data.message);
           if (data.message) entry.latestMessage = data.message;
           if (data.agentName && data.agentName !== 'Chat') entry.latestAgent = data.agentName;
+          if (Array.isArray(data.progress)) entry.progress = data.progress.slice(-GOAL_PROGRESS_KEPT);
           // Refetch tasks on any progress so we always show current state
           this.fetchGoalTasks(data.goalId).then(() => this.scheduleActivityRefresh());
           this.scheduleActivityRefresh();
@@ -1139,9 +1156,13 @@ export class Chat extends Abject {
   private activitySnapshot(): ChatActivity {
     const goals: ChatActivityGoal[] = [];
     for (const [id, g] of this.liveGoals) {
+      const current = id === this._currentGoalId;
       goals.push({
         id, parentId: g.parentId, title: g.title, description: g.description,
-        status: g.status, latestMessage: g.latestMessage, latestAgent: g.latestAgent,
+        status: current && this.goalPaused && g.status === 'active' ? 'paused' : g.status,
+        latestMessage: g.latestMessage, latestAgent: g.latestAgent,
+        createdAt: g.createdAt, progress: g.progress,
+        ...(current && this.clarificationPending && this.pendingQuestion ? { question: this.pendingQuestion } : {}),
       });
     }
     const tasks: Record<string, ChatActivityTask[]> = {};
@@ -1180,6 +1201,9 @@ export class Chat extends Abject {
   }
 
   private composeActivityText(): string {
+    // A running goal's card shows its state and work; the bubble above it names the goal.
+    const goal = this._currentGoalId ? this.liveGoals.get(this._currentGoalId) : undefined;
+    if (goal && goal.title && goal.title !== '(in progress)') return goal.title;
     const baseHeader = this.activityStep > 0
       ? `${THINKING_TEXT} (step ${this.activityStep}/${MAX_STEPS})`
       : this.activityHeader;
@@ -1312,7 +1336,10 @@ export class Chat extends Abject {
     this.liveGoals.set(activeGoalId, { title: '(in progress)', status: 'active' });
     this.emitGoalActivity();
     await this.ensureGoalSubscription();
-    const goal = await this.request<{ status?: string; title?: string; result?: unknown; error?: string } | null>(
+    const goal = await this.request<{
+      status?: string; title?: string; result?: unknown; error?: string;
+      createdAt?: number; progress?: ProgressLike[]; pendingQuestion?: { question: string };
+    } | null>(
       request(this.id, this.goalManagerId, 'getGoal', { goalId: activeGoalId }),
     );
     if (this._currentGoalId !== activeGoalId) return; // A terminal event won the race.
@@ -1323,12 +1350,19 @@ export class Chat extends Abject {
       await this.persistActiveGoal(undefined);
       return;
     }
-    this.liveGoals.get(activeGoalId)!.title = goal.title ?? '(in progress)';
+    const reconnected = this.liveGoals.get(activeGoalId)!;
+    reconnected.title = goal.title ?? '(in progress)';
+    reconnected.createdAt = goal.createdAt;
+    if (Array.isArray(goal.progress)) reconnected.progress = goal.progress.slice(-GOAL_PROGRESS_KEPT);
     if (goal.status === 'completed' || goal.status === 'failed' || goal.status === 'archived') {
       await this.acceptGoalOutcome(activeGoalId, goal.status === 'failed' || goal.error ? 'failed' : 'completed', goal.result, goal.error);
       return;
     }
     this.goalPaused = goal.status === 'paused';
+    if (this.goalPaused && goal.pendingQuestion?.question) {
+      this.clarificationPending = true;
+      this.pendingQuestion = goal.pendingQuestion.question;
+    }
     this.activityActive = true;
     this.activityHeader = this.goalPaused ? 'Goal paused' : 'Waiting for goal progress';
     this.pushControls();
@@ -1349,6 +1383,7 @@ export class Chat extends Abject {
     this._currentGoalId = undefined;
     this.goalPaused = false;
     this.clarificationPending = false;
+    this.pendingQuestion = undefined;
     this.emitGoalActivity();
     await this.persistActiveGoal(undefined);
     this.removeActivity();
@@ -1419,7 +1454,7 @@ export class Chat extends Abject {
   private async fetchGoalTitle(goalId: string): Promise<void> {
     if (!this.goalManagerId) return;
     try {
-      const goal = await this.request<{ id: string; title: string; description?: string; parentId?: string; status: string } | null>(
+      const goal = await this.request<{ id: string; title: string; description?: string; parentId?: string; status: string; createdAt?: number; progress?: ProgressLike[] } | null>(
         request(this.id, this.goalManagerId, 'getGoal', { goalId })
       );
       if (goal) {
@@ -1428,6 +1463,8 @@ export class Chat extends Abject {
           entry.title = goal.title;
           if (goal.description) entry.description = goal.description;
           entry.parentId = goal.parentId;
+          if (goal.createdAt) entry.createdAt = goal.createdAt;
+          if (Array.isArray(goal.progress)) entry.progress = goal.progress.slice(-GOAL_PROGRESS_KEPT);
           this.scheduleActivityRefresh();
         }
       }
@@ -1452,6 +1489,9 @@ export class Chat extends Abject {
         attempts: (t.fields?.attempts as number) ?? 0,
         maxAttempts: (t.fields?.maxAttempts as number) ?? 1,
         dependsOn: (t.fields?.dependsOn as string[]) ?? undefined,
+        scrumNumber: typeof t.fields?.scrumNumber === 'number' ? t.fields.scrumNumber as number : undefined,
+        result: oneLine(resultText(t.fields?.result) ?? '', 220) || undefined,
+        error: typeof t.fields?.error === 'string' ? oneLine(t.fields.error as string, 220) : undefined,
       }));
       this.liveTasks.set(goalId, tasks);
     } catch { /* GoalManager may not be ready */ }
@@ -1487,6 +1527,7 @@ export class Chat extends Abject {
     if (!ok) { this.playEffect('shake'); return false; }
     this.goalPaused = false;
     this.clarificationPending = false;
+    this.pendingQuestion = undefined;
     this.pushControls();
     return true;
   }
@@ -1519,7 +1560,9 @@ export class Chat extends Abject {
     if (!goalId) return;
     this.goalPaused = true;
     this.clarificationPending = true;
+    this.pendingQuestion = question;
     this.pushControls();
+    this.scheduleActivityRefresh();
     this.appendMessage('assistant', 'Agent', question, true);
   }
 
@@ -1547,6 +1590,7 @@ export class Chat extends Abject {
       // The note answers the scrum master's question: resume the sprint so
       // the review scrum reads it.
       this.clarificationPending = false;
+      this.pendingQuestion = undefined;
       const resumed = await this.request<boolean>(
         request(this.id, this.goalManagerId, 'resumeGoal', { goalId })
       ).catch(() => false);
@@ -1603,7 +1647,7 @@ export class Chat extends Abject {
           }));
           this._currentGoalId = created.goalId;
           this.goalPaused = false;
-          this.liveGoals.set(created.goalId, { title, description, status: 'active' });
+          this.liveGoals.set(created.goalId, { title, description, status: 'active', createdAt: Date.now() });
           this.emitGoalActivity();
         }
         const goalId = this._currentGoalId;

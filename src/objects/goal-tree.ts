@@ -1,78 +1,97 @@
 /**
- * goal-tree — shared, UI-agnostic row model for rendering goal progress.
+ * goal-tree — shared, UI-agnostic row model for showing goals.
  *
- * Both the GoalBrowser window and the inline activity view in Chat display the
- * same goal / description / task / progress hierarchy. This module owns the one
- * graph walk that turns goals + their tasks into a flat, depth-annotated list of
- * rows, so the two surfaces never drift. It emits full (untruncated) text and
- * abstract colour roles — the widget resolves roles to concrete theme colours
- * and wraps the text — keeping this module free of any rendering concerns.
+ * Chat's live goal card and the Goals window draw the same things: a goal's
+ * state, the planner's latest word, what each task is doing step by step, and
+ * what finished work produced. This module owns turning goals, their tasks and
+ * their progress log into flat display rows, so the two surfaces never drift.
+ * It emits full text and abstract colour roles; GoalProgressWidget resolves
+ * the roles to theme colours, wraps the text and measures it.
+ *
+ * Two builders:
+ *   buildGoalDetailRows — one goal as a card (header, question, planner line,
+ *     rounds of tasks with a step trail under running work, result, notes).
+ *   buildGoalListRows   — the Goals window's list (needs you, running, then
+ *     finished goals by day), one selectable row per goal.
  */
 
 import type { IconName } from '../ui/icons.js';
-import { orderTopologically, blockedOn, indexById } from '../core/task-graph.js';
+import { orderTopologically, blockedOn, indexById, isTerminal } from '../core/task-graph.js';
 
-export type GoalRowKind = 'goal' | 'description' | 'task' | 'progress' | 'error';
+export type GoalRowKind =
+  | 'header' | 'title' | 'question' | 'planner' | 'section' | 'task' | 'step'
+  | 'more' | 'next' | 'error' | 'result' | 'note' | 'footer' | 'item' | 'empty';
 
 /**
  * Abstract colour role. The widget maps these to theme colours so the same row
- * model renders correctly under any theme. Icon and text carry separate roles:
- * a goal row's icon reflects status (warning/success/error) while its text uses
- * the primary reading colour.
+ * model renders correctly under any theme. `live` is work in motion, `caution`
+ * is something waiting on the person or near a limit.
  */
 export type ColorRole =
   | 'primary'
   | 'secondary'
   | 'tertiary'
-  | 'warning'
+  | 'live'
+  | 'caution'
   | 'success'
   | 'error'
   | 'neutral';
 
-export interface GoalRow {
-  /** Prefixed id: "goal:<id>" | "description:<id>" | "task:<id>" | "progress:<id>" | "error:<id>". */
-  id: string;
-  kind: GoalRowKind;
-  depth: number;
-  /** Full text — never truncated; the widget word-wraps it. */
-  text: string;
-  iconName: IconName;
-  iconColorRole: ColorRole;
-  textColorRole: ColorRole;
-  /** goal rows only — drives the expand/collapse arrow. */
-  expanded?: boolean;
-  /** goal rows only. */
-  hasChildren?: boolean;
-  /**
-   * goal rows only — per-goal controls the widget renders right-aligned and
-   * hit-tests (fires `goalAction` with { id, action }). Populated only when
-   * the caller opts in via `withActions` (GoalBrowser; Chat's activity
-   * bubble keeps its controls in the composer instead).
-   */
-  actions?: GoalRowAction[];
-}
+/** A background band behind a whole row. */
+export type BandRole = 'selected' | 'caution' | 'muted';
 
 export type GoalRowAction = 'pause' | 'resume' | 'stop';
 
-/** Normalised goal shape both callers map into (a full Goal or a Chat live-goal). */
-export interface GoalNode {
+export interface GoalRow {
+  /** Unique within one build; clickable rows report it back. */
   id: string;
-  parentId?: string;
-  title: string;
-  description: string;
-  status: 'active' | 'paused' | 'completed' | 'failed' | 'archived';
-  /** Latest progress message, if any. */
-  latestMessage?: string;
-  /** Agent that emitted the latest progress message, if known. */
-  latestAgent?: string;
-  /** Failure reason for failed goals. */
-  error?: string;
-  /** Peer that created the goal. When set and flagged remote, rows render a [Remote: <peer>] badge and drop actions. */
-  creatorPeerId?: string;
-  isRemote?: boolean;
+  kind: GoalRowKind;
+  depth: number;
+  /** Full text; the widget word-wraps it. */
+  text: string;
+  /** No icon: the text starts at the icon column. */
+  iconName?: IconName;
+  iconColorRole: ColorRole;
+  textColorRole: ColorRole;
+  /** Short text right-aligned on the first line (a step count, a time). */
+  meta?: string;
+  metaColorRole?: ColorRole;
+  /** A name chip drawn before the text (the agent doing the work). */
+  badge?: string;
+  /** Smaller wrapped text under the main text. */
+  detail?: string;
+  detailColorRole?: ColorRole;
+  /** One line of monospace under the text (a command), cut to fit. */
+  code?: string;
+  /** A thin progress bar under the row. */
+  bar?: { fraction: number; role: ColorRole };
+  /** Draw the trail line down the gutter beside this row (steps). */
+  rail?: boolean;
+  band?: BandRole;
+  bold?: boolean;
+  /** Small capitals in the display face (states, section labels). */
+  display?: boolean;
+  /** A click anywhere on the row reports `toggle` or `select` with this row's id. */
+  click?: 'toggle' | 'select';
+  /** For a toggle row: whether it is open now, so a click can flip it. */
+  expanded?: boolean;
+  /** Per-goal controls the widget draws right-aligned and reports as `goalAction`. */
+  actions?: GoalRowAction[];
 }
 
-/** Normalised task shape (a superset-compatible view of both callers' task rows). */
+/** One progress line as GoalManager records it. */
+export interface ProgressLike {
+  timestamp: number;
+  agentName: string;
+  message: string;
+  phase?: string;
+  taskId?: string;
+  step?: number;
+  maxSteps?: number;
+  since?: number;
+}
+
+/** A task as both callers read it from GoalManager's tuples. */
 export interface TaskNode {
   id: string;
   description: string;
@@ -83,205 +102,666 @@ export interface TaskNode {
   agentName?: string;
   /** Task ids this one waits on. A round is a graph, not a list. */
   dependsOn?: string[];
+  /** The planning round (scrum) that created it. */
+  scrumNumber?: number;
+  /** One line of what it produced, or why it failed. */
+  result?: string;
+  error?: string;
 }
 
-const GOAL_STATUS_ICON_NAMES: Record<string, IconName> = {
-  active:    'chevronRight',
-  paused:    'dot',
-  completed: 'check',
-  failed:    'close',
-};
+export type GoalStatus = 'active' | 'paused' | 'completed' | 'failed' | 'archived';
 
-const TASK_STATUS_ICON_NAMES: Record<string, IconName> = {
-  pending:            'dot',
-  // Waiting on other work, as distinct from waiting on a free slot.
-  blocked:            'clock',
-  claimed:            'chevronRight',
-  in_progress:        'chevronRight',
-  done:               'check',
-  permanently_failed: 'close',
-};
+/** Everything the card shows about one goal. */
+export interface GoalView {
+  id: string;
+  title: string;
+  status: GoalStatus;
+  createdAt?: number;
+  updatedAt?: number;
+  progress: ProgressLike[];
+  tasks: TaskNode[];
+  /** The question the goal paused to ask. */
+  question?: string;
+  error?: string;
+  /** What the finished goal produced, in full. */
+  result?: string;
+  /** Notes the person sent while it ran. */
+  notes?: Array<{ note: string; status: 'pending' | 'incorporated'; at: number }>;
+  /** What the learning review kept from this goal. */
+  learned?: string[];
+  /** Sub-goals, one line each. */
+  children?: Array<{ id: string; title: string; status: GoalStatus; latest?: string }>;
+  /** Created by another peer: read-only here. */
+  isRemote?: boolean;
+  creatorPeerId?: string;
+}
 
-function goalStatusRole(status: GoalNode['status']): ColorRole {
-  switch (status) {
-    case 'active':    return 'warning';
-    case 'completed': return 'success';
-    case 'failed':    return 'error';
-    default:          return 'neutral';
+export interface DetailOptions {
+  now: number;
+  /** Open state of a toggled row; undefined means the default for it. */
+  isOpen: (rowId: string) => boolean | undefined;
+  /** 'chat' leaves out the title (the bubble shows it) and points answers below. */
+  surface: 'chat' | 'browser';
+  /** Draw pause/resume/stop on the header. */
+  withActions?: boolean;
+}
+
+// ─── Small text and time helpers ─────────────────────────────────────
+
+/** A duration as people say it: 0.3s, 12s, 1m 32s, 4h 51m. */
+export function formatDuration(ms: number): string {
+  const s = Math.max(0, ms) / 1000;
+  if (s < 10) return `${s.toFixed(1)}s`;
+  if (s < 60) return `${Math.floor(s)}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${String(Math.floor(s % 60)).padStart(2, '0')}s`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ${m % 60}m`;
+  return `${Math.floor(h / 24)}d ${h % 24}h`;
+}
+
+function clock(ts: number): string {
+  return new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+function startOfDay(ts: number): number {
+  const d = new Date(ts);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+/** A time for a list: the clock today, the weekday this week, else the date. */
+export function formatWhen(ts: number, now: number): string {
+  const today = startOfDay(now);
+  if (ts >= today) return clock(ts);
+  if (ts >= today - 6 * 86400000) return new Date(ts).toLocaleDateString([], { weekday: 'short' });
+  return new Date(ts).toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+/** The first line of a text, stripped of markdown marks and cut at a word near `max`. */
+export function oneLine(text: string, max = 160): string {
+  const line = text.split('\n').map(l => l.trim()).find(l => l.length > 0) ?? '';
+  const plain = line.replace(/^#+\s*/, '').replace(/^[-*>]\s+/, '').replace(/\*\*|__|`/g, '').trim();
+  if (plain.length <= max) return plain;
+  const cut = plain.slice(0, max);
+  const space = cut.lastIndexOf(' ');
+  return `${(space > max * 0.6 ? cut.slice(0, space) : cut).trimEnd()}…`;
+}
+
+/** What a result value says, as text: a string itself, else its summary or message field, else JSON. */
+export function resultText(result: unknown): string | undefined {
+  if (result === undefined || result === null) return undefined;
+  if (typeof result === 'string') return result.trim() || undefined;
+  if (typeof result === 'object') {
+    const r = result as Record<string, unknown>;
+    for (const key of ['summary', 'answer', 'message', 'result', 'text', 'output']) {
+      if (typeof r[key] === 'string' && (r[key] as string).trim()) return (r[key] as string).trim();
+    }
   }
+  try { return JSON.stringify(result); } catch { return undefined; }
+}
+
+// ─── Step trails ─────────────────────────────────────────────────────
+
+export interface TrailStep {
+  step: number;
+  /** What the agent said it was doing (its reasoning at the act). */
+  title?: string;
+  /** A second line the step reported: usually the command it ran. */
+  command?: string;
+  phase?: string;
+  /** When the current phase began. */
+  phaseAt: number;
+  startedAt: number;
+  lastAt: number;
+  /** The start of the next step; absent on the last one. */
+  endedAt?: number;
+  /** Set while the agent waits on the person. */
+  waiting?: string;
+}
+
+export interface TaskTrail {
+  agentName?: string;
+  steps: TrailStep[];
+  maxSteps?: number;
+  firstAt: number;
+  lastAt: number;
+}
+
+const GENERIC_STEP = /^[a-z_]+ \(step \d+\/\d+\)$/;
+const SILENT = new Set(['working...', 'working…', 'LLM thinking...']);
+
+function buildTrail(entries: ProgressLike[]): TaskTrail {
+  const steps: TrailStep[] = [];
+  let cur: TrailStep | undefined;
+  let maxSteps: number | undefined;
+  let agentName: string | undefined;
+  for (const e of entries) {
+    const at = e.since ?? e.timestamp;
+    agentName = e.agentName || agentName;
+    if (Number.isFinite(e.maxSteps)) maxSteps = e.maxSteps;
+    const stepNo = Number.isFinite(e.step) ? e.step! : cur?.step ?? 1;
+    if (!cur || stepNo !== cur.step) {
+      if (cur) cur.endedAt = at;
+      cur = { step: stepNo, phaseAt: at, startedAt: at, lastAt: at };
+      steps.push(cur);
+    }
+    cur.lastAt = e.timestamp;
+    if (e.phase && e.phase !== cur.phase) { cur.phase = e.phase; cur.phaseAt = at; }
+    if (e.phase === 'waiting_for_human') cur.waiting = e.message;
+    const message = e.message.trim();
+    if (!message || SILENT.has(message) || GENERIC_STEP.test(message)) continue;
+    if (!cur.title) cur.title = message;
+    else if (message !== cur.title && !cur.command) cur.command = message;
+  }
+  return {
+    agentName, steps, maxSteps,
+    firstAt: entries.length ? (entries[0].since ?? entries[0].timestamp) : 0,
+    lastAt: entries.length ? entries[entries.length - 1].timestamp : 0,
+  };
+}
+
+const RUNNING = new Set(['claimed', 'in_progress']);
+const DROPPED = new Set(['superseded', 'cancelled']);
+
+/**
+ * A task is running once it is claimed, or once its agent reports on it: a
+ * task pushed straight to an agent stays pending in the TupleSpace until it
+ * settles, so its own progress lines are what say it started.
+ */
+function isRunning(task: TaskNode, reported: ReadonlySet<string>): boolean {
+  return RUNNING.has(task.status) || (task.status === 'pending' && (!!task.claimedBy || reported.has(task.id)));
+}
+
+/** Tasks that have progress lines of their own. */
+function reportedTasks(progress: ProgressLike[]): Set<string> {
+  const ids = new Set<string>();
+  for (const e of progress) if (e.taskId) ids.add(e.taskId);
+  return ids;
 }
 
 /**
- * Walk the goal graph and produce a flat list of display rows.
- *
- * Callers stay decoupled from branded id types by passing closures:
- *   - isExpanded(goalId) — whether a goal's children are shown
- *   - getTasks(goalId)   — the tasks under a goal
- * Pass `rootId` to render a single subtree (Chat, scoped to the running goal);
- * omit it to render every top-level goal (GoalBrowser).
+ * File every progress line under the task it reports on. A line that names
+ * its task goes there. A line that names none (an agent's own report, such as
+ * the command it is running) goes to the one running task its agent holds;
+ * anything else is the planner's.
  */
-export function buildGoalRows(input: {
-  goals: GoalNode[];
-  isExpanded: (goalId: string) => boolean;
-  getTasks: (goalId: string) => TaskNode[];
-  rootId?: string;
-  /** Render per-goal pause/resume/stop controls on live goal rows. */
-  withActions?: boolean;
-}): GoalRow[] {
-  const { goals, isExpanded, getTasks, rootId, withActions } = input;
-  const rows: GoalRow[] = [];
-
-  // parent -> children map for nesting
-  const childrenOf = new Map<string, GoalNode[]>();
-  const topLevel: GoalNode[] = [];
-  for (const goal of goals) {
-    if (goal.parentId) {
-      const siblings = childrenOf.get(goal.parentId) ?? [];
-      siblings.push(goal);
-      childrenOf.set(goal.parentId, siblings);
-    } else {
-      topLevel.push(goal);
-    }
+export function attributeProgress(view: Pick<GoalView, 'progress' | 'tasks'>): {
+  trails: Map<string, TaskTrail>;
+  planner?: ProgressLike;
+  reported: Set<string>;
+} {
+  const reported = reportedTasks(view.progress);
+  const byTask = new Map<string, ProgressLike[]>();
+  const taskIds = new Set(view.tasks.map(t => t.id));
+  const agentOf = new Map<string, string>();
+  for (const t of view.tasks) if (t.agentName) agentOf.set(t.id, t.agentName);
+  for (const e of view.progress) {
+    if (e.taskId && taskIds.has(e.taskId)) agentOf.set(e.taskId, e.agentName);
   }
+  let planner: ProgressLike | undefined;
+  for (const e of view.progress) {
+    let taskId = e.taskId && taskIds.has(e.taskId) ? e.taskId : undefined;
+    if (!taskId) {
+      const held = view.tasks.filter(t => agentOf.get(t.id) === e.agentName
+        && (isRunning(t, reported) || (byTask.get(t.id)?.at(-1)?.timestamp ?? -Infinity) >= e.timestamp - 60000));
+      if (held.length === 1) taskId = held[0].id;
+    }
+    if (!taskId) {
+      // The planner's own step lines ("done (step 1/12)") say nothing; keep its last sentence.
+      const said = e.message.trim();
+      if (said && !SILENT.has(said) && !GENERIC_STEP.test(said)) planner = e;
+      continue;
+    }
+    const list = byTask.get(taskId) ?? [];
+    list.push(e);
+    byTask.set(taskId, list);
+  }
+  const trails = new Map<string, TaskTrail>();
+  for (const [id, entries] of byTask) trails.set(id, buildTrail(entries));
+  return { trails, planner, reported };
+}
 
-  const byId = new Map<string, GoalNode>();
-  for (const goal of goals) byId.set(goal.id, goal);
+// ─── The card ────────────────────────────────────────────────────────
 
-  const visited = new Set<string>();
+const STEPS_SHOWN = 4;
+const LONG_THINK_MS = 30000;
 
-  const renderGoal = (goal: GoalNode, depth: number): void => {
-    if (visited.has(goal.id)) return;
-    visited.add(goal.id);
+function stateOf(view: GoalView): { label: string; role: ColorRole } {
+  if (view.question && (view.status === 'paused' || view.status === 'active')) return { label: 'WAITING ON YOU', role: 'caution' };
+  switch (view.status) {
+    case 'active': return { label: 'WORKING', role: 'live' };
+    case 'paused': return { label: 'PAUSED', role: 'neutral' };
+    case 'completed': return { label: 'DONE', role: 'success' };
+    case 'failed': return { label: 'FAILED', role: 'error' };
+    default: return { label: 'ARCHIVED', role: 'neutral' };
+  }
+}
 
-    const expanded = isExpanded(goal.id);
-    const tasks = getTasks(goal.id);
-    const children = childrenOf.get(goal.id) ?? [];
-    const latestMessage = goal.latestMessage ?? '';
-    const hasChildren = tasks.length > 0 || children.length > 0
-      || (goal.status === 'active' && !!latestMessage)
-      || (goal.status === 'failed' && !!goal.error)
-      || (!!goal.description && goal.description.trim() !== goal.title.trim());
+function currentStepLabel(step: TrailStep): string {
+  if (step.waiting) return step.waiting;
+  switch (step.phase) {
+    case 'thinking':
+    case 'streaming': return 'Thinking';
+    case 'observing': return 'Reading the result';
+    case 'acting': return step.title ?? 'Acting';
+    default: return step.title ?? 'Working';
+  }
+}
 
-    // A goal created by another peer is a replica: the owning peer's single
-    // ScrumMaster drives it, so its row carries a [Remote: <peer>] badge and
-    // no pause/resume/stop controls.
-    const remote = goal.isRemote === true;
-    const actions: GoalRowAction[] | undefined = !withActions || remote ? undefined
-      : goal.status === 'active' ? ['pause', 'stop']
-      : goal.status === 'paused' ? ['resume', 'stop']
-      : undefined;
+function taskTitle(task: TaskNode): string {
+  return oneLine(task.description, 180) || task.id.slice(0, 8);
+}
 
+function taskSummary(trail: TaskTrail | undefined, agentName: string | undefined): string | undefined {
+  const parts: string[] = [];
+  if (agentName) parts.push(agentName);
+  if (trail && trail.steps.length > 0) {
+    const n = trail.steps[trail.steps.length - 1].step;
+    parts.push(`${n} step${n === 1 ? '' : 's'}`);
+    if (trail.lastAt > trail.firstAt) parts.push(formatDuration(trail.lastAt - trail.firstAt));
+  }
+  return parts.length ? parts.join(' · ') : undefined;
+}
+
+function stepRows(
+  rows: GoalRow[], task: TaskNode, trail: TaskTrail, depth: number, live: boolean, opts: DetailOptions,
+): void {
+  const steps = trail.steps;
+  const allId = `steps:${task.id}`;
+  const showAll = opts.isOpen(allId) === true;
+  const hidden = showAll ? 0 : Math.max(0, steps.length - STEPS_SHOWN);
+  if (hidden > 0) {
     rows.push({
-      id: `goal:${goal.id}`,
-      kind: 'goal',
-      depth,
-      text: remote ? `[Remote: ${(goal.creatorPeerId ?? 'peer').slice(0, 8)}] ${goal.title}` : goal.title,
-      iconName: GOAL_STATUS_ICON_NAMES[goal.status] ?? 'dot',
-      iconColorRole: goalStatusRole(goal.status),
-      textColorRole: 'primary',
-      expanded,
-      hasChildren,
-      ...(actions ? { actions } : {}),
+      id: allId, kind: 'more', depth, rail: true, click: 'toggle', expanded: false,
+      text: `Show ${hidden} earlier step${hidden === 1 ? '' : 's'}`,
+      iconName: 'chevronRight', iconColorRole: 'tertiary', textColorRole: 'live',
     });
-
-    if (!expanded) return;
-
-    // The user's intent (goal description) — first, so the reader sees what was
-    // asked for before the planned work.
-    if (goal.description && goal.description.trim() && goal.description.trim() !== goal.title.trim()) {
+  } else if (showAll && steps.length > STEPS_SHOWN) {
+    rows.push({
+      id: allId, kind: 'more', depth, rail: true, click: 'toggle', expanded: true,
+      text: 'Show only the latest steps',
+      iconName: 'chevronDown', iconColorRole: 'tertiary', textColorRole: 'live',
+    });
+  }
+  const recentCommands = steps.map(s => s.command);
+  for (let i = hidden; i < steps.length; i++) {
+    const s = steps[i];
+    const last = i === steps.length - 1;
+    if (last && live) {
+      const elapsed = opts.now - s.phaseAt;
+      const thinking = s.phase === 'thinking' || s.phase === 'streaming';
       rows.push({
-        id: `description:${goal.id}`,
-        kind: 'description',
-        depth: depth + 1,
-        text: goal.description,
-        iconName: 'info',
-        iconColorRole: 'secondary',
-        textColorRole: 'secondary',
+        id: `step:${task.id}:${s.step}`, kind: 'step', depth, rail: true,
+        text: currentStepLabel(s),
+        iconName: 'dot', iconColorRole: s.waiting ? 'caution' : 'live',
+        textColorRole: 'primary', bold: true,
+        meta: formatDuration(elapsed), metaColorRole: s.waiting ? 'caution' : 'live',
+        ...(s.phase === 'acting' && s.command ? { code: s.command } : {}),
+        ...(thinking && elapsed > LONG_THINK_MS
+          ? { detail: 'Waiting on the model. A long prompt can take minutes; Kill is in the LLM monitor.', detailColorRole: 'tertiary' as ColorRole }
+          : {}),
       });
+      continue;
     }
+    const repeated = !!s.command && recentCommands.slice(Math.max(0, i - 3), i).includes(s.command);
+    const duration = (s.endedAt ?? s.lastAt) - s.startedAt;
+    rows.push({
+      id: `step:${task.id}:${s.step}`, kind: 'step', depth, rail: true,
+      text: s.title ?? `Step ${s.step}`,
+      iconName: repeated ? 'warning' : 'check', iconColorRole: repeated ? 'caution' : 'tertiary',
+      textColorRole: 'secondary',
+      ...(duration > 0 ? { meta: formatDuration(duration), metaColorRole: 'tertiary' as ColorRole } : {}),
+      ...(s.command ? { code: s.command } : {}),
+      ...(repeated ? { detail: 'Same command as a few steps ago', detailColorRole: 'caution' as ColorRole } : {}),
+    });
+  }
+}
 
-    // Tasks
-    // Dependencies before dependents, so reading top to bottom follows the
-    // order the work actually happens in rather than the order it was staged.
-    const ordered = orderTopologically(tasks);
-    const byId = indexById(tasks);
-    // Short labels keep the blocked-on note readable: a task id is a UUID, and
-    // what the reader wants is which task, not which identifier.
-    const label = (id: string): string => {
-      const dep = byId.get(id);
-      if (!dep) return id.slice(0, 8);
-      const text = dep.description.trim();
-      return text.length > 32 ? `${text.slice(0, 32)}…` : text || id.slice(0, 8);
-    };
-
-    for (const task of ordered) {
-      const waiting = blockedOn(task, byId);
-      // "Blocked" is a distinct state from "pending": one is waiting on work,
-      // the other is waiting on a slot, and only the first has a reason worth
-      // showing.
-      const effectiveStatus = task.status === 'pending' && task.claimedBy ? 'claimed'
-        : task.status === 'pending' && waiting.length > 0 ? 'blocked'
-        : task.status;
-      const attempts = task.attempts > 0 ? ` (${task.attempts}/${task.maxAttempts})` : '';
-      const agent = task.agentName ? `[${task.agentName}] ` : '';
-      const blockedNote = effectiveStatus === 'blocked'
-        ? ` — waiting on ${waiting.map(label).join(', ')}`
-        : '';
-      rows.push({
-        id: `task:${task.id}`,
-        kind: 'task',
-        depth: depth + 1,
-        text: `${agent}${task.description}${attempts}${blockedNote}`,
-        iconName: TASK_STATUS_ICON_NAMES[effectiveStatus] ?? 'dot',
-        iconColorRole: effectiveStatus === 'done' ? 'success'
-          : effectiveStatus === 'permanently_failed' ? 'error'
-          : 'secondary',
-        textColorRole: 'secondary',
-      });
-    }
-
-    // Sub-goals nested under this goal
-    for (const child of children) {
-      renderGoal(child, depth + 1);
-    }
-
-    // Failure detail — full error text (not truncated into the title).
-    if (goal.status === 'failed' && goal.error) {
-      rows.push({
-        id: `error:${goal.id}`,
-        kind: 'error',
-        depth: depth + 1,
-        text: goal.error,
-        iconName: 'close',
-        iconColorRole: 'error',
-        textColorRole: 'error',
-      });
-    }
-
-    // Latest progress line for active goals — includes the reporting agent so
-    // the reader sees who is doing what.
-    if (goal.status === 'active' && latestMessage) {
-      const agent = goal.latestAgent ? `[${goal.latestAgent}] ` : '';
-      rows.push({
-        id: `progress:${goal.id}`,
-        kind: 'progress',
-        depth: depth + 1,
-        text: `${agent}${latestMessage}`,
-        iconName: 'dot',
-        iconColorRole: 'tertiary',
-        textColorRole: 'tertiary',
-      });
-    }
+function taskRows(
+  rows: GoalRow[], tasks: TaskNode[], trails: Map<string, TaskTrail>, reported: ReadonlySet<string>,
+  depth: number, opts: DetailOptions, goalLive: boolean,
+): void {
+  const byId = indexById(tasks);
+  const label = (id: string): string => {
+    const dep = byId.get(id);
+    return dep ? oneLine(dep.description, 40) : id.slice(0, 8);
   };
+  for (const task of orderTopologically(tasks)) {
+    const trail = trails.get(task.id);
+    const agent = trail?.agentName ?? task.agentName;
+    const running = goalLive && isRunning(task, reported);
+    const rowId = `task:${task.id}`;
 
-  if (rootId) {
-    const root = byId.get(rootId);
-    if (root) renderGoal(root, 0);
-  } else {
-    for (const goal of topLevel) renderGoal(goal, 0);
+    if (running) {
+      const last = trail?.steps[trail.steps.length - 1];
+      const max = trail?.maxSteps;
+      const open = opts.isOpen(rowId) ?? true;
+      const fraction = last && max ? Math.min(1, last.step / max) : undefined;
+      const nearLimit = fraction !== undefined && max !== undefined && max - (last?.step ?? 0) <= Math.max(1, Math.round(max * 0.1));
+      rows.push({
+        id: rowId, kind: 'task', depth, click: 'toggle', expanded: open,
+        text: taskTitle(task), bold: true,
+        ...(agent ? { badge: agent } : {}),
+        iconName: open ? 'chevronDown' : 'chevronRight', iconColorRole: 'live', textColorRole: 'primary',
+        ...(last && max ? {
+          meta: nearLimit ? `step ${last.step} of ${max} · ${max - last.step} left` : `step ${last.step} of ${max}`,
+          metaColorRole: nearLimit ? 'caution' as ColorRole : 'tertiary' as ColorRole,
+        } : {}),
+        ...(fraction !== undefined ? { bar: { fraction, role: nearLimit ? 'caution' as ColorRole : 'live' as ColorRole } } : {}),
+      });
+      if (open && trail && trail.steps.length > 0) stepRows(rows, task, trail, depth + 1, true, opts);
+      continue;
+    }
+
+    if (task.status === 'done' || task.status === 'permanently_failed' || task.status === 'failed') {
+      const failed = task.status !== 'done';
+      const open = opts.isOpen(rowId) === true;
+      const said = failed ? task.error : task.result;
+      rows.push({
+        id: rowId, kind: 'task', depth, ...(trail?.steps.length ? { click: 'toggle' as const, expanded: open } : {}),
+        text: taskTitle(task),
+        iconName: failed ? 'close' : 'check', iconColorRole: failed ? 'error' : 'success',
+        textColorRole: 'primary',
+        ...(taskSummary(trail, agent) ? { meta: taskSummary(trail, agent), metaColorRole: 'tertiary' as ColorRole } : {}),
+        ...(said ? { detail: oneLine(said, 220), detailColorRole: failed ? 'error' as ColorRole : 'secondary' as ColorRole } : {}),
+      });
+      if (open && trail && trail.steps.length > 0) stepRows(rows, task, trail, depth + 1, false, opts);
+      continue;
+    }
+
+    if (DROPPED.has(task.status)) {
+      rows.push({
+        id: rowId, kind: 'task', depth,
+        text: taskTitle(task),
+        iconName: 'close', iconColorRole: 'neutral', textColorRole: 'tertiary',
+        meta: task.status === 'superseded' ? 'replaced' : 'cancelled', metaColorRole: 'tertiary',
+      });
+      continue;
+    }
+
+    // Waiting: on other work, or for a free agent.
+    const waiting = blockedOn(task, byId);
+    rows.push({
+      id: rowId, kind: 'next', depth,
+      text: taskTitle(task),
+      ...(agent ? { badge: agent } : {}),
+      iconName: 'clock', iconColorRole: 'tertiary', textColorRole: 'secondary',
+      meta: !goalLive ? 'not started' : waiting.length > 0 ? 'waiting' : 'queued',
+      metaColorRole: 'tertiary',
+      ...(goalLive && waiting.length > 0 ? { detail: `After: ${waiting.map(label).join(', ')}`, detailColorRole: 'tertiary' as ColorRole } : {}),
+    });
+  }
+}
+
+function roundSummary(tasks: TaskNode[]): string {
+  const done = tasks.filter(t => t.status === 'done').length;
+  const failed = tasks.filter(t => t.status === 'permanently_failed' || t.status === 'failed').length;
+  const dropped = tasks.filter(t => DROPPED.has(t.status)).length;
+  const parts = [`${done} done`];
+  if (failed) parts.push(`${failed} failed`);
+  if (dropped) parts.push(`${dropped} replaced`);
+  return parts.join(' · ');
+}
+
+/** One goal as a card. */
+export function buildGoalDetailRows(view: GoalView, opts: DetailOptions): GoalRow[] {
+  const rows: GoalRow[] = [];
+  const live = view.status === 'active' || view.status === 'paused';
+  const state = stateOf(view);
+  const { trails, planner, reported } = attributeProgress(view);
+
+  // Header: state, round, elapsed, tasks done.
+  const rounds = [...new Set(view.tasks.map(t => t.scrumNumber ?? 0))].sort((a, b) => a - b);
+  const round = rounds.length ? rounds[rounds.length - 1] : 0;
+  const doneCount = view.tasks.filter(t => t.status === 'done').length;
+  const failedCount = view.tasks.filter(t => t.status === 'permanently_failed' || t.status === 'failed').length;
+  const counted = view.tasks.filter(t => !DROPPED.has(t.status)).length;
+  const metaParts: string[] = [];
+  if (round > 0) metaParts.push(`Round ${round}`);
+  if (view.createdAt) {
+    const end = live ? opts.now : (view.updatedAt ?? opts.now);
+    metaParts.push(view.status === 'paused' && view.updatedAt
+      ? `paused ${formatDuration(opts.now - view.updatedAt)}`
+      : formatDuration(end - view.createdAt));
+  }
+  if (counted > 0) {
+    metaParts.push(failedCount > 0 ? `${doneCount} done · ${failedCount} failed` : `${doneCount} of ${counted} tasks done`);
+  }
+  const actions: GoalRowAction[] | undefined = !opts.withActions || view.isRemote ? undefined
+    : view.status === 'active' ? ['pause', 'stop']
+    : view.status === 'paused' ? ['resume', 'stop']
+    : undefined;
+  rows.push({
+    id: `header:${view.id}`, kind: 'header', depth: 0,
+    text: view.isRemote ? `${state.label} · ${remoteBadge(view.creatorPeerId)}` : state.label,
+    display: true,
+    iconName: 'dot', iconColorRole: state.role, textColorRole: state.role,
+    ...(metaParts.length ? { meta: metaParts.join(' · '), metaColorRole: 'tertiary' as ColorRole } : {}),
+    ...(actions ? { actions } : {}),
+  });
+  if (opts.surface === 'browser') {
+    rows.push({ id: `title:${view.id}`, kind: 'title', depth: 0, text: view.title, bold: true, iconColorRole: 'primary', textColorRole: 'primary' });
   }
 
+  // The question the goal waits on.
+  if (view.question && live) {
+    rows.push({
+      id: `question:${view.id}`, kind: 'question', depth: 0, band: 'caution',
+      text: view.question,
+      iconName: 'help', iconColorRole: 'caution', textColorRole: 'primary',
+      detail: opts.surface === 'chat' ? 'Reply below. Your answer resumes the goal.' : 'Answer it in the conversation the goal came from.',
+      detailColorRole: 'caution',
+    });
+  }
+
+  // The planner's latest word, while the goal runs.
+  if (planner && live && !view.question) {
+    rows.push({
+      id: `planner:${view.id}`, kind: 'planner', depth: 0, band: 'muted',
+      text: planner.message,
+      iconName: 'chat', iconColorRole: 'secondary', textColorRole: 'secondary',
+      detail: `${planner.agentName} · ${clock(planner.timestamp)}`, detailColorRole: 'tertiary',
+    });
+  }
+
+  if (view.status === 'failed' && view.error) {
+    rows.push({
+      id: `error:${view.id}`, kind: 'error', depth: 0,
+      text: view.error,
+      iconName: 'close', iconColorRole: 'error', textColorRole: 'error',
+    });
+  }
+
+  // Rounds: the last two open, older ones folded into one line.
+  const byRound = new Map<number, TaskNode[]>();
+  for (const t of view.tasks) {
+    const r = t.scrumNumber ?? 0;
+    const list = byRound.get(r) ?? [];
+    list.push(t);
+    byRound.set(r, list);
+  }
+  const shown = rounds.slice(-2);
+  const folded = rounds.slice(0, -2);
+  if (folded.length > 0) {
+    const foldId = `rounds:${view.id}`;
+    const open = opts.isOpen(foldId) === true;
+    const all = folded.flatMap(r => byRound.get(r) ?? []);
+    const span = folded.length === 1 ? `Round ${folded[0]}` : `Rounds ${folded[0]} to ${folded[folded.length - 1]}`;
+    rows.push({
+      id: foldId, kind: 'more', depth: 0, click: 'toggle', expanded: open,
+      text: `${span} · ${roundSummary(all)}`,
+      iconName: open ? 'chevronDown' : 'chevronRight', iconColorRole: 'tertiary', textColorRole: 'secondary',
+    });
+    if (open) for (const r of folded) {
+      rows.push({ id: `round:${view.id}:${r}`, kind: 'section', depth: 1, text: `ROUND ${r}`, display: true, iconColorRole: 'tertiary', textColorRole: 'tertiary' });
+      taskRows(rows, byRound.get(r) ?? [], trails, reported, 1, opts, live);
+    }
+  }
+  for (const r of shown) {
+    if (rounds.length > 1) {
+      rows.push({ id: `round:${view.id}:${r}`, kind: 'section', depth: 0, text: `ROUND ${r}`, display: true, iconColorRole: 'tertiary', textColorRole: 'tertiary' });
+    }
+    taskRows(rows, byRound.get(r) ?? [], trails, reported, 0, opts, live);
+  }
+
+  for (const child of view.children ?? []) {
+    rows.push({
+      id: `child:${child.id}`, kind: 'task', depth: 0,
+      text: `Sub-goal: ${child.title}`,
+      iconName: child.status === 'completed' ? 'check' : child.status === 'failed' ? 'close' : 'chevronRight',
+      iconColorRole: child.status === 'completed' ? 'success' : child.status === 'failed' ? 'error' : 'live',
+      textColorRole: 'primary',
+      ...(child.latest ? { detail: child.latest, detailColorRole: 'tertiary' as ColorRole } : {}),
+    });
+  }
+
+  if (live && view.tasks.length === 0 && !view.question) {
+    rows.push({
+      id: `empty:${view.id}`, kind: 'empty', depth: 0,
+      text: planner ? 'Planning the first tasks' : 'Waiting for the planner',
+      iconName: 'clock', iconColorRole: 'tertiary', textColorRole: 'tertiary',
+    });
+  }
+
+  // What the finished goal produced.
+  if (view.status === 'completed' && view.result) {
+    rows.push({ id: `section:result:${view.id}`, kind: 'section', depth: 0, text: 'RESULT', display: true, iconColorRole: 'tertiary', textColorRole: 'tertiary' });
+    rows.push({ id: `result:${view.id}`, kind: 'result', depth: 0, band: 'muted', text: view.result, iconColorRole: 'primary', textColorRole: 'primary' });
+  }
+
+  if (opts.surface === 'browser' && view.notes && view.notes.length > 0) {
+    rows.push({ id: `section:notes:${view.id}`, kind: 'section', depth: 0, text: 'YOUR NOTES', display: true, iconColorRole: 'tertiary', textColorRole: 'tertiary' });
+    view.notes.forEach((n, i) => rows.push({
+      id: `note:${view.id}:${i}`, kind: 'note', depth: 0,
+      text: `“${n.note}”`,
+      iconName: 'chat', iconColorRole: 'secondary', textColorRole: 'secondary',
+      meta: clock(n.at), metaColorRole: 'tertiary',
+      detail: n.status === 'incorporated' ? 'Weighed by the planner' : 'Waiting for the planner to read it',
+      detailColorRole: 'tertiary',
+    }));
+  }
+
+  if (view.learned && view.learned.length > 0) {
+    rows.push({ id: `section:learned:${view.id}`, kind: 'section', depth: 0, text: 'LEARNED FROM THIS GOAL', display: true, iconColorRole: 'tertiary', textColorRole: 'tertiary' });
+    view.learned.forEach((l, i) => rows.push({
+      id: `learned:${view.id}:${i}`, kind: 'note', depth: 0,
+      text: l, iconName: 'brain', iconColorRole: 'secondary', textColorRole: 'secondary',
+    }));
+  }
+
+  // Freshness.
+  const lastAt = view.progress.length ? view.progress[view.progress.length - 1].timestamp : view.updatedAt;
+  if (live && lastAt) {
+    rows.push({
+      id: `footer:${view.id}`, kind: 'footer', depth: 0,
+      text: view.status === 'paused' ? 'Nothing runs while the goal waits' : `Last activity ${formatDuration(opts.now - lastAt)} ago`,
+      iconColorRole: 'tertiary', textColorRole: 'tertiary',
+    });
+  }
   return rows;
+}
+
+// ─── The list ────────────────────────────────────────────────────────
+
+export interface GoalListItem {
+  id: string;
+  title: string;
+  status: GoalStatus;
+  createdAt: number;
+  updatedAt: number;
+  question?: string;
+  /** What it is doing now, or what it produced, or why it failed. */
+  line?: string;
+  isRemote?: boolean;
+  creatorPeerId?: string;
+}
+
+export type GoalFilter = 'all' | 'running' | 'needs' | 'failed';
+
+export function needsPerson(item: Pick<GoalListItem, 'status' | 'question'>): boolean {
+  return !!item.question && (item.status === 'paused' || item.status === 'active');
+}
+
+export function matchesFilter(item: GoalListItem, filter: GoalFilter, query: string): boolean {
+  if (filter === 'running' && !(item.status === 'active' || item.status === 'paused')) return false;
+  if (filter === 'needs' && !needsPerson(item)) return false;
+  if (filter === 'failed' && item.status !== 'failed') return false;
+  const q = query.trim().toLowerCase();
+  if (!q) return true;
+  return item.title.toLowerCase().includes(q) || (item.line ?? '').toLowerCase().includes(q);
+}
+
+/** The Goals window's list: needs you, running, then finished goals by day. */
+export function buildGoalListRows(items: GoalListItem[], opts: { now: number; selectedId?: string }): GoalRow[] {
+  const rows: GoalRow[] = [];
+  const today = startOfDay(opts.now);
+  const groups: Array<{ key: string; label: string; role: ColorRole; items: GoalListItem[] }> = [
+    { key: 'needs', label: 'NEEDS YOU', role: 'caution', items: [] },
+    { key: 'running', label: 'RUNNING', role: 'live', items: [] },
+    { key: 'today', label: 'TODAY', role: 'tertiary', items: [] },
+    { key: 'yesterday', label: 'YESTERDAY', role: 'tertiary', items: [] },
+    { key: 'week', label: 'EARLIER THIS WEEK', role: 'tertiary', items: [] },
+    { key: 'older', label: 'OLDER', role: 'tertiary', items: [] },
+  ];
+  const group = (key: string) => groups.find(g => g.key === key)!.items;
+  for (const item of items) {
+    if (needsPerson(item)) group('needs').push(item);
+    else if (item.status === 'active' || item.status === 'paused') group('running').push(item);
+    else if (item.updatedAt >= today) group('today').push(item);
+    else if (item.updatedAt >= today - 86400000) group('yesterday').push(item);
+    else if (item.updatedAt >= today - 6 * 86400000) group('week').push(item);
+    else group('older').push(item);
+  }
+  for (const g of groups) {
+    if (g.items.length === 0) continue;
+    g.items.sort((a, b) => b.updatedAt - a.updatedAt);
+    rows.push({ id: `group:${g.key}`, kind: 'section', depth: 0, text: g.label, display: true, iconColorRole: g.role, textColorRole: g.role });
+    for (const item of g.items) {
+      const selected = item.id === opts.selectedId;
+      const needs = needsPerson(item);
+      const icon: { name: IconName; role: ColorRole } = needs ? { name: 'dot', role: 'caution' }
+        : item.status === 'active' ? { name: 'dot', role: 'live' }
+        : item.status === 'paused' ? { name: 'dot', role: 'neutral' }
+        : item.status === 'completed' ? { name: 'check', role: 'success' }
+        : item.status === 'failed' ? { name: 'close', role: 'error' }
+        : { name: 'check', role: 'tertiary' };
+      const line = needs ? `Asks: ${oneLine(item.question!, 200)}` : item.line;
+      rows.push({
+        id: `item:${item.id}`, kind: 'item', depth: 0, click: 'select',
+        text: item.isRemote ? `${remoteBadge(item.creatorPeerId)} ${item.title}` : item.title,
+        bold: selected,
+        iconName: icon.name, iconColorRole: icon.role, textColorRole: 'primary',
+        meta: item.status === 'active' || item.status === 'paused'
+          ? formatDuration(opts.now - item.createdAt)
+          : formatWhen(item.updatedAt, opts.now),
+        metaColorRole: 'tertiary',
+        ...(line ? {
+          detail: line,
+          detailColorRole: item.status === 'failed' ? 'error' as ColorRole : needs ? 'caution' as ColorRole : 'secondary' as ColorRole,
+        } : {}),
+        ...(selected ? { band: 'selected' as BandRole } : needs ? { band: 'caution' as BandRole } : {}),
+      });
+    }
+  }
+  return rows;
+}
+
+/** What a running goal is doing right now, in one line: agent, step, time. */
+export function nowLine(view: Pick<GoalView, 'progress' | 'tasks' | 'status'>, now: number): string | undefined {
+  const { trails, planner, reported } = attributeProgress(view);
+  let best: { at: number; text: string } | undefined;
+  for (const task of view.tasks) {
+    if (!isRunning(task, reported)) continue;
+    const trail = trails.get(task.id);
+    const step = trail?.steps[trail.steps.length - 1];
+    if (!trail || !step) continue;
+    const text = `${trail.agentName ?? task.agentName ?? 'Agent'} · ${currentStepLabel(step)} · ${formatDuration(now - step.phaseAt)}`;
+    if (!best || trail.lastAt > best.at) best = { at: trail.lastAt, text };
+  }
+  if (best) return best.text;
+  if (view.status === 'paused') return 'Paused';
+  return planner ? `${planner.agentName} · ${oneLine(planner.message, 120)}` : undefined;
 }
 
 /** Short peer tag for the [Remote: <peer>] badge. */
@@ -290,7 +770,5 @@ export function remoteBadge(peerId: string | undefined): string {
   return `[Remote: ${peerId.slice(0, 8)}]`;
 }
 
-/** True when the node is a non-owned (remote) goal whose actions must be disabled. */
-export function isRemoteGoalNode(node: GoalNode): boolean {
-  return node.isRemote === true || (node.creatorPeerId !== undefined && node.isRemote !== false && false);
-}
+/** Task states that will not change any more. */
+export { isTerminal };

@@ -67,8 +67,9 @@ routing names, else your `defaultTierModels` entry for the tier, else your
 
 | Message to your abject | You reply |
 |---|---|
-| `providerComplete { messages, options }` | `{ content, finishReason?, usage? }` |
-| `providerStream { streamId, messages, options }` (with `streaming: true`) | Emit `providerChunk { streamId, content }` events to the LLM object, then reply `{ chunks, stopReason?, usage? }`, where `chunks` is how many you emitted |
+| `providerComplete { callId, messages, options }` | `{ content, finishReason?, usage? }` |
+| `providerStream { streamId, callId, messages, options }` (with `streaming: true`; `callId` is the `streamId`) | Emit `providerChunk { streamId, content }` events to the LLM object, then reply `{ chunks, stopReason?, usage? }`, where `chunks` is how many you emitted |
+| `providerCancel { callId }` (an event) | Nothing. Stop working on that call if you can |
 | `providerModels {}` (with `liveModels: true`) | `[{ id, name, vision?, efforts?, contextWindow? }]` |
 
 - **Messages** are `{ role, content }`, where `content` is a string or an array of
@@ -82,6 +83,12 @@ routing names, else your `defaultTierModels` entry for the tier, else your
   for the `chunks` count you report before it ends the stream (briefly, when
   you report none). A stream reply that carries `content` and no chunks is
   taken as one chunk.
+- **Stopping.** When someone stops a call (Kill in the LLM monitor), the LLM
+  object sends `providerCancel` with the call's `callId` and stops waiting for
+  you at once. Anything you send for that call afterwards is dropped. Stopping
+  your own work then (closing a connection, ending a child process) saves the
+  time and tokens of an answer nobody will read. An abject without a
+  `providerCancel` handler simply ignores it.
 - **Models.** When `providerModels` fails or answers something that is not a
   list, the registered `models` are used.
 - **Liveness** uses the `ping` every abject answers. A backend that no longer

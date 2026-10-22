@@ -129,7 +129,8 @@ which lists it in `listLayoutIssues`.
   `windowHelpRequested`, `nodeInput`, `keyUnhandled`.
 - **`layout-abject.ts`**: `LayoutAbject`. Child list with size policies and
   spacers (`addLayoutChild`, `addLayoutChildren`, `addLayoutSpacer`,
-  `updateLayoutChild`, `removeLayoutChild`, `clearLayoutChildren`), margins,
+  `updateLayoutChild`, `removeLayoutChild`, `clearLayoutChildren`,
+  `moveLayoutChildrenToEnd`), margins,
   `getPreferredHeight`, `getFocusableWidgets`, overflow reporting. Draws
   expanded children (an open select) last.
 - **`widget-types.ts`**: shared types and constants (`WidgetStyle`,
@@ -206,8 +207,11 @@ which lists it in `listLayoutIssues`.
   optional inline editing; `rowSelected`, `cellEdited`.
 - **`chart-widget.ts`**: `ChartWidget`. Line, bar, area, pie and sparkline from
   plain series data in theme colours; `pointClicked`.
-- **`goal-progress-widget.ts`**: `GoalProgressWidget`. Wrapping goal tree rows
-  with per-row controls; `toggle`, `goalAction`, `contentHeight`.
+- **`goal-progress-widget.ts`**: `GoalProgressWidget`. Draws `goal-tree.ts`
+  rows (a goal's card or the Goals list): wrapped text with an agent chip,
+  right-aligned meta, detail lines, a command line, a progress bar, a band and
+  the step trail; per-row controls; `toggle`, `select`, `goalAction`,
+  `contentHeight`.
 - **`split-pane-widget.ts`**: `SplitPaneWidget`. Two children with a draggable
   divider (`setLeftChild` / `setRightChild` or top/bottom); `dividerMoved`.
 

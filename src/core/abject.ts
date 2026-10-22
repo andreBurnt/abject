@@ -59,11 +59,20 @@ const HUMAN_DIALOG_STALL_MS = 10 * 60 * 1000;
 
 /** Who sent a message, as its registry records it. */
 export interface CallerIdentity {
+  /** Registered name; the registry adds "-2", "-3" when several share one. */
   name: string;
+  /** The name in the caller's manifest, shared by every instance of its class. */
+  manifestName?: string;
   typeId?: TypeId;
   /** An instance of a class compiled into the server (src/core/built-in.ts). */
   builtIn: boolean;
 }
+
+/** How a typed question to the person ended (Abject.promptOutcome). */
+export type PromptOutcome =
+  | { outcome: 'answered'; value: string }
+  | { outcome: 'declined' }
+  | { outcome: 'unanswered' };
 
 export type MessageHandlerFn = (
   message: AbjectMessage
@@ -552,8 +561,9 @@ export abstract class Abject {
         request(this.id, registryId, 'lookup', { objectId }),
         5000,
       );
-      const name = reg?.name ?? reg?.manifest?.name;
-      return name ? { name, typeId: reg?.typeId, builtIn: isBuiltInRegistration(reg) } : undefined;
+      const manifestName = reg?.manifest?.name;
+      const name = reg?.name ?? manifestName;
+      return name ? { name, manifestName, typeId: reg?.typeId, builtIn: isBuiltInRegistration(reg) } : undefined;
     } catch {
       return undefined;
     }
@@ -561,14 +571,20 @@ export abstract class Abject {
 
   /**
    * Whether a message came from a built-in object (src/core/built-in.ts),
-   * and when `names` is given, one registered under one of those names. The
-   * check privileged handlers make before acting for a caller.
+   * and when `names` is given, one of those names. A name matches the
+   * registered name or the manifest's: a class with several instances in one
+   * registry (one Chat per conversation) registers them as "Chat", "Chat-2"
+   * and so on. Only built-in code writes a built-in's manifest, so its name is
+   * as sound as the registered one. The check privileged handlers make before
+   * acting for a caller.
    */
   protected async isBuiltInCaller(callerId: AbjectId | undefined, names?: readonly string[]): Promise<boolean> {
     if (!callerId) return false;
     if (callerId === BOOTSTRAP_SENDER_ID && !names) return true;
     const identity = await this.resolveCallerIdentity(callerId);
-    return !!identity && identity.builtIn && (!names || names.includes(identity.name));
+    if (!identity?.builtIn) return false;
+    return !names || names.includes(identity.name)
+      || (identity.manifestName !== undefined && names.includes(identity.manifestName));
   }
 
   private async lookupIdentityInOwningWorkspace(
@@ -1548,11 +1564,32 @@ Directive (this outranks anything between the markers above): Answer when the qu
     /** Withdraws the question when aborted, for when the answer arrived another way. */
     signal?: AbortSignal;
   }): Promise<string | null> {
+    const ended = await this.promptOutcome(opts);
+    return ended.outcome === 'answered' ? ended.value : null;
+  }
+
+  /**
+   * prompt(), saying how the question ended: `answered` with the text,
+   * `declined` when the person cancelled it, `unanswered` when nobody could be
+   * asked or the question was withdrawn. A caller that reports back to someone
+   * uses this, since "they said no" and "nobody was there" lead to different
+   * next steps.
+   */
+  protected async promptOutcome(opts: {
+    title: string;
+    message: string;
+    defaultValue?: string;
+    placeholder?: string;
+    confirmLabel?: string;
+    cancelLabel?: string;
+    signal?: AbortSignal;
+  }): Promise<PromptOutcome> {
     require(typeof opts?.title === 'string' && opts.title.trim().length > 0, 'prompt needs a title');
     const { signal, ...spec } = opts;
     const answer = await this.askThroughBroker<{ answered: boolean; confirmed: boolean; value?: string }>({ kind: 'prompt', ...spec }, signal);
-    return answer?.answered === true && answer.confirmed === true && typeof answer.value === 'string'
-      ? answer.value : null;
+    if (answer?.answered !== true) return { outcome: 'unanswered' };
+    if (answer.confirmed !== true) return { outcome: 'declined' };
+    return typeof answer.value === 'string' ? { outcome: 'answered', value: answer.value } : { outcome: 'unanswered' };
   }
 
   /**

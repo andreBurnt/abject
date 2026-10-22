@@ -165,6 +165,8 @@ export interface LLMUsage {
 
 /** `providerComplete` payload. */
 export interface ProviderCompleteRequest {
+  /** Names this call in a later `providerCancel`. */
+  callId: string;
   messages: LLMMessage[];
   options: LLMCallOptions;
 }
@@ -178,6 +180,15 @@ export interface ProviderCompleteReply {
 /** `providerStream` payload: emit `providerChunk { streamId, content }` events to the sender. */
 export interface ProviderStreamRequest extends ProviderCompleteRequest {
   streamId: string;
+}
+
+/**
+ * `providerCancel` event payload: the call named by `callId` was stopped
+ * (Kill in the LLM monitor) and nobody reads its answer any more. Stop work
+ * on it if you can; no reply is needed.
+ */
+export interface ProviderCancelEvent {
+  callId: string;
 }
 
 export interface ProviderStreamReply {

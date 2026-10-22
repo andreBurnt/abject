@@ -32,6 +32,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { errorDetails, type PermissionReceipt } from '../core/permission-outcome.js';
 import { encodeAgentState } from '../core/agent-session-codec.js';
 import * as path from 'path';
+import * as os from 'node:os';
 import { AbjectId, AbjectMessage, InterfaceId } from '../core/types.js';
 import { Abject, type MessageHandlerFn } from '../core/abject.js';
 import { request, event } from '../core/message.js';
@@ -58,7 +59,8 @@ const AGENT_DESCRIPTION =
   'data directory the user has registered. Reads, writes, and edits files there, runs shell ' +
   'commands there, and runs the project\'s own check and verify commands, comparing against a ' +
   'baseline so it reports only the failures it introduced. Handles software, prose, notes, and ' +
-  'data alike. Restricted to registered projects: reading or inspecting loose files elsewhere on ' +
+  'data alike. Registers a directory as a new external project when the user asks to add one. ' +
+  'Restricted to registered projects: reading or inspecting loose files elsewhere on ' +
   'the machine (a download, a sample export, a config file) belongs elsewhere, as do changing ' +
   'Abjects inside this system, interactive web browsing, and installed skill flows.';
 
@@ -367,6 +369,8 @@ configuration — same tools, same discipline.
 - Running a project's build, tests, linter, formatter, or any shell command in it
 - Fixing something that a compiler, test suite, or linter reports
 - Anything naming a path that lies inside a registered project whose root is on disk
+- Adding a directory the user names as a new external project, and any work the
+  user asks for in it once added
 
 ### I answer PASS to
 - Creating or modifying Abjects inside this system: objects, their source, their
@@ -382,7 +386,8 @@ configuration — same tools, same discipline.
   rather than start a task that cannot be prepared.
 
 The list of registered projects below is live. Check the paths in the question
-against it before answering; a path inside no registered root is a PASS.
+against it before answering; a path inside no registered root is a PASS, unless
+the user is asking to add that directory as a project.
 
 ### Working beside other tasks
 Several of my tasks may work in one project at once; a scrum round stages them
@@ -1975,7 +1980,7 @@ clean result I did not observe.`;
       return {
         success: false,
         error: `No external project matches "${name}". Registered: ${all.map(p => p.name).join(', ') || '(none)'}. ` +
-          `A directory has to be registered before I work in it — ask the user to add it.`,
+          `When the user named this directory for the work, register it with {"action":"add_project","root":"${name}"}.`,
       };
     }
     if (extra.project?.name === project.name) return { success: true, data: `Already working in ${project.name} at ${extra.workRoot}. Project instructions and baseline evidence are unchanged; continue from the existing context.` };
@@ -2001,6 +2006,44 @@ clean result I did not observe.`;
     await this.request(request(this.id, this.agentAbjectId!, 'setTaskProject', { taskId: extra.taskId, name: project.name, systemPrompt: `${this.buildSystemPrompt()}\n\n${projectInstructions}` }));
     const siblingLine = others.length > 0 ? `\n${this.renderSiblings(others)}` : '';
     return { success: true, data: `Working in ${project.name} at ${extra.workRoot}.\n${projectInstructions}\n${this.baselineSummary(extra)}${siblingLine}` };
+  }
+
+  /**
+   * Register a directory the user named as an external project, then work in
+   * it. ExternalProjectRegistry decides what an agent may register: the new
+   * project starts untrusted, so its own instruction files and scripts wait
+   * until the user vouches for it, and a name already in use is refused.
+   */
+  private async opAddProject(extra: TaskExtra, action: AgentAction): Promise<{ success: boolean; data?: unknown; error?: string }> {
+    const given = String(action.root ?? action.path ?? '').trim();
+    if (!given) return { success: false, error: 'add_project requires "root": the directory the user named, absolute or starting with ~/' };
+    const root = given === '~' || given.startsWith('~/') ? path.join(os.homedir(), given.slice(1)) : path.resolve(given);
+    const name = String(action.name ?? '').trim() || path.basename(root);
+    if (name.includes('/')) return { success: false, error: `add_project "name" is a short handle without slashes; "${name}" is not` };
+
+    const known = await this.resolveProject(root);
+    if (known && path.resolve(known.root) === root) {
+      const selected = await this.opSetProject(extra, { action: 'set_project', name: known.name });
+      return selected.success
+        ? { success: true, data: `${root} is already registered as ${known.name}.\n${selected.data}` }
+        : selected;
+    }
+
+    const reg = await this.projects();
+    if (!reg) return { success: false, error: 'The project registry is not available' };
+    const added = await this.call<{ success: boolean; project?: ExternalProject; error?: string }>(reg, 'addProject', {
+      name, root, ...(typeof action.description === 'string' && action.description.trim() ? { description: action.description.trim() } : {}),
+    }, 30_000);
+    if (!added.success || !added.project) return { success: false, error: added.error ?? 'The registry did not register the project' };
+    this.audit(extra, `registered project ${added.project.name} at ${added.project.root}`);
+
+    const trust = added.project.trusted
+      ? ''
+      : ' It starts untrusted: its own instruction files are not loaded and its commands ask the user first, until the user marks it trusted in External Projects.';
+    const selected = await this.opSetProject(extra, { action: 'set_project', name: added.project.name });
+    return selected.success
+      ? { success: true, data: `Registered ${added.project.name} at ${added.project.root}.${trust}\n${selected.data}` }
+      : { success: false, error: `Registered ${added.project.name} at ${added.project.root}, but could not start working there: ${selected.error}` };
   }
 
   private renderSiblings(others: Array<{ taskId: string; goalId?: string; description?: string; files: string[] }>): string {
@@ -2865,10 +2908,10 @@ clean result I did not observe.`;
         lines.push(
           all.length === 0
             ? 'No external projects are registered. I cannot work on a directory until one is registered — ' +
-              'use ask_user to ask for the path, or call ExternalProjectRegistry.addProject if the user gave you one.'
+              'register the directory the user named with {"action":"add_project","root":"<path>"}, or use ask_user to ask for the path.'
             : `No project selected yet. Registered projects:\n` +
               all.map(p => `- ${p.name} — ${p.root}${p.description ? ` (${p.description})` : ''}`).join('\n') +
-              `\nUse {"action":"set_project","name":"<one of these>"} before touching files.`,
+              `\nUse {"action":"set_project","name":"<one of these>"} before touching files, or {"action":"add_project","root":"<path>"} for a directory the user names that none of these covers.`,
         );
         if (all.length > 0 && extra.projectNote) lines.push(extra.projectNote);
       }
@@ -3103,7 +3146,7 @@ clean result I did not observe.`;
 
   private static readonly ACTIONS = [
     'read', 'write', 'edit', 'bash', 'grep', 'find', 'ls',
-    'verify', 'read_output', 'set_project', 'call', 'reply', 'ask_user', 'done', 'fail',
+    'verify', 'read_output', 'set_project', 'add_project', 'call', 'reply', 'ask_user', 'done', 'fail',
   ];
 
   private async handleAct(
@@ -3136,6 +3179,7 @@ clean result I did not observe.`;
         case 'verify':      result = await this.opVerify(extra, action); break;
         case 'read_output': result = await this.opReadOutput(extra, action); break;
         case 'set_project': result = await this.opSetProject(extra, action); break;
+        case 'add_project': result = await this.opAddProject(extra, action); break;
         case 'call':        result = await this.opCall(extra, action); break;
 
         case 'reply': {
@@ -3227,6 +3271,7 @@ Live project configuration and observed results take precedence over historical 
 - {"action":"ls","path":"src"} — list a directory.
 - {"action":"verify","full":true} — run the project's verify command (full:false runs the fast check). This is what a claim of "it works" has to point at.
 - {"action":"set_project","name":"<handle or path>"} — choose which project to work in.
+- {"action":"add_project","root":"~/path/to/dir","name":"<short handle>","description":"..."} — register a directory the user names as a new project, then work in it. Use it when the user asks to add a directory, or gives you one to work in that no registered project covers. The name defaults to the directory's own name.
 - {"action":"call","target":"KnowledgeBase","method":"recall","payload":{}} — message any object in this system.
 - {"action":"reply","text":"..."} — a note to the user mid-task.
 - {"action":"ask_user","question":"..."} — ask, then finish this task with done.

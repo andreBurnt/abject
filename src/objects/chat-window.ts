@@ -17,7 +17,7 @@ import { Abject } from '../core/abject.js';
 import { request, event } from '../core/message.js';
 import { require as precondition, invariant } from '../core/contracts.js';
 import { estimateWrappedLineCount } from './widgets/word-wrap.js';
-import { buildGoalRows, type GoalNode } from './goal-tree.js';
+import { buildGoalDetailRows, type GoalRow, type GoalView } from './goal-tree.js';
 import { estimateMarkdownHeight } from './widgets/markdown.js';
 import { chromeCase } from '../core/theme-data.js';
 import { sectionHeaderText, livingStyle, eyeSigilOps, removeSigilOps, type SceneOp, sigilStreamOps } from './ui-kit.js';
@@ -157,8 +157,13 @@ export class ChatWindow extends Abject {
   /** Embedded goal-progress widget shown beneath the activity header. */
   private activityGoalWidgetId?: AbjectId;
   private activityGoalHeight = 0;
-  /** Goals the user folded in the inline progress tree (open by default). */
-  private collapsedGoals = new Set<string>();
+  /** Rows the person opened or folded in the goal card (each has its own default). */
+  private goalToggles = new Map<string, boolean>();
+  /** The rows last sent to the card: a click flips the row's shown state, and an unchanged build is not resent. */
+  private lastGoalRows: GoalRow[] = [];
+  private lastGoalRowsKey = '';
+  /** Once a second while a goal runs, so its timers move. */
+  private goalTick?: ReturnType<typeof setTimeout>;
   /** The live activity as Chat last sent it. */
   private activity?: ChatActivity;
 
@@ -421,15 +426,14 @@ export class ChatWindow extends Abject {
         return;
       }
 
-      // The inline goal tree's arrow (and status mark) fold a goal's tasks
-      // away and back, as in the Goals window.
+      // A task, its earlier steps or the older rounds open and fold.
       if (aspect === 'toggle' && fromId === this.activityGoalWidgetId) {
         try {
           const { id } = JSON.parse(value as string) as { id?: string };
-          if (id) {
-            if (this.collapsedGoals.has(id)) this.collapsedGoals.delete(id);
-            else this.collapsedGoals.add(id);
-            void this.render(() => this.refreshActivityBubble());
+          const row = id ? this.lastGoalRows.find(r => r.id === id) : undefined;
+          if (id && row) {
+            this.goalToggles.set(id, !(row.expanded ?? false));
+            void this.render(() => this.pushGoalRows());
           }
         } catch { /* malformed toggle */ }
         return;
@@ -702,6 +706,9 @@ export class ChatWindow extends Abject {
     this.activityBubbleLabelId = undefined;
     this.activityGoalWidgetId = undefined;
     this.activityGoalHeight = 0;
+    this.lastGoalRows = [];
+    this.lastGoalRowsKey = '';
+    if (this.goalTick) { this.cancelTimer(this.goalTick); this.goalTick = undefined; }
     this.welcomeWidgetIds = [];
     this.pendingImages = [];
     if (this.reflowTimer) {
@@ -724,6 +731,7 @@ export class ChatWindow extends Abject {
     await this.removeWelcomeState();
     // The message's own time; 0 means it was saved before times were kept.
     await this.appendBubble(m.role, m.sender, m.text, m.markdown, m.at > 0 ? m.at : undefined);
+    await this.keepActivityLast();
   }
 
   /** Chat started or stopped working: status strip, eye, title dot. */
@@ -954,6 +962,8 @@ export class ChatWindow extends Abject {
         })
       );
       this.activityGoalWidgetId = goalWidgetId;
+      this.lastGoalRows = [];
+      this.lastGoalRowsKey = '';
       await this.request(request(this.id, this.messageLogId, 'addLayoutChild', {
         widgetId: goalWidgetId,
         sizePolicy: { vertical: 'fixed', horizontal: 'fixed' },
@@ -965,24 +975,45 @@ export class ChatWindow extends Abject {
     }
   }
 
-  /** Map Chat's live goal snapshot into the shared row model, scoped to the run. */
-  private buildActivityRows() {
+  /** Chat's running goal as a card: state, question, planner line, tasks and their steps. */
+  private buildActivityRows(): GoalRow[] {
     const snapshot = this.activity;
-    const goals: GoalNode[] = (snapshot?.goals ?? []).map(g => ({
-      id: g.id,
-      parentId: g.parentId,
-      title: g.title,
-      description: g.description ?? '',
-      status: g.status,
-      latestMessage: g.latestMessage,
-      latestAgent: g.latestAgent,
-    }));
-    return buildGoalRows({
-      goals,
-      isExpanded: (id) => !this.collapsedGoals.has(id), // open unless folded
-      getTasks: (id) => snapshot?.tasks[id] ?? [],
-      rootId: snapshot?.rootId,
-    });
+    const root = snapshot?.goals.find(g => g.id === snapshot.rootId);
+    if (!snapshot || !root) return [];
+    const view: GoalView = {
+      id: root.id,
+      title: root.title,
+      status: root.status,
+      createdAt: root.createdAt,
+      progress: root.progress ?? [],
+      tasks: snapshot.tasks[root.id] ?? [],
+      question: root.question,
+      children: snapshot.goals
+        .filter(g => g.parentId === root.id)
+        .map(g => ({ id: g.id, title: g.title, status: g.status, latest: g.latestMessage })),
+    };
+    return buildGoalDetailRows(view, { now: Date.now(), isOpen: (id) => this.goalToggles.get(id), surface: 'chat' });
+  }
+
+  /** Send the card its rows when they changed, and keep its timers ticking while the goal runs. */
+  private async pushGoalRows(): Promise<void> {
+    if (!this.activityGoalWidgetId) return;
+    const rows = this.buildActivityRows();
+    const key = JSON.stringify(rows);
+    if (key !== this.lastGoalRowsKey) {
+      this.lastGoalRows = rows;
+      this.lastGoalRowsKey = key;
+      try {
+        await this.request(request(this.id, this.activityGoalWidgetId, 'update', { rows }));
+      } catch { /* widget may be gone */ }
+    }
+    const root = this.activity?.goals.find(g => g.id === this.activity?.rootId);
+    if (!this.goalTick && root?.status === 'active') {
+      this.goalTick = this.setTimer(() => {
+        this.goalTick = undefined;
+        void this.render(() => this.pushGoalRows());
+      }, 1000);
+    }
   }
 
   private async refreshActivityBubble(): Promise<void> {
@@ -996,12 +1027,22 @@ export class ChatWindow extends Abject {
     await this.updateLabel(this.activityBubbleLabelId, text, this.theme.statusNeutral);
     // Feed the embedded goal widget the current row model; it reports its own
     // height back via a `contentHeight` event (handled in the changed router).
-    if (this.activityGoalWidgetId) {
-      const rows = this.buildActivityRows();
-      try {
-        await this.request(request(this.id, this.activityGoalWidgetId, 'update', { rows }));
-      } catch { /* widget may be gone */ }
-    }
+    await this.pushGoalRows();
+  }
+
+  /**
+   * The live activity sits under the newest message: a note, a question from
+   * the goal or a reply that arrives while work goes on moves it down.
+   */
+  private async keepActivityLast(): Promise<void> {
+    if (!this.activityBubbleLabelId || !this.messageLogId) return;
+    const header = this.bubbleSenderLabels.get(this.activityBubbleLabelId);
+    const ids = [header, this.activityBubbleLabelId, this.activityGoalWidgetId]
+      .filter((id): id is AbjectId => !!id);
+    this.messageLabelIds = [...this.messageLabelIds.filter(id => !ids.includes(id)), ...ids];
+    try {
+      await this.request(request(this.id, this.messageLogId, 'moveLayoutChildrenToEnd', { widgetIds: ids }));
+    } catch { /* log gone */ }
   }
 
   private async removeActivityBubble(): Promise<void> {
@@ -1011,7 +1052,10 @@ export class ChatWindow extends Abject {
     this.activityBubbleLabelId = undefined;
     this.activityGoalWidgetId = undefined;
     this.activityGoalHeight = 0;
-    this.collapsedGoals.clear();
+    this.goalToggles.clear();
+    this.lastGoalRows = [];
+    this.lastGoalRowsKey = '';
+    if (this.goalTick) { this.cancelTimer(this.goalTick); this.goalTick = undefined; }
     if (goalWidgetId) await this.detachLabel(goalWidgetId);
     await this.removeLabel(id);
   }
@@ -1320,7 +1364,8 @@ export class ChatWindow extends Abject {
   private lastContentMeta(): MessageMeta | undefined {
     for (let i = this.messageLabelIds.length - 1; i >= 0; i--) {
       const meta = this.messageMetadata.get(this.messageLabelIds[i]);
-      if (meta) return meta;
+      // The live activity stays last; group with the message above it.
+      if (meta && meta.role !== 'activity') return meta;
     }
     return undefined;
   }
@@ -1581,6 +1626,8 @@ export class ChatWindow extends Abject {
     this.activityBubbleLabelId = undefined;
     this.activityGoalWidgetId = undefined;
     this.activityGoalHeight = 0;
+    this.lastGoalRows = [];
+    this.lastGoalRowsKey = '';
     // Welcome widgets (chips + card) live inside the message log and were
     // just cleared above; drop our tracked ids.
     this.welcomeWidgetIds = [];

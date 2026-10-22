@@ -181,7 +181,9 @@ instance.
   (`BROWSER_WINDOW_HOST_ID`). Electron-only, main thread only: `getCdpEndpoint`,
   `createWindow`, `closeWindow`, `clearSession`, answered for WebBrowser alone.
   Headless pages are offscreen-rendered windows; automation sessions grant no
-  browser permissions.
+  browser permissions. Offscreen pages open no native dialog (on Wayland one
+  parented to a never-shown window crashes the app): JavaScript dialogs are
+  off, and a preload makes print do nothing and the file pickers cancel.
 - **`web-parser.ts`**: `WebParser` (`WEB_PARSER_ID`). HTML parsing with
   linkedom, no browser: `querySelector`, `extractLinks`, `extractImages`,
   `extractText`, `extractMeta`.

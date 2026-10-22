@@ -1,19 +1,28 @@
 /**
- * GoalBrowser -- UI widget for viewing goal progress in real time.
+ * GoalBrowser -- the Goals window: what needs you, what is running, what got done.
  *
  * Shows/hides from Taskbar. Subscribes to GoalManager as a dependent to
- * receive real-time goal status updates. Uses a TreeWidget to display the
- * goal/task/progress hierarchy.
+ * receive real-time goal updates. A list on the left groups goals (needs you,
+ * running, then finished goals by day) with one line each of what a goal is
+ * doing or produced; the selected goal shows on the right as the same card
+ * Chat shows while a goal runs (state, question, planner line, tasks with a
+ * step trail), plus its result, the notes sent to it and what was learned.
+ * Below about 760 px wide the window shows one pane at a time: the list, or a
+ * goal with a Back button.
  */
 
 import { AbjectId, AbjectMessage, InterfaceId } from '../core/types.js';
 import { Abject } from '../core/abject.js';
 import { request, event } from '../core/message.js';
 import { Log } from '../core/timed-log.js';
+import { CONVERSATION_CONTEXT_KEY, type ConversationContext } from '../core/conversation-context.js';
 import type { Goal, GoalId } from './goal-manager.js';
-import { buildGoalRows, type GoalRow, type GoalNode } from './goal-tree.js';
 import {
-  livingStyle, emptyStateMarkdown, emptyStateStyle,
+  buildGoalDetailRows, buildGoalListRows, matchesFilter, needsPerson, nowLine, oneLine, resultText,
+  type GoalFilter, type GoalListItem, type GoalRow, type GoalView, type TaskNode,
+} from './goal-tree.js';
+import {
+  emptyStateMarkdown, emptyStateStyle,
   eyeSigilOps, removeSigilOps, sigilStreamOps, type SceneOp,
 } from './ui-kit.js';
 
@@ -21,12 +30,15 @@ const log = new Log('GoalBrowser');
 
 const GOAL_BROWSER_INTERFACE: InterfaceId = 'abjects:goal-browser';
 
-const WIN_W = 550;
-const WIN_H = 400;
-
-/** Status strip height at the top of the window. */
-const STATUS_H = 22;
-/** Height of the empty-state card while there are no goals. */
+const WIN_W = 960;
+const WIN_H = 620;
+/** Narrower than this, the window shows the list or one goal, not both. */
+const WIDE_MIN = 760;
+const LIST_W = 360;
+const TOOLBAR_H = 32;
+const BAR_H = 36;
+const FILTER_W = 100;
+/** Height of the empty-state card while there are no goals to list. */
 const EMPTY_H = 96;
 const EYE_PREFIX = 'goal-browser-eye';
 const EYE_SIZE = 20;
@@ -36,20 +48,17 @@ const STREAM_RATE = 6;
 const EFFECT_COALESCE_MS = 450;
 /** After Stop All, the resulting goal failures are the user's own doing. */
 const STOP_ALL_QUIET_MS = 5000;
+/** How often a progress event rereads the shown goal whole (its notes and question). */
+const SELECTED_REREAD_MS = 3000;
+/** Bursts of goal events redraw once. */
+const REBUILD_DEBOUNCE_MS = 150;
 
-
-/** Minimal task info extracted from TupleSpace scan results. */
-interface TaskInfo {
-  id: string;
-  type: string;
-  status: string;
-  description: string;
-  attempts: number;
-  maxAttempts: number;
-  dependsOn?: string[];
-  claimedBy?: string;
-  agentName?: string;
-}
+const FILTERS: Array<{ key: GoalFilter; label: string }> = [
+  { key: 'all', label: 'All' },
+  { key: 'running', label: 'Running' },
+  { key: 'needs', label: 'Needs you' },
+  { key: 'failed', label: 'Failed' },
+];
 
 export class GoalBrowser extends Abject {
   private goalManagerId?: AbjectId;
@@ -57,8 +66,18 @@ export class GoalBrowser extends Abject {
   private widgetManagerId?: AbjectId;
   private windowId?: AbjectId;
   private rootLayoutId?: AbjectId;
-  private scrollAreaId?: AbjectId;
-  private goalWidgetId?: AbjectId;
+  private bodyLayoutId?: AbjectId;
+  private listScrollId?: AbjectId;
+  private detailColumnId?: AbjectId;
+  private detailScrollId?: AbjectId;
+  private detailBarId?: AbjectId;
+  private listWidgetId?: AbjectId;
+  private detailWidgetId?: AbjectId;
+  private searchInputId?: AbjectId;
+  private filterBtnIds: AbjectId[] = [];
+  private backBtnId?: AbjectId;
+  private openBtnId?: AbjectId;
+  private againBtnId?: AbjectId;
   private stopAllBtnId?: AbjectId;
   private clearBtnId?: AbjectId;
   /**
@@ -73,7 +92,7 @@ export class GoalBrowser extends Abject {
   private emptyShown?: boolean;
   /** Eye sigil shown while any goal is running. */
   private eyeShown = false;
-  private eyeWinSize?: { width: number; height: number };
+  private winSize = { width: WIN_W, height: WIN_H };
   /** Last play time per effect name (coalesces bursts of goal events). */
   private effectLastAt = new Map<string, number>();
   /** Goals the user stopped from this window: their failure is not an error. */
@@ -87,27 +106,47 @@ export class GoalBrowser extends Abject {
   private localPeerId = '';
   private get selfPeerId(): string { return this.localPeerId || this.id; }
   /**
-   * A goal is remote when another peer created it. goal-tree renders those rows
-   * with a [Remote: <peer>] badge and without controls: a single ScrumMaster on
-   * the owning peer drives each goal, so pausing or stopping it from here would
-   * race that owner.
+   * A goal is remote when another peer created it. Its card carries a
+   * [Remote: <peer>] badge and no controls: a single ScrumMaster on the owning
+   * peer drives each goal, so pausing or stopping it from here would race
+   * that owner.
    */
   private isRemoteGoal(creatorPeerId?: string): boolean {
     return !!creatorPeerId && creatorPeerId !== this.selfPeerId;
   }
-  /** Track which goals are expanded in the tree. Active goals expand by default. */
-  private expandedGoals: Set<GoalId> = new Set();
 
-  /** Cached goals and tasks for rebuilding the tree. */
+  /** Cached goals and the tasks of the ones being shown. */
   private goals: Goal[] = [];
-  private tasksByGoal: Map<GoalId, TaskInfo[]> = new Map();
+  private tasksByGoal: Map<GoalId, TaskNode[]> = new Map();
+  /** Goals whose tasks are being fetched, and ones to fetch again when that lands. */
+  private fetchingTasks = new Set<GoalId>();
+  private refetchTasks = new Set<GoalId>();
+
+  // View state.
+  private filter: GoalFilter = 'all';
+  private query = '';
+  private selectedId?: GoalId;
+  private wide = true;
+  /** In the narrow layout: the list, or the selected goal. */
+  private narrowShowsGoal = false;
+  /** Card rows the person opened or folded, per goal. */
+  private toggles = new Map<string, boolean>();
+  private lastDetailRows: GoalRow[] = [];
+  private lastDetailKey = '';
+  private lastListKey = '';
+  private lastFilterLabels = '';
+  private lastPaneState = '';
+  private lastBarState = '';
+  private rebuildTimer?: ReturnType<typeof setTimeout>;
+  private selectedReadAt = 0;
+  private tickTimer?: ReturnType<typeof setTimeout>;
 
   constructor() {
     super({
       manifest: {
         name: 'GoalBrowser',
         description:
-          'Browse and monitor cross-agent goal progress. Shows real-time updates for active, completed, and failed goals across agent delegation chains.',
+          'Browse and monitor goals: what needs you, what is running and what each task is doing step by step, and what finished goals produced. Live updates as agents work.',
         version: '1.0.0',
         interface: {
           id: GOAL_BROWSER_INTERFACE,
@@ -133,6 +172,7 @@ export class GoalBrowser extends Abject {
               returns: { kind: 'object', properties: {
                 visible: { kind: 'primitive', primitive: 'boolean' },
                 goalCount: { kind: 'primitive', primitive: 'number' },
+                selectedGoalId: { kind: 'primitive', primitive: 'string' },
               }},
             },
           ],
@@ -171,16 +211,19 @@ export class GoalBrowser extends Abject {
     this.on('getState', async () => ({
       visible: !!this.windowId,
       goalCount: this.goals.length,
+      selectedGoalId: this.selectedId ?? '',
     }));
     this.on('windowCloseRequested', async () => { await this.hide(); });
-    // Keep the eye anchored to the status strip's right edge on resize.
     this.on('windowResized', async (msg: AbjectMessage) => {
       const { windowId, width, height } = (msg.payload ?? {}) as { windowId?: AbjectId; width?: number; height?: number };
       if (!this.windowId || (windowId && windowId !== this.windowId)) return;
       if (typeof width !== 'number' || typeof height !== 'number' || width <= 0 || height <= 0) return;
-      this.eyeWinSize = { width, height };
-      if (!this.eyeShown) return;
-      await this.sendEyeOps([{ op: 'update', id: `${EYE_PREFIX}-sigil`, transform: { position: this.eyePosition() } }]);
+      this.winSize = { width, height };
+      this.wide = width >= WIDE_MIN;
+      await this.applyPanes();
+      if (this.eyeShown) {
+        await this.sendEyeOps([{ op: 'update', id: `${EYE_PREFIX}-sigil`, transform: { position: this.eyePosition() } }]);
+      }
     });
     this.on('changed', async (msg: AbjectMessage) => {
       const { aspect, value } = msg.payload as { aspect: string; value?: unknown };
@@ -192,14 +235,18 @@ export class GoalBrowser extends Abject {
     return super.askPrompt(_question) + `\n\n## GoalBrowser Usage Guide
 
 ### Methods
-- \`show()\` -- Open the goal browser window. If already open, raises it to front.
-- \`hide()\` -- Close the goal browser window and unsubscribe from GoalManager.
-- \`getState()\` -- Returns { visible: boolean, goalCount: number }.
+- \`show()\` -- Open the Goals window. If already open, raises it to front.
+- \`hide()\` -- Close the Goals window and unsubscribe from GoalManager.
+- \`getState()\` -- Returns { visible, goalCount, selectedGoalId }.
 
-### Real-Time Goal Monitoring
+### What the window shows
 GoalBrowser registers as a dependent of GoalManager to receive live progress updates.
-Goals are shown in a tree: each goal is a parent node, tasks and progress are children.
-Click the arrow to expand/collapse a goal.
+The list groups goals: needs you (a goal paused on a question), running, then finished goals by day,
+each with one line of what it is doing or produced. Filters (All, Running, Needs you, Failed) and a
+search box narrow the list. Selecting a goal shows its card: state, the question it asks, the planner's
+latest word, its tasks with each running task's recent steps, and for finished goals the result, the
+notes sent to it and what was learned. Open the conversation shows the chat the goal came from; Run
+again sends that request to the same chat.
 
 ### Interface ID
 \`abjects:goal-browser\``;
@@ -220,138 +267,154 @@ Click the arrow to expand/collapse a goal.
     const displayInfo = await this.request<{ width: number; height: number }>(
       request(this.id, this.widgetManagerId!, 'getDisplayInfo', {})
     );
-
-    const winX = Math.max(20, Math.floor((displayInfo.width - WIN_W) / 2));
-    const winY = Math.max(20, Math.floor((displayInfo.height - WIN_H) / 2));
+    const width = Math.min(WIN_W, Math.max(480, displayInfo.width - 40));
+    const height = Math.min(WIN_H, Math.max(360, displayInfo.height - 40));
+    this.winSize = { width, height };
+    this.wide = width >= WIDE_MIN;
+    const winX = Math.max(20, Math.floor((displayInfo.width - width) / 2));
+    const winY = Math.max(20, Math.floor((displayInfo.height - height) / 2));
 
     this.windowId = await this.request<AbjectId>(
       request(this.id, this.widgetManagerId!, 'createWindowAbject', {
         title: 'Goals',
-        rect: { x: winX, y: winY, width: WIN_W, height: WIN_H },
+        rect: { x: winX, y: winY, width, height },
         zIndex: 200,
         resizable: true,
       })
     );
+    const wm = this.widgetManagerId!;
+    const windowId = this.windowId;
 
-    // Root VBox
     this.rootLayoutId = await this.request<AbjectId>(
-      request(this.id, this.widgetManagerId!, 'createVBox', {
-        windowId: this.windowId,
-        margins: { top: 12, right: 16, bottom: 12, left: 16 },
-        spacing: 8,
-      })
+      request(this.id, wm, 'createVBox', { windowId, margins: { top: 12, right: 16, bottom: 12, left: 16 }, spacing: 10 })
     );
 
-    // Status strip: running/done counts, phosphor while work is alive.
-    const { widgetIds: [statusLabelId, emptyLabelId] } = await this.request<{ widgetIds: AbjectId[] }>(
-      request(this.id, this.widgetManagerId!, 'create', {
+    // Toolbar: filters, then search.
+    const toolbarId = await this.request<AbjectId>(
+      request(this.id, wm, 'createNestedHBox', { parentLayoutId: this.rootLayoutId, margins: { top: 0, right: 0, bottom: 0, left: 0 }, spacing: 6 })
+    );
+    await this.request(request(this.id, this.rootLayoutId, 'updateLayoutChild', {
+      widgetId: toolbarId, sizePolicy: { vertical: 'fixed', horizontal: 'expanding' }, preferredSize: { height: TOOLBAR_H },
+    }));
+    const { widgetIds: toolIds } = await this.request<{ widgetIds: AbjectId[] }>(
+      request(this.id, wm, 'create', {
+        specs: [
+          ...FILTERS.map(f => ({ type: 'button', windowId, text: f.label, style: { fontSize: 12 } })),
+          { type: 'textInput', windowId, placeholder: 'Search goals' },
+        ],
+      })
+    );
+    this.filterBtnIds = toolIds.slice(0, FILTERS.length);
+    this.searchInputId = toolIds[FILTERS.length];
+    await this.request(request(this.id, toolbarId, 'addLayoutChildren', {
+      children: this.filterBtnIds.map(id => ({ widgetId: id, sizePolicy: { horizontal: 'fixed', vertical: 'fixed' }, preferredSize: { width: FILTER_W, height: TOOLBAR_H } })),
+    }));
+    // Search takes the rest of the row, so it fits a narrow window too.
+    await this.request(request(this.id, toolbarId, 'addLayoutChild', {
+      widgetId: this.searchInputId, sizePolicy: { horizontal: 'expanding', vertical: 'fixed' }, preferredSize: { height: TOOLBAR_H },
+    }));
+
+    // Body: the list beside the selected goal.
+    this.bodyLayoutId = await this.request<AbjectId>(
+      request(this.id, wm, 'createNestedHBox', { parentLayoutId: this.rootLayoutId, margins: { top: 0, right: 0, bottom: 0, left: 0 }, spacing: 14 })
+    );
+    this.listScrollId = await this.request<AbjectId>(
+      request(this.id, wm, 'createNestedScrollableVBox', { parentLayoutId: this.bodyLayoutId, autoScroll: false, margins: { top: 0, right: 0, bottom: 0, left: 0 }, spacing: 0 })
+    );
+    this.detailColumnId = await this.request<AbjectId>(
+      request(this.id, wm, 'createNestedVBox', { parentLayoutId: this.bodyLayoutId, margins: { top: 0, right: 0, bottom: 0, left: 0 }, spacing: 8 })
+    );
+    this.detailScrollId = await this.request<AbjectId>(
+      request(this.id, wm, 'createNestedScrollableVBox', { parentLayoutId: this.detailColumnId, autoScroll: false, margins: { top: 0, right: 0, bottom: 0, left: 0 }, spacing: 0 })
+    );
+    this.detailBarId = await this.request<AbjectId>(
+      request(this.id, wm, 'createNestedHBox', { parentLayoutId: this.detailColumnId, margins: { top: 0, right: 0, bottom: 0, left: 0 }, spacing: 8 })
+    );
+    await this.request(request(this.id, this.detailColumnId, 'updateLayoutChild', {
+      widgetId: this.detailBarId, sizePolicy: { vertical: 'fixed', horizontal: 'expanding' }, preferredSize: { height: BAR_H },
+    }));
+
+    const { widgetIds: [emptyLabelId, listWidgetId, detailWidgetId, backBtnId, openBtnId, againBtnId] } = await this.request<{ widgetIds: AbjectId[] }>(
+      request(this.id, wm, 'create', {
         specs: [
           {
-            type: 'label', windowId: this.windowId, text: 'No goals yet',
-            style: { color: this.theme.textMeta, fontSize: 12, wordWrap: false, selectable: false },
-          },
-          {
-            type: 'label', windowId: this.windowId,
+            type: 'label', windowId,
             text: emptyStateMarkdown(
               'No goals yet',
               'Ask a chat to do something that takes several steps. Its goal and the tasks agents take on appear here live.',
             ),
             style: { ...emptyStateStyle(this.theme), selectable: false },
           },
+          { type: 'goalProgress', windowId, rows: [], style: { background: 'transparent' } },
+          { type: 'goalProgress', windowId, rows: [] },
+          { type: 'button', windowId, text: 'Back' },
+          { type: 'button', windowId, text: 'Open the conversation' },
+          { type: 'button', windowId, text: 'Run again' },
+        ],
+      })
+    );
+    this.emptyLabelId = emptyLabelId;
+    this.listWidgetId = listWidgetId;
+    this.detailWidgetId = detailWidgetId;
+    this.backBtnId = backBtnId;
+    this.openBtnId = openBtnId;
+    this.againBtnId = againBtnId;
+    this.emptyShown = undefined;
+    await this.request(request(this.id, this.listScrollId, 'addLayoutChildren', {
+      children: [
+        { widgetId: this.emptyLabelId, sizePolicy: { vertical: 'fixed', horizontal: 'expanding' }, preferredSize: { height: EMPTY_H } },
+        { widgetId: this.listWidgetId, sizePolicy: { vertical: 'fixed', horizontal: 'expanding' }, preferredSize: { height: 0 } },
+      ],
+    }));
+    await this.request(request(this.id, this.detailScrollId, 'addLayoutChild', {
+      widgetId: this.detailWidgetId, sizePolicy: { vertical: 'fixed', horizontal: 'expanding' }, preferredSize: { height: 0 },
+    }));
+    await this.request(request(this.id, this.detailBarId, 'addLayoutChildren', {
+      children: [
+        { widgetId: this.backBtnId, sizePolicy: { horizontal: 'fixed', vertical: 'fixed' }, preferredSize: { width: 72, height: BAR_H } },
+        { widgetId: this.openBtnId, sizePolicy: { horizontal: 'fixed', vertical: 'fixed' }, preferredSize: { width: 180, height: BAR_H } },
+        { widgetId: this.againBtnId, sizePolicy: { horizontal: 'fixed', vertical: 'fixed' }, preferredSize: { width: 104, height: BAR_H } },
+      ],
+    }));
+    await this.request(request(this.id, this.detailBarId, 'addLayoutSpacer', {}));
+
+    // Bottom bar: counts, Clear finished, Stop all.
+    const bottomRowId = await this.request<AbjectId>(
+      request(this.id, wm, 'createNestedHBox', { parentLayoutId: this.rootLayoutId, margins: { top: 0, right: 0, bottom: 0, left: 0 }, spacing: 8 })
+    );
+    await this.request(request(this.id, this.rootLayoutId, 'updateLayoutChild', {
+      widgetId: bottomRowId, sizePolicy: { vertical: 'fixed', horizontal: 'expanding' }, preferredSize: { height: BAR_H },
+    }));
+    const { widgetIds: [statusLabelId, clearBtnId, stopAllBtnId] } = await this.request<{ widgetIds: AbjectId[] }>(
+      request(this.id, wm, 'create', {
+        specs: [
+          { type: 'label', windowId, text: 'No goals yet', style: { color: this.theme.textMeta, fontSize: 12, wordWrap: false, selectable: false } },
+          { type: 'button', windowId, text: 'Clear finished' },
+          {
+            type: 'button', windowId, text: 'Stop all',
+            style: { background: this.theme.destructiveBg, color: this.theme.destructiveText, borderColor: this.theme.destructiveBorder },
+          },
         ],
       })
     );
     this.statusLabelId = statusLabelId;
-    this.emptyLabelId = emptyLabelId;
-    await this.request(request(this.id, this.rootLayoutId, 'addLayoutChild', {
-      widgetId: this.statusLabelId,
-      sizePolicy: { vertical: 'fixed', horizontal: 'expanding' },
-      preferredSize: { height: STATUS_H },
-    }));
-
-    // Scrollable area holds the goal-progress widget. The widget reports its
-    // own natural height (rows word-wrap and vary in height); the ScrollableVBox
-    // scrolls when the tree is taller than the window. Auto-added as expanding,
-    // so it sits above the button bar.
-    this.scrollAreaId = await this.request<AbjectId>(
-      request(this.id, this.widgetManagerId!, 'createNestedScrollableVBox', {
-        parentLayoutId: this.rootLayoutId,
-        autoScroll: false,
-        margins: { top: 0, right: 0, bottom: 0, left: 0 },
-        spacing: 0,
-      })
-    );
-
-    const { widgetIds: [goalWidgetId] } = await this.request<{ widgetIds: AbjectId[] }>(
-      request(this.id, this.widgetManagerId!, 'create', {
-        specs: [{ type: 'goalProgress', windowId: this.windowId, rows: [] }],
-      })
-    );
-    this.goalWidgetId = goalWidgetId;
-
-    // Empty-state card sits above the tree; collapsed to zero height once
-    // there are goals to show.
-    this.emptyShown = undefined;
-    await this.request(request(this.id, this.scrollAreaId, 'addLayoutChild', {
-      widgetId: this.emptyLabelId,
-      sizePolicy: { vertical: 'fixed', horizontal: 'expanding' },
-      preferredSize: { height: EMPTY_H },
-    }));
-
-    await this.request(request(this.id, this.scrollAreaId, 'addLayoutChild', {
-      widgetId: this.goalWidgetId,
-      sizePolicy: { vertical: 'fixed', horizontal: 'expanding' },
-      preferredSize: { height: WIN_H },
-    }));
-
-    // Bottom bar (createNestedHBox auto-adds after the tree)
-    const bottomRowId = await this.request<AbjectId>(
-      request(this.id, this.widgetManagerId!, 'createNestedHBox', {
-        parentLayoutId: this.rootLayoutId,
-        margins: { top: 0, right: 0, bottom: 0, left: 0 },
-        spacing: 8,
-      })
-    );
-
-    // Override the auto-added expanding policy to fixed height
-    await this.request(request(this.id, this.rootLayoutId, 'updateLayoutChild', {
-      widgetId: bottomRowId,
-      sizePolicy: { vertical: 'fixed', horizontal: 'expanding' },
-      preferredSize: { height: 36 },
-    }));
-
-    // Spacer pushes buttons right
-    await this.request(request(this.id, bottomRowId, 'addLayoutSpacer', {}));
-
-    // Stop All + Clear buttons
-    const { widgetIds: btnIds } = await this.request<{ widgetIds: AbjectId[] }>(
-      request(this.id, this.widgetManagerId!, 'create', {
-        specs: [
-          {
-            type: 'button', windowId: this.windowId, text: 'Stop All',
-            style: { background: this.theme.destructiveBg, color: this.theme.destructiveText, borderColor: this.theme.destructiveBorder },
-          },
-          { type: 'button', windowId: this.windowId, text: 'Clear' },
-        ],
-      })
-    );
-    this.stopAllBtnId = btnIds[0];
-    this.clearBtnId = btnIds[1];
-
+    this.clearBtnId = clearBtnId;
+    this.stopAllBtnId = stopAllBtnId;
     await this.request(request(this.id, bottomRowId, 'addLayoutChildren', {
       children: [
-        { widgetId: this.clearBtnId, sizePolicy: { horizontal: 'fixed' }, preferredSize: { width: 88, height: 36 } },
-        { widgetId: this.stopAllBtnId, sizePolicy: { horizontal: 'fixed' }, preferredSize: { width: 96, height: 36 } },
+        { widgetId: this.statusLabelId, sizePolicy: { horizontal: 'expanding', vertical: 'fixed' }, preferredSize: { height: BAR_H } },
+        { widgetId: this.clearBtnId, sizePolicy: { horizontal: 'fixed' }, preferredSize: { width: 124, height: BAR_H } },
+        { widgetId: this.stopAllBtnId, sizePolicy: { horizontal: 'fixed' }, preferredSize: { width: 96, height: BAR_H } },
       ],
     }));
 
-    // Subscribe to events
-    this.send(request(this.id, this.stopAllBtnId, 'addDependent', {}));
-    this.send(request(this.id, this.clearBtnId, 'addDependent', {}));
-    this.send(request(this.id, this.goalWidgetId, 'addDependent', {}));
+    for (const id of [...this.filterBtnIds, this.searchInputId, this.listWidgetId, this.detailWidgetId,
+      this.backBtnId, this.openBtnId, this.againBtnId, this.clearBtnId, this.stopAllBtnId]) {
+      this.send(request(this.id, id, 'addDependent', {}));
+    }
     this.send(request(this.id, this.goalManagerId!, 'addDependent', {}));
 
-    // Populate
+    await this.applyPanes();
     await this.loadGoals();
 
     this.changed('visibility', true);
@@ -369,22 +432,40 @@ Click the arrow to expand/collapse a goal.
       })
     );
 
+    if (this.rebuildTimer) { this.cancelTimer(this.rebuildTimer); this.rebuildTimer = undefined; }
+    if (this.tickTimer) { this.cancelTimer(this.tickTimer); this.tickTimer = undefined; }
     this.windowId = undefined;
     this.rootLayoutId = undefined;
-    this.scrollAreaId = undefined;
-    this.goalWidgetId = undefined;
+    this.bodyLayoutId = undefined;
+    this.listScrollId = undefined;
+    this.detailColumnId = undefined;
+    this.detailScrollId = undefined;
+    this.detailBarId = undefined;
+    this.listWidgetId = undefined;
+    this.detailWidgetId = undefined;
+    this.searchInputId = undefined;
+    this.filterBtnIds = [];
+    this.backBtnId = undefined;
+    this.openBtnId = undefined;
+    this.againBtnId = undefined;
     this.stopAllBtnId = undefined;
     this.clearBtnId = undefined;
     this.statusLabelId = undefined;
     this.emptyLabelId = undefined;
     this.emptyShown = undefined;
     this.eyeShown = false;
-    this.eyeWinSize = undefined;
     this.buttonState = undefined;
+    this.lastDetailRows = [];
+    this.lastDetailKey = '';
+    this.lastListKey = '';
+    this.lastFilterLabels = '';
+    this.lastPaneState = '';
+    this.lastBarState = '';
     this.userStoppedGoals.clear();
     this.goals = [];
     this.tasksByGoal.clear();
-    this.expandedGoals.clear();
+    this.toggles.clear();
+    this.narrowShowsGoal = false;
     this.changed('visibility', false);
     return true;
   }
@@ -393,36 +474,58 @@ Click the arrow to expand/collapse a goal.
 
   private async loadGoals(): Promise<void> {
     if (!this.goalManagerId) return;
-
     try {
       // Archived goals included: finished goals moved to cold storage list
-      // as summaries, and opening one reads it whole.
+      // as summaries, and selecting one reads it whole.
       this.goals = await this.request<Goal[]>(
         request(this.id, this.goalManagerId, 'listGoals', { includeArchived: true })
       );
-
-      // Auto-expand active goals
-      for (const goal of this.goals) {
-        if (goal.status === 'active') this.expandedGoals.add(goal.id);
-      }
-
-      // Fetch tasks for expanded goals
-      await Promise.all(
-        this.goals
-          .filter(g => this.expandedGoals.has(g.id))
-          .map(async g => {
-            const tasks = await this.fetchTasksForGoal(g.id);
-            this.tasksByGoal.set(g.id, tasks);
-          })
-      );
+      if (this.selectedId && !this.goals.some(g => g.id === this.selectedId)) this.selectedId = undefined;
+      if (!this.selectedId) this.selectedId = this.defaultSelection();
+      await Promise.all(this.goals
+        .filter(g => g.status === 'active' || g.status === 'paused' || g.id === this.selectedId)
+        .map(g => this.loadTasks(g.id)));
+      if (this.selectedId) await this.refreshGoal(this.selectedId);
     } catch (err) {
       log.warn('Failed to load goals:', err);
     }
-
-    await this.rebuildTree();
+    await this.rebuild();
   }
 
-  private async fetchTasksForGoal(goalId: GoalId): Promise<TaskInfo[]> {
+  /** First choice to show: a goal waiting on the person, else a running one, else the latest. */
+  private defaultSelection(): GoalId | undefined {
+    const top = this.goals.filter(g => !g.parentId);
+    const needs = top.find(g => needsPerson({ status: g.status, question: g.pendingQuestion?.question }));
+    const running = top.find(g => g.status === 'active' || g.status === 'paused');
+    const latest = [...top].sort((a, b) => b.updatedAt - a.updatedAt)[0];
+    return (needs ?? running ?? latest)?.id;
+  }
+
+  /** Read one goal whole (an archived summary has no result or log) into the cache. */
+  private async refreshGoal(goalId: GoalId): Promise<void> {
+    if (!this.goalManagerId) return;
+    try {
+      const goal = await this.request<Goal | null>(request(this.id, this.goalManagerId, 'getGoal', { goalId }));
+      if (!goal) return;
+      const idx = this.goals.findIndex(g => g.id === goalId);
+      if (idx >= 0) this.goals[idx] = goal; else this.goals.push(goal);
+    } catch { /* goal may be gone */ }
+  }
+
+  private async loadTasks(goalId: GoalId): Promise<void> {
+    if (this.fetchingTasks.has(goalId)) { this.refetchTasks.add(goalId); return; }
+    this.fetchingTasks.add(goalId);
+    try {
+      do {
+        this.refetchTasks.delete(goalId);
+        this.tasksByGoal.set(goalId, await this.fetchTasksForGoal(goalId));
+      } while (this.refetchTasks.has(goalId));
+    } finally {
+      this.fetchingTasks.delete(goalId);
+    }
+  }
+
+  private async fetchTasksForGoal(goalId: GoalId): Promise<TaskNode[]> {
     if (!this.goalManagerId) return [];
     try {
       const tuples = await this.request<Array<{ id: string; fields: Record<string, unknown>; claimedBy?: string }>>(
@@ -430,7 +533,6 @@ Click the arrow to expand/collapse a goal.
       );
       return tuples.map(t => ({
         id: t.id,
-        type: (t.fields.type as string) ?? 'unknown',
         status: (t.fields.status as string) ?? 'unknown',
         description: (t.fields.description as string) ?? '',
         attempts: (t.fields.attempts as number) ?? 0,
@@ -438,77 +540,207 @@ Click the arrow to expand/collapse a goal.
         claimedBy: t.claimedBy,
         agentName: (t.fields.agentName as string) ?? undefined,
         dependsOn: (t.fields.dependsOn as string[]) ?? undefined,
+        scrumNumber: typeof t.fields.scrumNumber === 'number' ? t.fields.scrumNumber : undefined,
+        result: oneLine(resultText(t.fields.result) ?? '', 220) || undefined,
+        error: typeof t.fields.error === 'string' ? oneLine(t.fields.error, 220) : undefined,
       }));
     } catch { return []; }
   }
 
-  // -- Row building --
+  // -- Views of the cached goals --
 
-  /** Map cached Goals into the shared, UI-agnostic node shape. */
-  private toGoalNodes(): GoalNode[] {
-    return this.goals.map(g => {
-      const last = g.progress.length > 0 ? g.progress[g.progress.length - 1] : undefined;
-      return {
-        id: g.id,
-        parentId: g.parentId,
-        title: g.title,
-        description: g.description,
-        status: g.status,
-        latestMessage: last?.message,
-        latestAgent: last?.agentName,
-        error: g.error,
-        // Peer attribution: goal-tree badges these rows and drops their controls.
-        creatorPeerId: g.creatorPeerId,
-        isRemote: this.isRemoteGoal(g.creatorPeerId),
-      };
-    });
+  private viewOf(goal: Goal): GoalView {
+    return {
+      id: goal.id,
+      title: goal.title,
+      status: goal.status,
+      createdAt: goal.createdAt,
+      updatedAt: goal.updatedAt,
+      progress: goal.progress ?? [],
+      tasks: this.tasksByGoal.get(goal.id) ?? [],
+      question: goal.pendingQuestion?.question,
+      error: goal.error,
+      result: resultText(goal.result),
+      notes: goal.interjections ?? [],
+      learned: learnedFrom(goal),
+      children: this.goals
+        .filter(g => g.parentId === goal.id)
+        .map(g => ({ id: g.id, title: g.title, status: g.status, latest: g.progress?.[g.progress.length - 1]?.message })),
+      isRemote: this.isRemoteGoal(goal.creatorPeerId),
+      creatorPeerId: goal.creatorPeerId,
+    };
   }
 
-  private buildRows(): GoalRow[] {
-    return buildGoalRows({
-      goals: this.toGoalNodes(),
-      isExpanded: (id) => this.expandedGoals.has(id as GoalId),
-      getTasks: (id) => this.tasksByGoal.get(id as GoalId) ?? [],
-      // Per-goal pause/resume/stop controls on live goal rows.
-      withActions: true,
-    });
+  private listItemOf(goal: Goal, now: number): GoalListItem {
+    const live = goal.status === 'active' || goal.status === 'paused';
+    const line = live
+      ? nowLine({ progress: goal.progress ?? [], tasks: this.tasksByGoal.get(goal.id) ?? [], status: goal.status }, now)
+      : goal.status === 'failed'
+        ? (goal.error ? oneLine(goal.error, 160) : undefined)
+        : (resultText(goal.result) ? oneLine(resultText(goal.result)!, 160) : undefined);
+    return {
+      id: goal.id,
+      title: goal.title,
+      status: goal.status,
+      createdAt: goal.createdAt,
+      updatedAt: goal.updatedAt,
+      question: goal.pendingQuestion?.question,
+      line,
+      isRemote: this.isRemoteGoal(goal.creatorPeerId),
+      creatorPeerId: goal.creatorPeerId,
+    };
   }
 
-  private async rebuildTree(): Promise<void> {
-    if (!this.goalWidgetId) return;
-    const rows = this.buildRows();
-    try {
-      await this.request(request(this.id, this.goalWidgetId, 'update', { rows }));
-    } catch { /* widget may be gone */ }
+  private conversationOf(goal: Goal | undefined): ConversationContext | undefined {
+    const context = goal?.scratchpad?.[CONVERSATION_CONTEXT_KEY] as ConversationContext | undefined;
+    return context && typeof context.conversationId === 'string' && context.conversationId ? context : undefined;
+  }
+
+  // -- Drawing --
+
+  private scheduleRebuild(): void {
+    if (this.rebuildTimer || !this.windowId) return;
+    this.rebuildTimer = this.setTimer(() => {
+      this.rebuildTimer = undefined;
+      void this.rebuild();
+    }, REBUILD_DEBOUNCE_MS);
+  }
+
+  /** Redraw the list, the selected goal and the bars; only what changed is sent. */
+  private async rebuild(): Promise<void> {
+    if (!this.windowId) return;
+    const now = Date.now();
+    const top = this.goals.filter(g => !g.parentId);
+    const items = top.map(g => this.listItemOf(g, now));
+
+    // Filter labels with counts.
+    const counts: Record<GoalFilter, number> = {
+      all: items.length,
+      running: items.filter(i => i.status === 'active' || i.status === 'paused').length,
+      needs: items.filter(i => needsPerson(i)).length,
+      failed: items.filter(i => i.status === 'failed').length,
+    };
+    const labels = FILTERS.map(f => `${f.label} · ${counts[f.key]}|${f.key === this.filter}`).join(',');
+    if (labels !== this.lastFilterLabels) {
+      this.lastFilterLabels = labels;
+      FILTERS.forEach((f, i) => {
+        const selected = f.key === this.filter;
+        const id = this.filterBtnIds[i];
+        if (!id) return;
+        this.send(event(this.id, id, 'update', {
+          text: `${f.label} · ${counts[f.key]}`,
+          style: selected
+            ? { fontSize: 12, background: this.theme.activeItemBg, borderColor: this.theme.activeItemBorder, color: this.theme.textPrimary }
+            : { fontSize: 12, background: this.theme.buttonBg, borderColor: this.theme.buttonBorder, color: this.theme.buttonText },
+        }));
+      });
+    }
+
+    // The list.
+    const shown = items.filter(i => matchesFilter(i, this.filter, this.query));
+    const listRows = buildGoalListRows(shown, { now, selectedId: this.wide || this.narrowShowsGoal ? this.selectedId : undefined });
+    const listKey = JSON.stringify(listRows);
+    if (listKey !== this.lastListKey && this.listWidgetId) {
+      this.lastListKey = listKey;
+      try { await this.request(request(this.id, this.listWidgetId, 'update', { rows: listRows })); } catch { /* widget gone */ }
+    }
+    const empty = shown.length === 0;
+    if (this.listScrollId && this.emptyLabelId && empty !== this.emptyShown) {
+      this.emptyShown = empty;
+      this.send(event(this.id, this.emptyLabelId, 'update', {
+        text: items.length === 0
+          ? emptyStateMarkdown('No goals yet', 'Ask a chat to do something that takes several steps. Its goal and the tasks agents take on appear here live.')
+          : emptyStateMarkdown('No goals match', 'Try another filter or search.'),
+      }));
+      this.send(request(this.id, this.listScrollId, 'updateLayoutChild', {
+        widgetId: this.emptyLabelId,
+        preferredSize: { height: empty ? EMPTY_H : 0 },
+      }));
+    }
+
+    // The selected goal.
+    const selected = this.goals.find(g => g.id === this.selectedId);
+    const detailRows = selected
+      ? buildGoalDetailRows(this.viewOf(selected), { now, isOpen: (id) => this.toggles.get(id), surface: 'browser', withActions: true })
+      : [];
+    const detailKey = JSON.stringify(detailRows);
+    if (detailKey !== this.lastDetailKey && this.detailWidgetId) {
+      this.lastDetailKey = detailKey;
+      this.lastDetailRows = detailRows;
+      try { await this.request(request(this.id, this.detailWidgetId, 'update', { rows: detailRows })); } catch { /* widget gone */ }
+    }
+    await this.applyDetailBar(selected);
     await this.refreshStatus();
+
+    // Timers move while anything runs.
+    const running = this.goals.some(g => g.status === 'active');
+    if (running && !this.tickTimer) {
+      this.tickTimer = this.setTimer(() => {
+        this.tickTimer = undefined;
+        void this.rebuild();
+      }, 1000);
+    }
+  }
+
+  /** Wide: list beside the goal. Narrow: one or the other. */
+  private async applyPanes(): Promise<void> {
+    if (!this.bodyLayoutId || !this.listScrollId || !this.detailColumnId) return;
+    const state = this.wide ? 'wide' : this.narrowShowsGoal ? 'goal' : 'list';
+    if (state === this.lastPaneState) return;
+    this.lastPaneState = state;
+    // A hidden pane takes no room in the row; the shown one grows into it.
+    await this.request(request(this.id, this.bodyLayoutId, 'updateLayoutChild', {
+      widgetId: this.listScrollId,
+      ...(state === 'wide'
+        ? { sizePolicy: { horizontal: 'fixed', vertical: 'expanding' }, preferredSize: { width: LIST_W } }
+        : { sizePolicy: { horizontal: 'expanding', vertical: 'expanding' } }),
+    })).catch(() => undefined);
+    await this.request(request(this.id, this.listScrollId, 'update', { visible: state !== 'goal' })).catch(() => undefined);
+    await this.request(request(this.id, this.detailColumnId, 'update', { visible: state !== 'list' })).catch(() => undefined);
+    this.lastBarState = '';
+    this.lastListKey = '';
+    await this.rebuild();
+  }
+
+  /** Back (narrow only), Open the conversation, Run again (finished goals). */
+  private async applyDetailBar(selected: Goal | undefined): Promise<void> {
+    if (!this.detailBarId) return;
+    const hasChat = !!this.conversationOf(selected);
+    const finished = !!selected && (selected.status === 'completed' || selected.status === 'failed' || selected.status === 'archived');
+    const back = !this.wide && this.narrowShowsGoal;
+    const open = !!selected && hasChat;
+    const again = finished && hasChat && !this.isRemoteGoal(selected?.creatorPeerId);
+    const state = `${back}|${open}|${again}`;
+    if (state === this.lastBarState) return;
+    this.lastBarState = state;
+    const shown = (id: AbjectId | undefined, show: boolean) => id && this.request(request(this.id, id, 'update', { visible: show })).catch(() => undefined);
+    await Promise.all([shown(this.backBtnId, back), shown(this.openBtnId, open), shown(this.againBtnId, again)]);
   }
 
   // -- Status strip, empty state and the eye --
 
-  /** Update the counts line, the empty-state card and the running eye. */
+  /** Update the counts line, the bottom buttons and the running eye. */
   private async refreshStatus(): Promise<void> {
-    const running = this.goals.filter(g => g.status === 'active').length;
-    const done = this.goals.filter(g => g.status === 'completed').length;
-    const failed = this.goals.filter(g => g.status === 'failed').length;
+    const top = this.goals.filter(g => !g.parentId);
+    const running = top.filter(g => g.status === 'active').length;
+    const paused = top.filter(g => g.status === 'paused').length;
+    const done = top.filter(g => g.status === 'completed').length;
+    const failed = top.filter(g => g.status === 'failed').length;
 
     if (this.statusLabelId) {
       const parts: string[] = [];
       if (running > 0) parts.push(`${running} running`);
+      if (paused > 0) parts.push(`${paused} paused`);
       if (done > 0) parts.push(`${done} done`);
       if (failed > 0) parts.push(`${failed} failed`);
-      const text = parts.length > 0 ? parts.join(' · ') : this.goals.length > 0 ? `${this.goals.length} goals` : 'No goals yet';
-      const style = running > 0
-        ? { ...livingStyle(this.theme), fontWeight: 'bold' as const }
-        : failed > 0 && done === 0
-          ? { color: this.theme.statusError, fontSize: 12, fontWeight: 'normal' as const }
-          : { color: this.theme.textMeta, fontSize: 12, fontWeight: 'normal' as const };
-      this.send(event(this.id, this.statusLabelId, 'update', { text, style }));
+      const text = parts.length > 0 ? parts.join(' · ') : top.length > 0 ? `${top.length} goals` : 'No goals yet';
+      this.send(event(this.id, this.statusLabelId, 'update', { text }));
     }
 
-    // Bottom bar: Stop All is live while any goal is live (running or
-    // paused); Clear is live while finished goals remain to clear.
+    // Stop all is live while any goal is live (running or paused); Clear
+    // finished is live while finished goals remain to clear.
     const live = this.goals.some(g => g.status === 'active' || g.status === 'paused');
-    const finished = done + failed > 0;
+    const finished = this.goals.some(g => g.status === 'completed' || g.status === 'failed');
     const buttonState = `${live}|${finished}`;
     if (buttonState !== this.buttonState) {
       this.buttonState = buttonState;
@@ -516,24 +748,13 @@ Click the arrow to expand/collapse a goal.
       if (this.clearBtnId) this.send(event(this.id, this.clearBtnId, 'update', { style: { disabled: !finished } }));
     }
 
-    const empty = this.goals.length === 0;
-    if (this.scrollAreaId && this.emptyLabelId && empty !== this.emptyShown) {
-      this.emptyShown = empty;
-      this.send(request(this.id, this.scrollAreaId, 'updateLayoutChild', {
-        widgetId: this.emptyLabelId,
-        preferredSize: { height: empty ? EMPTY_H : 0 },
-      }));
-    }
-
     await this.updateEye(running > 0);
   }
 
-  /** Eye position: right end of the status strip, px from the window centre. */
+  /** Eye position: in the bottom bar, left of the buttons, px from the window centre. */
   private eyePosition(): [number, number, number] {
-    const w = this.eyeWinSize?.width ?? WIN_W;
-    const h = this.eyeWinSize?.height ?? WIN_H;
-    // Content starts 36px below the top; the strip sits after a 12px margin.
-    return [w / 2 - 16 - EYE_SIZE, -h / 2 + 36 + 12 + STATUS_H / 2, 6];
+    const { width: w, height: h } = this.winSize;
+    return [w / 2 - 16 - 96 - 8 - 124 - 16 - EYE_SIZE / 2, h / 2 - 12 - BAR_H / 2, 6];
   }
 
   /**
@@ -543,14 +764,12 @@ Click the arrow to expand/collapse a goal.
   private async updateEye(active: boolean): Promise<void> {
     if (!this.windowId || active === this.eyeShown) return;
     if (active) {
-      if (!this.eyeWinSize) {
-        try {
-          const r = await this.request<{ width: number; height: number }>(
-            request(this.id, this.windowId, 'getRect', {})
-          );
-          if (r && r.width > 0 && r.height > 0) this.eyeWinSize = { width: r.width, height: r.height };
-        } catch { /* fall back to the default size */ }
-      }
+      try {
+        const r = await this.request<{ width: number; height: number }>(
+          request(this.id, this.windowId, 'getRect', {})
+        );
+        if (r && r.width > 0 && r.height > 0) this.winSize = { width: r.width, height: r.height };
+      } catch { /* keep the last known size */ }
       this.eyeShown = true;
       // The eye opens with a thinking stream; both go when the last goal settles.
       await this.sendEyeOps([
@@ -587,93 +806,175 @@ Click the arrow to expand/collapse a goal.
     }
   }
 
-  // -- Event handling --
+  // -- Actions --
 
-  private async handleChanged(fromId: AbjectId, aspect: string, value?: unknown): Promise<void> {
-    // Goal widget reports its natural height; resize its layout child so the
-    // ScrollableVBox scrolls when the tree outgrows the window.
-    if (fromId === this.goalWidgetId && aspect === 'contentHeight') {
-      if (this.scrollAreaId) {
-        const height = typeof value === 'number' ? value : Number(value);
-        if (Number.isFinite(height) && height > 0) {
-          this.send(request(this.id, this.scrollAreaId, 'updateLayoutChild', {
-            widgetId: this.goalWidgetId,
-            preferredSize: { height },
-          }));
-        }
-      }
-      return;
+  private async selectGoal(goalId: GoalId): Promise<void> {
+    if (goalId !== this.selectedId) {
+      this.selectedId = goalId;
+      this.toggles.clear();
+      await Promise.all([this.refreshGoal(goalId), this.loadTasks(goalId)]);
     }
+    if (!this.wide) this.narrowShowsGoal = true;
+    await this.applyPanes();
+    await this.rebuild();
+  }
 
-    // Tree toggle event
-    if (fromId === this.goalWidgetId && aspect === 'toggle') {
-      const data = typeof value === 'string' ? JSON.parse(value) : value;
-      const rawId = (data as { id: string }).id;
-      // Strip the "goal:" prefix
-      const goalId = rawId.startsWith('goal:') ? rawId.slice(5) : rawId;
-      if (this.expandedGoals.has(goalId)) {
-        this.expandedGoals.delete(goalId);
-      } else {
-        this.expandedGoals.add(goalId);
-        // Fetch tasks if not cached
-        if (!this.tasksByGoal.has(goalId)) {
-          const tasks = await this.fetchTasksForGoal(goalId);
-          this.tasksByGoal.set(goalId, tasks);
-        }
-      }
-      await this.rebuildTree();
-      return;
+  private async openConversation(): Promise<{ chatId: AbjectId; conversationId: string } | undefined> {
+    const goal = this.goals.find(g => g.id === this.selectedId);
+    const context = this.conversationOf(goal);
+    if (!context) return undefined;
+    const chatManagerId = await this.discoverDep('ChatManager');
+    const opened = chatManagerId
+      ? await this.request<{ conversationId: string; chatId: AbjectId } | false>(
+        request(this.id, chatManagerId, 'showConversation', { conversationId: context.conversationId }),
+      ).catch(() => false as const)
+      : false;
+    if (!opened || !opened.chatId) {
+      this.playEffect('shake');
+      await this.notify('The conversation this goal came from is gone.', 'info');
+      return undefined;
     }
+    return { chatId: opened.chatId, conversationId: context.conversationId };
+  }
 
-    // Per-row goal controls (pause/resume/stop glyphs on live goal rows)
-    if (fromId === this.goalWidgetId && aspect === 'goalAction') {
-      const data = typeof value === 'string' ? JSON.parse(value) : value;
-      const { id: rawId, action } = data as { id: string; action: 'pause' | 'resume' | 'stop' };
-      const goalId = (rawId.startsWith('goal:') ? rawId.slice(5) : rawId) as GoalId;
-      if (!this.goalManagerId) return;
-
-      // Remote rows render without controls, so this catches a row drawn before
-      // Identity resolved -- the widget's action glyphs outlive one rebuild.
-      const target = this.goals.find(g => g.id === goalId);
-      if (this.isRemoteGoal(target?.creatorPeerId)) {
+  /** Send the goal's request to the chat it came from, as the person first asked it. */
+  private async runAgain(): Promise<void> {
+    const goal = this.goals.find(g => g.id === this.selectedId);
+    const context = this.conversationOf(goal);
+    if (!goal || !context) return;
+    const asked = [...context.messages].reverse().find(m => m.role === 'user')?.content?.trim() || goal.description || goal.title;
+    const chatManagerId = await this.discoverDep('ChatManager');
+    if (chatManagerId) {
+      const active = await this.request<string | null>(
+        request(this.id, chatManagerId, 'getActiveGoal', { conversationId: context.conversationId }),
+      ).catch(() => null);
+      if (active) {
         this.playEffect('shake');
-        await this.notify('This goal belongs to another peer and is read-only here.', 'info');
+        await this.notify('That conversation is working on another goal. Run again when it finishes.', 'info');
         return;
       }
+    }
+    const opened = await this.openConversation();
+    if (!opened) return;
+    const sent = await this.request<boolean>(
+      request(this.id, opened.chatId, 'sendMessage', { message: asked }),
+    ).catch(() => false);
+    if (sent === false) {
+      this.playEffect('shake');
+      await this.notify('The conversation is busy. Try again in a moment.', 'info');
+    }
+  }
 
-      let outcome: unknown;
-      if (action === 'stop') {
-        const goal = this.goals.find(g => g.id === goalId);
-        const confirmed = await this.confirm({
-          title: 'Stop Goal',
-          message: `Stop "${(goal?.title ?? goalId).slice(0, 120)}" and cancel its tasks?`,
-          confirmLabel: 'Stop',
-          destructive: true,
-        });
-        if (!confirmed) return;
-        this.userStoppedGoals.add(goalId);
-        outcome = await this.request(request(this.id, this.goalManagerId, 'stopGoal', { goalId })).catch(() => false);
-      } else {
-        const method = action === 'pause' ? 'pauseGoal' : 'resumeGoal';
-        outcome = await this.request(request(this.id, this.goalManagerId, method, { goalId })).catch(() => false);
-      }
-      // GoalManager answers false (or fails) when the goal refused the change.
-      if (outcome === false) {
-        this.userStoppedGoals.delete(goalId);
-        this.playEffect('shake');
-      }
-
-      // Refresh the goal row so the controls reflect the new status.
-      try {
-        const goal = await this.request<Goal>(request(this.id, this.goalManagerId, 'getGoal', { goalId }));
-        const idx = this.goals.findIndex(g => g.id === goalId);
-        if (idx >= 0 && goal) this.goals[idx] = goal;
-      } catch { /* goal may be gone */ }
-      await this.rebuildTree();
+  private async goalAction(goalId: GoalId, action: 'pause' | 'resume' | 'stop'): Promise<void> {
+    if (!this.goalManagerId) return;
+    // Remote goals draw without controls, so this catches a card drawn before
+    // Identity resolved -- the widget's action glyphs outlive one rebuild.
+    const target = this.goals.find(g => g.id === goalId);
+    if (this.isRemoteGoal(target?.creatorPeerId)) {
+      this.playEffect('shake');
+      await this.notify('This goal belongs to another peer and is read-only here.', 'info');
       return;
     }
 
-    // Stop All button
+    let outcome: unknown;
+    if (action === 'stop') {
+      const confirmed = await this.confirm({
+        title: 'Stop Goal',
+        message: `Stop "${(target?.title ?? goalId).slice(0, 120)}" and cancel its tasks?`,
+        confirmLabel: 'Stop',
+        destructive: true,
+      });
+      if (!confirmed) return;
+      this.userStoppedGoals.add(goalId);
+      outcome = await this.request(request(this.id, this.goalManagerId, 'stopGoal', { goalId })).catch(() => false);
+    } else {
+      const method = action === 'pause' ? 'pauseGoal' : 'resumeGoal';
+      outcome = await this.request(request(this.id, this.goalManagerId, method, { goalId })).catch(() => false);
+    }
+    // GoalManager answers false (or fails) when the goal refused the change.
+    if (outcome === false) {
+      this.userStoppedGoals.delete(goalId);
+      this.playEffect('shake');
+    }
+    await this.refreshGoal(goalId);
+    await this.rebuild();
+  }
+
+  // -- Event handling --
+
+  private parseId(value: unknown): string | undefined {
+    try {
+      const data = typeof value === 'string' ? JSON.parse(value) : value;
+      const id = (data as { id?: unknown })?.id;
+      return typeof id === 'string' ? id : undefined;
+    } catch { return undefined; }
+  }
+
+  private async handleChanged(fromId: AbjectId, aspect: string, value?: unknown): Promise<void> {
+    // The two goal widgets report their natural heights; resize their slots
+    // so each pane scrolls when its rows outgrow the window.
+    if (aspect === 'contentHeight' && (fromId === this.listWidgetId || fromId === this.detailWidgetId)) {
+      const scroll = fromId === this.listWidgetId ? this.listScrollId : this.detailScrollId;
+      const height = typeof value === 'number' ? value : Number(value);
+      if (scroll && Number.isFinite(height) && height >= 0) {
+        this.send(request(this.id, scroll, 'updateLayoutChild', { widgetId: fromId, preferredSize: { height } }));
+      }
+      return;
+    }
+
+    if (fromId === this.listWidgetId && aspect === 'select') {
+      const id = this.parseId(value);
+      if (id?.startsWith('item:')) await this.selectGoal(id.slice(5));
+      return;
+    }
+
+    if (fromId === this.detailWidgetId && aspect === 'toggle') {
+      const id = this.parseId(value);
+      const row = id ? this.lastDetailRows.find(r => r.id === id) : undefined;
+      if (id && row) {
+        this.toggles.set(id, !(row.expanded ?? false));
+        await this.rebuild();
+      }
+      return;
+    }
+
+    if (fromId === this.detailWidgetId && aspect === 'goalAction') {
+      try {
+        const data = typeof value === 'string' ? JSON.parse(value) : value;
+        const { id: rawId, action } = data as { id: string; action: 'pause' | 'resume' | 'stop' };
+        await this.goalAction(rawId.replace(/^header:/, ''), action);
+      } catch { /* malformed action */ }
+      return;
+    }
+
+    const filterIndex = this.filterBtnIds.indexOf(fromId);
+    if (filterIndex >= 0 && aspect === 'click') {
+      this.filter = FILTERS[filterIndex].key;
+      await this.rebuild();
+      return;
+    }
+
+    if (fromId === this.searchInputId && (aspect === 'change' || aspect === 'submit')) {
+      this.query = typeof value === 'string' ? value : '';
+      await this.rebuild();
+      return;
+    }
+
+    if (fromId === this.backBtnId && aspect === 'click') {
+      this.narrowShowsGoal = false;
+      await this.applyPanes();
+      return;
+    }
+    if (fromId === this.openBtnId && aspect === 'click') {
+      await this.openConversation();
+      return;
+    }
+    if (fromId === this.againBtnId && aspect === 'click') {
+      await this.runAgain();
+      return;
+    }
+
+    // Stop all
     if (fromId === this.stopAllBtnId && aspect === 'click') {
       if (!this.goalObserverId || this.confirmOpen) return;
       this.confirmOpen = true;
@@ -693,10 +994,6 @@ Click the arrow to expand/collapse a goal.
       this.send(event(this.id, this.stopAllBtnId, 'update', { busy: true }));
       try {
         this.send(request(this.id, this.goalObserverId!, 'failAllGoals', {}));
-        this.goals = [];
-        this.tasksByGoal.clear();
-        this.expandedGoals.clear();
-        await this.rebuildTree();
         this.playEffect('flash', '$accent');
         await this.notify('All active goals stopped', 'success');
       } finally {
@@ -705,7 +1002,7 @@ Click the arrow to expand/collapse a goal.
       return;
     }
 
-    // Clear button
+    // Clear finished
     if (fromId === this.clearBtnId && aspect === 'click') {
       if (this.confirmOpen) return;
       this.confirmOpen = true;
@@ -727,7 +1024,6 @@ Click the arrow to expand/collapse a goal.
         request(this.id, this.goalManagerId, 'clearCompleted', {}), 60000,
       ).catch(() => undefined);
       this.tasksByGoal.clear();
-      this.expandedGoals.clear();
       await this.loadGoals();
       this.playEffect('flash', '$accent');
       if (result) {
@@ -751,59 +1047,74 @@ Click the arrow to expand/collapse a goal.
 
       switch (aspect) {
         case 'goalCreated': {
-          this.expandedGoals.add(goalId);
           await this.loadGoals();
           break;
         }
-        case 'goalUpdated':
+        case 'goalUpdated': {
+          // The event carries the progress log; patch it in and refresh tasks.
+          const goal = this.goals.find(g => g.id === goalId);
+          if (!goal) { await this.loadGoals(); break; }
+          if (Array.isArray(data.progress)) goal.progress = data.progress as Goal['progress'];
+          goal.updatedAt = Date.now();
+          // The shown goal's notes and question change without events of their own; reread it now and then.
+          if (goalId === this.selectedId && Date.now() - this.selectedReadAt > SELECTED_REREAD_MS) {
+            this.selectedReadAt = Date.now();
+            await this.refreshGoal(goalId);
+          }
+          await this.loadTasks(goalId);
+          this.scheduleRebuild();
+          break;
+        }
         case 'goalPaused':
         case 'goalResumed':
+        case 'goalClarificationRequested':
+        case 'goalInterjection':
         case 'goalCompleted':
         case 'goalFailed':
         case 'taskCompleted':
         case 'taskFailed':
         case 'taskPermanentlyFailed': {
-          // Refresh the specific goal's data
           if (goalId) {
-            try {
-              const [goal, tasks] = await Promise.all([
-                this.request<Goal>(request(this.id, this.goalManagerId!, 'getGoal', { goalId })),
-                this.fetchTasksForGoal(goalId),
-              ]);
-              // Update cached data
-              const idx = this.goals.findIndex(g => g.id === goalId);
-              if (idx >= 0 && goal) {
-                this.goals[idx] = goal;
-              }
-              this.tasksByGoal.set(goalId, tasks);
-              // Surface goal-level outcomes as toasts (Goal-Gradient + Zeigarnik).
-              // Skip the noisier task-level events.
-              // Slab effects mark top-level outcomes only: a sub-goal settling
-              // is a step inside the job (its root may still replan and land).
-              if (aspect === 'goalCompleted' && goal) {
-                if (!goal.parentId) this.playEffect('burst');
-                await this.notify(`Goal completed: ${goal.title}`, 'success');
-              } else if (aspect === 'goalFailed' && goal) {
-                // A failure the user asked for (Stop / Stop All) is no error.
-                const userStopped = this.userStoppedGoals.delete(goalId) || Date.now() < this.stopAllQuietUntil;
-                if (!userStopped && !goal.parentId) this.playEffect('glitch');
-                await this.notify(`Goal failed: ${goal.title}`, 'error');
-              }
-            } catch { /* goal may be gone */ }
+            await Promise.all([this.refreshGoal(goalId), this.loadTasks(goalId)]);
+            const goal = this.goals.find(g => g.id === goalId);
+            // Slab effects mark top-level outcomes only: a sub-goal settling
+            // is a step inside the job (its root may still replan and land).
+            if (aspect === 'goalCompleted' && goal) {
+              if (!goal.parentId) this.playEffect('burst');
+              await this.notify(`Goal completed: ${goal.title}`, 'success');
+            } else if (aspect === 'goalFailed' && goal) {
+              // A failure the user asked for (Stop / Stop All) is no error.
+              const userStopped = this.userStoppedGoals.delete(goalId) || Date.now() < this.stopAllQuietUntil;
+              if (!userStopped && !goal.parentId) this.playEffect('glitch');
+              await this.notify(`Goal failed: ${goal.title}`, 'error');
+            }
           }
-          await this.rebuildTree();
+          this.scheduleRebuild();
           break;
         }
         case 'goalsCleared':
         case 'goalsSwept':
-          this.goals = [];
           this.tasksByGoal.clear();
-          this.expandedGoals.clear();
           await this.loadGoals();
           break;
       }
     }
   }
+}
+
+/** What the learning review kept from a goal: the titles of the entries it applied. */
+function learnedFrom(goal: Goal): string[] {
+  const out: string[] = [];
+  for (const [key, value] of Object.entries(goal.scratchpad ?? {})) {
+    if (!key.startsWith('learning/decision/') || !value || typeof value !== 'object') continue;
+    const effects = (value as { effects?: Array<{ state?: string; input?: Record<string, unknown> }> }).effects ?? [];
+    for (const e of effects) {
+      if (e.state !== 'applied') continue;
+      const title = e.input?.title ?? e.input?.name;
+      if (typeof title === 'string' && title.trim() && !out.includes(title.trim())) out.push(title.trim());
+    }
+  }
+  return out.slice(0, 6);
 }
 
 export const GOAL_BROWSER_ID = 'abjects:goal-browser' as AbjectId;

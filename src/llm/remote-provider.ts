@@ -6,12 +6,16 @@
  * the LLM object then routes the calls tier routing assigns to it by message.
  * The abject answers:
  *
- *   providerComplete { messages, options }
+ *   providerComplete { callId, messages, options }
  *     → { content, finishReason?, usage? }
  *
- *   providerStream { streamId, messages, options }       (when registered with streaming)
+ *   providerStream { streamId, callId, messages, options } (when registered with streaming; callId = streamId)
  *     emits providerChunk { streamId, content } events to the LLM object, then
  *     → { chunks?, stopReason?, usage? }                  (chunks = how many it emitted)
+ *
+ *   providerCancel { callId }                             (event)
+ *     the call was stopped (Kill in the LLM monitor): nobody reads its answer
+ *     any more, so the abject may stop working on it. Answering it is optional.
  *
  *   providerModels {}                                     (when registered with liveModels)
  *     → ModelInfo[]
@@ -54,6 +58,8 @@ export interface RemoteProviderSpec {
 export interface RemoteProviderHost {
   /** Send a request to a provider abject and wait for its reply. */
   request<T>(to: AbjectId, method: string, payload: unknown, timeoutMs: number): Promise<T>;
+  /** Send an event to a provider abject. */
+  notify(to: AbjectId, method: string, payload: unknown): void;
   /** Route providerChunk events for this stream id (from this backend only) to the sink. */
   openStream(streamId: string, backend: AbjectId, sink: (content: string) => void): void;
   closeStream(streamId: string): void;
@@ -66,6 +72,24 @@ const MODELS_TIMEOUT_MS = 15000;
 const STREAM_DRAIN_MS = 250;
 
 type Usage = LLMCompletionResult['usage'];
+
+/** The error a stopped call ends with on this side. */
+function stoppedError(name: string): Error {
+  return new Error(`LLM provider '${name}' call stopped by the caller`);
+}
+
+/**
+ * Tell `backend` once when `signal` fires that call `callId` is no longer
+ * wanted, and run `onStop` here. Returns the function that stops listening.
+ */
+function onStopped(
+  host: RemoteProviderHost, signal: AbortSignal | undefined, backend: AbjectId, callId: string, onStop?: () => void,
+): () => void {
+  if (!signal) return () => undefined;
+  const stop = () => { host.notify(backend, 'providerCancel', { callId }); onStop?.(); };
+  signal.addEventListener('abort', stop, { once: true });
+  return () => signal.removeEventListener('abort', stop);
+}
 
 /** True when an error means the backend abject no longer exists. */
 function isGone(err: unknown): boolean {
@@ -161,12 +185,23 @@ export class RemoteLLMProvider implements LLMProvider {
 
   /** The options sent to the abject, with the model it should run on filled in. */
   private optionsFor(options?: LLMCompletionOptions): LLMCompletionOptions {
-    return { ...(options ?? {}), model: this.resolveModel(options) };
+    // The signal belongs to this process; it cannot travel in a message.
+    const { signal: _signal, ...sent } = options ?? {};
+    return { ...sent, model: this.resolveModel(options) };
   }
 
   async complete(messages: LLMMessage[], options?: LLMCompletionOptions): Promise<LLMCompletionResult> {
-    const reply = await this.withBackend(backend => this.host.request<Partial<LLMCompletionResult>>(
-      backend, 'providerComplete', { messages, options: this.optionsFor(options) }, this.timeoutMs));
+    if (options?.signal?.aborted) throw stoppedError(this.name);
+    const callId = uuidv4();
+    const reply = await this.withBackend(async backend => {
+      const stopListening = onStopped(this.host, options?.signal, backend, callId);
+      try {
+        return await this.host.request<Partial<LLMCompletionResult>>(
+          backend, 'providerComplete', { callId, messages, options: this.optionsFor(options) }, this.timeoutMs);
+      } finally {
+        stopListening();
+      }
+    });
     if (!reply || typeof reply.content !== 'string') {
       throw new Error(`LLM provider '${this.name}' returned no content`);
     }
@@ -193,16 +228,24 @@ export class RemoteLLMProvider implements LLMProvider {
 
     // Start the call on a live backend; chunks arriving before the reply are
     // queued. A backend that has gone away before sending anything is
-    // dropped and the next one tried, as for complete().
+    // dropped and the next one tried, as for complete(). A stop tells the
+    // backend and ends this side at once, without waiting for its reply.
+    if (options?.signal?.aborted) throw stoppedError(this.name);
     const streamId = uuidv4();
     this.withBackend(async backend => {
       this.host.openStream(streamId, backend, content => { pending.push(content); received++; notify(); });
+      const stopListening = onStopped(this.host, options?.signal, backend, streamId, () => {
+        failure ??= stoppedError(this.name);
+        notify();
+      });
       try {
         return await this.host.request<{ chunks?: number; stopReason?: string; usage?: Usage; content?: string }>(
-          backend, 'providerStream', { streamId, messages, options: this.optionsFor(options) }, this.timeoutMs);
+          backend, 'providerStream', { streamId, callId: streamId, messages, options: this.optionsFor(options) }, this.timeoutMs);
       } catch (err) {
         if (isGone(err) && received === 0) this.host.closeStream(streamId);
         throw err;
+      } finally {
+        stopListening();
       }
     }).then(
       reply => {
@@ -212,11 +255,12 @@ export class RemoteLLMProvider implements LLMProvider {
         finishedAt = Date.now();
         notify();
       },
-      err => { failure = err; notify(); },
+      err => { failure ??= err; notify(); },
     );
 
     try {
       for (;;) {
+        if (failure && options?.signal?.aborted) throw failure;
         while (pending.length > 0) yield { content: pending.shift()!, done: false };
         if (failure) throw failure;
         if (finished) {

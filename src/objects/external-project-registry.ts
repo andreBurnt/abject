@@ -623,6 +623,13 @@ with the files each has written so far; agents report through \`taskStarted\`,
     precondition(!input.name.includes('/'), 'project name must not contain a slash');
 
     const root = this.resolveRoot(input.root);
+    // Only the user replaces a project. A caller that is not an authority
+    // reusing a name would otherwise swap the user's project for an untrusted
+    // one pointing somewhere else.
+    const existing = this.projects.get(input.name);
+    if (existing && !byAuthority) {
+      return { success: false, error: `A project named "${input.name}" is already registered at ${existing.root}; register this one under another name` };
+    }
     // A temp directory is a scratch area that the OS or the process that made
     // it will clear, so a project registered there dangles the moment its
     // owner is gone and then turns every task that lands on it into a setup

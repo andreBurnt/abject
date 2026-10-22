@@ -19,7 +19,7 @@ import type { SessionRecord } from './task-session.js';
 import Ajv from 'ajv';
 import { AbjectId, AbjectMessage, InterfaceId } from '../core/types.js';
 import { withKeyedLock } from '../core/keyed-lock.js';
-import { Abject } from '../core/abject.js';
+import { Abject, type PromptOutcome } from '../core/abject.js';
 import { request, event } from '../core/message.js';
 import { requireDefined, requireNonEmpty } from '../core/contracts.js';
 import type { JobResult } from './job-manager.js';
@@ -2643,8 +2643,18 @@ The registered object must implement these handlers to participate in the agent 
         message: msg,
         phase: newPhase,
         agentName,
+        ...this.goalProgressTags(entry),
       }));
     }
+  }
+
+  /** Which task and step a goal progress line reports on, so the goal tree can file it under its task. */
+  private goalProgressTags(entry: TaskEntry): { taskId?: string; step: number; maxSteps: number } {
+    return {
+      ...(entry.dispatchTupleId ? { taskId: entry.dispatchTupleId } : {}),
+      step: entry.state.step + 1,
+      maxSteps: entry.state.maxSteps,
+    };
   }
 
   /**
@@ -3502,6 +3512,7 @@ The registered object must implement these handlers to participate in the agent 
                         message: description.slice(0, 140),
                         phase: 'acting',
                         agentName,
+                        ...this.goalProgressTags(entry),
                       }));
                     }
                     // The job runs while this task stays in thinking, so the
@@ -5222,7 +5233,7 @@ Variants: \`{ "action": "recall", "pattern": "ExactName|other" }\` for exact ide
 \`\`\`json
 { "action": "ask_user", "question": "one clear question", "expect": "the person answers with ..." }
 \`\`\`
-The question goes to the person and their answer comes back as this step's result. Ask when the request leaves open a choice that changes the outcome, and before an action that acts for the person outside this system and is hard to undo (sending, posting, accepting, buying, deleting): name the action and what it will touch, then go ahead on their answer. Ask one question at a time and say what you will do under each likely answer. When nobody answers, the result says so: take the reading the request most plainly supports and say which, or stop and report what is unclear.`, true);
+The question goes to the person and their answer comes back as this step's result. Ask when the request leaves open a choice that changes the outcome, and before an action that acts for the person outside this system and is hard to undo (sending, posting, accepting, buying, deleting): name the action and what it will touch, then go ahead on their answer. Ask one question at a time and say what you will do under each likely answer. When nobody answers, the result says so: take the reading the request most plainly supports and say which, or stop and report what is unclear. When the person cancels the question, the result says that too: they chose not to answer it, so carry on without it or finish and say what is still needed.`, true);
     }
 
     // Guidance on the built-in submit_job verb. Safe to state for every
@@ -5427,7 +5438,8 @@ This task belongs to a goal whose id is \`${entry.goalId}\` — you never need t
       content: `[Note from the user]\nThe user sent ${fresh.length === 1 ? 'a note' : 'notes'} about this goal while you were working:\n`
         + fresh.map(n => `"${n.note}"`).join('\n')
         + '\nThis is newer than your task description. Where it changes what your task should do, follow it, and say in your result what you did differently because of it. '
-        + 'If it means your task should not go on as planned, replan and say why. If it concerns another part of the goal, carry on with yours. It needs no reply.',
+        + 'If it means your task should not go on as planned, replan and say why. If it turns your task into work you are not built for, finish now with fail and say what the note asks for, so the planner hands it to an agent that does that work. '
+        + 'If it concerns another part of the goal, carry on with yours. It needs no reply.',
     });
   }
 
@@ -5763,12 +5775,17 @@ This task belongs to a goal whose id is \`${entry.goalId}\` — you never need t
       const waiting = () => this.keepCallerAlive(entry, 'waiting', 'waiting for the person to answer');
       waiting();
       const heartbeat = this.setRecurringTimer(waiting, AgentAbject.JOB_KEEPALIVE_MS);
-      let answer: string | null;
+      let ended: PromptOutcome;
       try {
-        answer = await this.prompt({ title: `${agentName} has a question`, message: question.slice(0, 2000), placeholder: 'Your answer' });
+        ended = await this.promptOutcome({ title: `${agentName} has a question`, message: question.slice(0, 2000), placeholder: 'Your answer' });
       } finally {
         this.cancelTimer(heartbeat);
       }
+      if (ended.outcome === 'declined') {
+        return { result: { success: true, data: { question, answered: false, declined: true } },
+          message: `[Declined] The person saw "${question.slice(0, 200)}" and cancelled it rather than answer. Treat that as their choice: carry on with what the request itself supports, or finish and say plainly what is still needed and why.` };
+      }
+      const answer = ended.outcome === 'answered' ? ended.value : null;
       if (answer === null || !answer.trim()) {
         return { result: { success: true, data: { question, answered: false } },
           message: `[No answer] Nobody answered "${question.slice(0, 200)}". Take the reading the request most plainly supports and say which one you took, or stop and report what is unclear.` };
@@ -6899,6 +6916,27 @@ This task belongs to a goal whose id is \`${entry.goalId}\` — you never need t
   }
 
   private tryParseActionJson(raw: string): { action: AgentAction; repaired: boolean } | null {
+    const read = this.readActionJson(raw);
+    return read ? { action: AgentAbject.liftNestedArgs(read.action), repaired: read.repaired } : null;
+  }
+
+  /**
+   * Models often wrap an action's arguments in an object named after the
+   * action: {"action":"set_project","set_project":{"name":"..."}}. Read that
+   * as the flat form every agent documents, so the step is not spent on a
+   * missing-argument error. A field already given at the top level wins.
+   */
+  private static liftNestedArgs(action: AgentAction): AgentAction {
+    const nested = action[action.action];
+    if (!nested || typeof nested !== 'object' || Array.isArray(nested)) return action;
+    const lifted: AgentAction = { ...(nested as Record<string, unknown>), ...action };
+    delete lifted[action.action];
+    lifted.action = action.action;
+    log.info(`[parse] lifted "${action.action}" arguments nested under the action's name`);
+    return lifted;
+  }
+
+  private readActionJson(raw: string): { action: AgentAction; repaired: boolean } | null {
     try {
       const parsed = JSON.parse(raw);
       if (typeof parsed.action === 'string') {
@@ -7048,6 +7086,7 @@ This task belongs to a goal whose id is \`${entry.goalId}\` — you never need t
           message: reasoning,
           phase: entry.state.phase ?? 'acting',
           agentName: this.registeredAgents.get(entry.agentId)?.name ?? 'agent',
+          ...this.goalProgressTags(entry),
         }));
       } catch { /* bus may be gone */ }
     }

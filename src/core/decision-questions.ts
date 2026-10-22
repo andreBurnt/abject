@@ -384,12 +384,12 @@ export function interjectionQuestions(hasPendingQuestion: boolean): Questions {
     status_question: criterion('Asks how it is going without changing the work.', {
       examples: ['how is it going?'],
     }),
-    fitting_constraint: criterion('Adds a detail or preference that every task in `in_flight` can follow as its description stands, so nothing in flight is wasted; it can wait for the next planning step.', {
-      notFor: 'A note that changes what a task in `in_flight` is doing, asks for something a task description rules out, or rules out something a task description asks for.',
+    fitting_constraint: criterion('Adds a detail or preference that every task in `in_flight` can follow as its description stands, by the agent already doing it, so nothing in flight is wasted; it can wait for the next planning step.', {
+      notFor: 'A note that changes what a task in `in_flight` is doing, asks for something a task description rules out, rules out something a task description asks for, or makes a task work its `agent` does not do (see `agents`).',
       examples: ['use blue for the buttons too'],
     }),
-    redirect: criterion('Changes scope, target, or approach, or contradicts a task in `in_flight` (asks for what its description rules out, or rules out what it asks for), so in-flight work may be wasted.', {
-      examples: ['actually make it a countdown instead', 'delete those instead of fixing them, while the task says to delete nothing', 'go ahead and commit it, while the task says not to commit'],
+    redirect: criterion('Changes scope, target, or approach; contradicts a task in `in_flight` (asks for what its description rules out, or rules out what it asks for); or makes a task work its `agent` does not do, often by saying what a word in the request meant. In-flight work may be wasted.', {
+      examples: ['actually make it a countdown instead', 'delete those instead of fixing them, while the task says to delete nothing', 'go ahead and commit it, while the task says not to commit', 'by "the doc" I mean the shared doc in my drive, while the task builds a new document object'],
     }),
     stop: criterion('Asks to stop, cancel, or abandon the goal.', {
       examples: ['never mind, cancel this'],
@@ -403,7 +403,7 @@ export function interjectionQuestions(hasPendingQuestion: boolean): Questions {
   return {
     intent: {
       type: 'choice',
-      instructions: instruction('The user typed `note` while a multi-agent goal was running. Judged against `goal`, `pending_question` and `in_flight`, what does the note ask the system to do?'),
+      instructions: instruction('The user typed `note` while a multi-agent goal was running. Judged against `goal`, `pending_question`, `in_flight` and the `agents` doing that work, what does the note ask the system to do?'),
       criteria,
     },
   };

@@ -114,6 +114,14 @@ export const LAYOUT_INTERFACE_DECL: InterfaceDeclaration = {
       returns: { kind: 'primitive', primitive: 'boolean' },
     },
     {
+      name: 'moveLayoutChildrenToEnd',
+      description: 'Move children already in this layout to its end, in the order given, keeping their size settings (a live status line that stays under the newest entry)',
+      parameters: [
+        { name: 'widgetIds', type: { kind: 'array', elementType: { kind: 'primitive', primitive: 'string' } }, description: 'Widget AbjectIds to move; ids not in this layout are ignored' },
+      ],
+      returns: { kind: 'primitive', primitive: 'boolean' },
+    },
+    {
       name: 'updateLayoutChild',
       description: 'Update a child\'s layout properties (sizePolicy, preferredSize, alignment, stretch)',
       parameters: [
@@ -506,6 +514,21 @@ export abstract class LayoutAbject extends WidgetAbject {
       this.layoutDirty = true;
       this.scheduleRelayout();
       this.notifyParentOfSizeChange().catch(() => {});
+      return true;
+    });
+
+    this.on('moveLayoutChildrenToEnd', async (msg: AbjectMessage) => {
+      const { widgetIds } = msg.payload as { widgetIds?: AbjectId[] };
+      if (!Array.isArray(widgetIds) || widgetIds.length === 0) return false;
+      const moved: LayoutChildConfig[] = [];
+      for (const widgetId of widgetIds) {
+        const child = this.layoutChildren.find((c): c is LayoutChildConfig => !isSpacer(c) && c.widgetId === widgetId);
+        if (child && !moved.includes(child)) moved.push(child);
+      }
+      if (moved.length === 0) return false;
+      this.layoutChildren = [...this.layoutChildren.filter(c => isSpacer(c) || !moved.includes(c)), ...moved];
+      this.layoutDirty = true;
+      this.scheduleRelayout();
       return true;
     });
 

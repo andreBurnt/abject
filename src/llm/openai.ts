@@ -592,14 +592,14 @@ export class OpenAIProvider extends BaseLLMProvider {
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        for await (const chunk of this.streamOnce(request)) {
+        for await (const chunk of this.streamOnce(request, options.signal)) {
           if (chunk.content.length > 0) yielded = true;
           yield chunk;
         }
         return;
       } catch (err) {
         lastErr = err;
-        if (yielded) throw err;
+        if (yielded || options.signal?.aborted) throw err;
         if (attempt >= maxAttempts) {
           // Preserve the historical empty-completion contract: with retries
           // exhausted, report the empty stream as a normal (empty) completion
@@ -634,9 +634,12 @@ export class OpenAIProvider extends BaseLLMProvider {
   private static readonly STREAM_OVERALL_TIMEOUT_MS = 600_000;
   private static readonly STREAM_IDLE_TIMEOUT_MS = 60_000;
 
-  private async *streamOnce(request: OpenAIRequest): AsyncIterable<LLMStreamChunk> {
+  private async *streamOnce(request: OpenAIRequest, signal?: AbortSignal): AsyncIterable<LLMStreamChunk> {
     const abort = new AbortController();
-    let abortReason: 'idle' | 'overall' | undefined;
+    let abortReason: 'idle' | 'overall' | 'stopped' | undefined;
+    // The caller no longer wants the answer: close the connection now.
+    const onStop = () => { abortReason = 'stopped'; abort.abort(); };
+    if (signal?.aborted) onStop(); else signal?.addEventListener('abort', onStop, { once: true });
     let idleTimer: ReturnType<typeof setTimeout> | undefined;
     const armIdleTimer = () => {
       if (idleTimer) clearTimeout(idleTimer);
@@ -660,7 +663,8 @@ export class OpenAIProvider extends BaseLLMProvider {
     // just ends cleanly (loop exit). Both must report the timeout, never a
     // fake clean stop.
     const timeoutError = () => new Error(
-      abortReason === 'idle'
+      abortReason === 'stopped' ? `${this.name} stream stopped by the caller`
+      : abortReason === 'idle'
         ? `${this.name} stream idle timeout: no data for ${OpenAIProvider.STREAM_IDLE_TIMEOUT_MS / 1000}s`
         : `${this.name} stream exceeded overall ${OpenAIProvider.STREAM_OVERALL_TIMEOUT_MS / 1000}s cap`,
     );
@@ -783,6 +787,7 @@ export class OpenAIProvider extends BaseLLMProvider {
     } finally {
       if (idleTimer) clearTimeout(idleTimer);
       clearTimeout(overallTimer);
+      signal?.removeEventListener('abort', onStop);
     }
   }
 

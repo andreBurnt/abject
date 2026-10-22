@@ -52,7 +52,9 @@ Credentials come from SettingsManager (stored under each description's
 - **`provider.ts`**: the `LLMProvider` interface and `BaseLLMProvider`. Message
   types (`LLMMessage` with text, image and PDF `ContentPart`s and an optional
   `cacheBreakpoint`), `LLMCompletionOptions` (`tier`, `model`, `effort`,
-  `maxTokens`, `cacheKey`, `jsonMode`, ...), `ModelTier`
+  `maxTokens`, `cacheKey`, `jsonMode`, `signal`, ...; `signal` fires on Kill
+  and stays in this process: `openai.ts` closes its connection on it, and
+  `remote-provider.ts` sends the provider abject `providerCancel { callId }`), `ModelTier`
   (`smart | balanced | fast | code`), `EffortLevel`, `ModelInfo`,
   `LLMProviderDescription` (what Settings renders: credential mode, default
   tier models, `tierRules`, `capabilities`, `modelMigrations`), `CacheProfile`
@@ -133,7 +135,8 @@ credentials it is given (Settings, or the API-key environment variables at boot)
   (validated by `parseRemoteProviderSpec`: name, label, models,
   `defaultTierModels`, `streaming`, `liveModels`, `timeoutMs`); calls then
   arrive at the abject as `providerComplete`, `providerStream` (chunks come
-  back as `providerChunk` events) and `providerModels`. Several abjects of
+  back as `providerChunk` events) and `providerModels`; a stopped call sends
+  `providerCancel { callId }` and ends this side at once. Several abjects of
   one installed package may back one name; calls go to the first live
   backend. Protocol: [`docs/LLM_PROVIDERS.md`](../../docs/LLM_PROVIDERS.md).
 

@@ -40,6 +40,26 @@ const EPHEMERAL_PARTITION = 'abjects-browser-ephemeral';
 /** The only caller allowed to open and close windows. */
 const ADMITTED_CALLER = 'WebBrowser';
 
+/**
+ * Preload for offscreen pages, run in every frame and popup before the page's
+ * own scripts. It turns off the native dialogs that `disableDialogs` leaves:
+ * print does nothing, and the file pickers act as if the user cancelled them.
+ * See `windowOptions` for why an offscreen page may open no native dialog.
+ */
+const OFFSCREEN_PRELOAD = `const { contextBridge } = require('electron');
+contextBridge.executeInMainWorld({ func: () => {
+  const cancelled = () => Promise.reject(new DOMException('The user aborted a request.', 'AbortError'));
+  window.print = function print() {};
+  for (const name of ['showOpenFilePicker', 'showSaveFilePicker', 'showDirectoryPicker']) {
+    if (name in window) window[name] = function () { return cancelled(); };
+  }
+  const isFileInput = (el) => el instanceof HTMLInputElement && el.type === 'file';
+  const showPicker = HTMLInputElement.prototype.showPicker;
+  HTMLInputElement.prototype.showPicker = function () { if (!isFileInput(this)) return showPicker.call(this); };
+  window.addEventListener('click', (e) => { if (isFileInput(e.target)) e.preventDefault(); }, true);
+} });
+`;
+
 type ElectronModule = typeof import('electron');
 
 interface Viewport { width: number; height: number }
@@ -65,6 +85,8 @@ export class BrowserWindowHost extends Abject {
   /** In-flight clear of the ephemeral session; new ephemeral pages wait for it. */
   private ephemeralClearing: Promise<void> = Promise.resolve();
   private cdpEndpoint?: string;
+  /** Where OFFSCREEN_PRELOAD was written; Electron loads preloads from a file. */
+  private offscreenPreloadPath?: string;
 
   constructor() {
     super({
@@ -145,6 +167,8 @@ export class BrowserWindowHost extends Abject {
 
   protected override async onInit(): Promise<void> {
     this.electron = await import('electron');
+    this.offscreenPreloadPath = path.join(this.electron.app.getPath('userData'), 'offscreen-page-preload.js');
+    await fs.writeFile(this.offscreenPreloadPath, OFFSCREEN_PRELOAD);
   }
 
   protected override async onStop(): Promise<void> {
@@ -277,7 +301,19 @@ export class BrowserWindowHost extends Abject {
     return { token: p.token };
   }
 
+  /**
+   * An offscreen page opens no native dialog. Its window is never shown, and
+   * on Wayland a dialog is parented to its window's surface: the compositor
+   * refuses a surface that was never shown, and that protocol error takes
+   * down the whole app (a page's confirm() did, on an unsubscribe link). Nobody
+   * would see such a dialog anyway. JavaScript dialogs are off in every frame:
+   * alert returns at once and confirm and prompt read as cancelled, the answer
+   * these pages get in Playwright's own Chromium too, where nothing accepts a
+   * dialog. OFFSCREEN_PRELOAD covers print and the file pickers, in subframes too.
+   * Popups get the same options, so the rules reach them before they load.
+   */
   private windowOptions(ses: Session, headful: boolean, viewport: Viewport): BrowserWindowConstructorOptions {
+    requireContract(headful || this.offscreenPreloadPath !== undefined, 'offscreen preload was not written');
     return {
       width: viewport.width,
       height: viewport.height,
@@ -295,6 +331,12 @@ export class BrowserWindowHost extends Abject {
         contextIsolation: true,
         nodeIntegration: false,
         spellcheck: false,
+        ...(headful ? {} : {
+          disableDialogs: true,
+          preload: this.offscreenPreloadPath,
+          // Runs the preload in subframes as well; the sandbox still keeps Node out.
+          nodeIntegrationInSubFrames: true,
+        }),
       },
     };
   }

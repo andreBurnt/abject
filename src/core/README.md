@@ -55,7 +55,9 @@ objects.
 **Trust.** Privileged handlers admit callers with `isBuiltInCaller(id,
 names?)`: the caller's registration says it is an instance of a class
 compiled into the server (no `source`, no package owner, not a remote peer's;
-`built-in.ts`), registered under one of `names`. A name alone, or a name from
+`built-in.ts`), registered under one of `names` or carrying one as its
+manifest name (the registry renames a class's later instances "Chat-2",
+"Chat-3", so one Chat per conversation still matches "Chat"). A name alone, or a name from
 a payload, proves nothing. Built-in cannot be claimed: the Factory builds a
 server class only for a built-in requester, and the registries take writes
 to another object's entry only from built-in senders.
@@ -123,7 +125,9 @@ recognizes these stand-in answers.
 **People.** `confirm()` and `prompt()` send `askPerson` to `DialogBroker`
 and wait (with a 10 minute stall timer that the broker's heartbeats keep
 resetting). With no DialogBroker they fail closed: `confirm()` returns
-`false`, `prompt()` returns `null`. `awaitingHuman(what, taskId?)` sends a
+`false`, `prompt()` returns `null`. `promptOutcome()` is `prompt()` saying
+how the question ended (`answered`, `declined`, `unanswered`), for a caller
+that reports back. `awaitingHuman(what, taskId?)` sends a
 `progress` heartbeat every 2s so callers behind a dialog do not time out;
 call the returned stop function in a `finally`.
 

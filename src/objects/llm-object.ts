@@ -197,6 +197,11 @@ import { MiniMaxProvider } from '../llm/minimax.js';
 
 const log = new Log('LLM');
 
+/** A call the person stopped with Kill in the LLM monitor. Never retried or routed elsewhere. */
+class RequestKilledError extends Error {
+  constructor() { super('Stopped with Kill in the LLM monitor'); this.name = 'RequestKilledError'; }
+}
+
 const LLM_INTERFACE = 'abjects:llm';
 
 /** A `decide` request: typed questions about a state (see src/llm/decision.ts). */
@@ -594,6 +599,8 @@ export class LLMObject extends Abject {
   private _byId: Map<string, LLMLedgerEntry> = new Map();
   /** Prompt text for in-flight calls, held until the entry completes. */
   private _pendingText: Map<string, string> = new Map();
+  /** Fired by killRequest; each in-flight call stops waiting on it. */
+  private _killSwitches: Map<string, AbortController> = new Map();
   private readonly _sessionStartedAt = Date.now();
   private storageId?: AbjectId;
 
@@ -1342,13 +1349,15 @@ export class LLMObject extends Abject {
       let stopReason: string | undefined;
       let usage: LLMStreamChunk['usage'];
       let execution: ExecutionProvenance | undefined;
+      // A kill ends the wait at once, even before the first chunk: the
+      // provider is told to stop, and whatever it sends after is dropped.
+      const kill = this.killSignal(activeReq.id);
+      const chunks = this.meteredStream(provider, messages, { ...effectiveOptions, signal: kill });
       try {
-        for await (const chunk of this.meteredStream(provider, messages, effectiveOptions)) {
-          if (activeReq.killed) {
-            log.info(`Request ${ledgerId} killed during streaming`);
-            progress.killed = true;
-            break;
-          }
+        while (true) {
+          const next = await this.untilKilled(chunks.next(), kill);
+          if (next.done) break;
+          const chunk = next.value;
           fullContent += chunk.content;
           if (chunk.stopReason) stopReason = chunk.stopReason;
           if (chunk.usage) usage = chunk.usage;
@@ -1365,11 +1374,18 @@ export class LLMObject extends Abject {
       } catch (err) {
         const elapsed = Date.now() - start;
         const errMsg = err instanceof Error ? err.message : String(err);
-        log.error(`${provider.name} stream | ${elapsed}ms | ${errMsg}`);
+        if (err instanceof RequestKilledError) {
+          progress.killed = true;
+          log.info(`Request ${ledgerId} killed after ${elapsed}ms (${fullContent.length} chars)`);
+          void chunks.return(undefined).catch(() => undefined);
+        } else {
+          log.error(`${provider.name} stream | ${elapsed}ms | ${errMsg}`);
+        }
         this.trackRequestError(ledgerId, errMsg);
         throw err;
       } finally {
         this.cancelTimer(keepaliveTimer);
+        this._killSwitches.delete(activeReq.id);
       }
 
       const elapsed = Date.now() - start;
@@ -1682,6 +1698,7 @@ export class LLMObject extends Abject {
       const req = this._byId.get(requestId);
       if (!req || req.status !== 'active') return false;
       req.killed = true;
+      this._killSwitches.get(requestId)?.abort();
       log.info(`Kill requested for ${requestId}`);
       return true;
     });
@@ -1718,6 +1735,7 @@ export class LLMObject extends Abject {
     return {
       request: <T>(to: AbjectId, method: string, payload: unknown, timeoutMs: number) =>
         this.request<T>(msg.request(this.id, to, method, payload), timeoutMs),
+      notify: (to, method, payload) => { this.send(msg.event(this.id, to, method, payload)); },
       openStream: (streamId, backend, sink) => { this.remoteStreams.set(streamId, { backend, sink }); },
       closeStream: (streamId) => { this.remoteStreams.delete(streamId); },
     };
@@ -2036,8 +2054,10 @@ export class LLMObject extends Abject {
       }, KEEPALIVE_MS);
     }
 
+    const kill = callerId ? this.killSignal(trackId) : undefined;
     try {
-      const result = await this.meteredComplete(provider, messages, effectiveOptions);
+      const work = this.meteredComplete(provider, messages, kill ? { ...effectiveOptions, signal: kill } : effectiveOptions);
+      const result = kill ? await this.untilKilled(work, kill) : await work;
       const elapsed = Date.now() - start;
       log.info(`← ${provider.name} | ${result.content.length} chars | ${elapsed}ms | reason=${result.finishReason} | tokens=${result.usage?.inputTokens ?? '?'}in/${result.usage?.outputTokens ?? '?'}out`);
       if (callerId) this.trackRequestEnd(trackId, result.content, result.usage, result.finishReason);
@@ -2050,6 +2070,7 @@ export class LLMObject extends Abject {
       throw err;
     } finally {
       if (keepaliveTimer) this.cancelTimer(keepaliveTimer);
+      if (kill) this._killSwitches.delete(trackId);
     }
   }
 
@@ -2335,7 +2356,7 @@ export class LLMObject extends Abject {
    * caller would be sent twice by a second attempt; and a pause means stop.
    */
   private canFallBack(err: unknown, progress: AttemptProgress): boolean {
-    if (this._paused || progress.killed || progress.emittedChars > 0) return false;
+    if (this._paused || progress.killed || progress.emittedChars > 0 || err instanceof RequestKilledError) return false;
     return !isContextOverflowError(err);
   }
 
@@ -2782,6 +2803,27 @@ Only output the code, no explanations. Use proper formatting and comments.`;
    * tab is a filter over these, not a separate collection — and is mutated
    * in place as the call streams and finishes.
    */
+  /** The signal killRequest fires for a call in the ledger. */
+  private killSignal(requestId: string): AbortSignal {
+    const sw = new AbortController();
+    this._killSwitches.set(requestId, sw);
+    if (this._byId.get(requestId)?.killed) sw.abort();
+    return sw.signal;
+  }
+
+  /** `work`, or RequestKilledError as soon as `kill` fires; a late outcome of `work` is dropped. */
+  private untilKilled<T>(work: Promise<T>, kill: AbortSignal): Promise<T> {
+    if (kill.aborted) { work.catch(() => undefined); return Promise.reject(new RequestKilledError()); }
+    return new Promise<T>((resolve, reject) => {
+      const onKill = () => { work.catch(() => undefined); reject(new RequestKilledError()); };
+      kill.addEventListener('abort', onKill, { once: true });
+      work.then(
+        (v) => { kill.removeEventListener('abort', onKill); resolve(v); },
+        (e) => { kill.removeEventListener('abort', onKill); reject(e); },
+      );
+    });
+  }
+
   private async trackRequestStart(
     requestId: string,
     callerId: AbjectId,

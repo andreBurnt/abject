@@ -2497,15 +2497,29 @@ ${record.length > 0
     const tasks = await this.request<Array<{ id: string; fields: Record<string, unknown> }>>(
       request(this.id, this.goalManagerId, 'getTasksForGoal', { goalId }),
     ).catch(() => [] as Array<{ id: string; fields: Record<string, unknown> }>);
-    const inFlight = tasks.filter(t => !['done', 'permanently_failed', 'cancelled'].includes(String(t.fields.status)))
-      // Whole descriptions: what a task was told to do or not do is often
-      // past its first sentence, and a note is judged against exactly that.
-      .map(t => ({ description: String(t.fields.description ?? ''), status: t.fields.status }));
+    const team = this.agentAbjectId
+      ? await this.request<Array<{ agentId: AbjectId; name: string; description?: string }>>(
+        request(this.id, this.agentAbjectId, 'listAgents', {}), 5000,
+      ).catch(() => [] as Array<{ agentId: AbjectId; name: string; description?: string }>)
+      : [];
+    const members = new Map(team.map(a => [a.agentId as string, a]));
+    const open = tasks.filter(t => !['done', 'permanently_failed', 'cancelled'].includes(String(t.fields.status)));
+    // Whole descriptions: what a task was told to do or not do is often
+    // past its first sentence, and a note is judged against exactly that.
+    // The agent goes with each task: a note can keep the task's wording and
+    // still make it another agent's kind of work.
+    const inFlight = open.map(t => ({
+      description: String(t.fields.description ?? ''), status: t.fields.status,
+      agent: members.get(String(t.fields.assignedAgentId ?? ''))?.name ?? 'unassigned',
+    }));
+    const agents = Object.fromEntries([...new Set(inFlight.map(t => t.agent))]
+      .map(name => [name, team.find(a => a.name === name)?.description?.slice(0, 1500) ?? '']));
     const outcome = await this.askDecision('scrum.interjection', {
       goal: { title: goal.title, description: goal.description.slice(0, 2000) },
       note: notes.map(n => n.note).join('\n').slice(0, 2000),
       pending_question: goal.pendingQuestion?.question?.slice(0, 1000) ?? null,
       in_flight: inFlight.slice(0, 12),
+      agents,
       latest_plan: safeStringify(((goal.scratchpad?.['learning/plans'] as unknown[]) ?? []).at(-1) ?? null, 1000),
     }, interjectionQuestions(!!goal.pendingQuestion), { goalId, onBehalfOf: 'ScrumMaster' });
     const intent = choiceOf(outcome, 'intent');

@@ -114,6 +114,12 @@ export interface LLMCompletionOptions {
    * the caller still parses defensively.
    */
   jsonMode?: boolean;
+  /**
+   * Fires when the call is no longer wanted (Kill in the LLM monitor).
+   * Providers that can stop the request on it do; the LLM object stops
+   * waiting either way. Local to this process: never sent anywhere.
+   */
+  signal?: AbortSignal;
 }
 
 export interface ModelInfo {
