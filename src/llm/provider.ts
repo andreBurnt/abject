@@ -247,10 +247,12 @@ export interface LLMProviderDescription {
   /** Placeholder for the credential input. */
   credentialPlaceholder?: string;
   /**
-   * For `cli` providers: the binary name to detect on PATH and the
-   * one-line install hint shown when it isn't found.
+   * For `cli` providers: the binary name to detect on PATH, the
+   * one-line install hint shown when it isn't found, and an optional
+   * argv (e.g. `['auth', 'status']`) that exits 0 when the binary is
+   * logged in and 1 when it is not.
    */
-  cli?: { binary: string; installHint: string };
+  cli?: { binary: string; installHint: string; authArgs?: string[] };
   /**
    * Static fallback model list shown in tier dropdowns before any live
    * fetch completes. Live `listModels()` results override this.
@@ -523,6 +525,8 @@ export function cliIsRetryable(err: unknown): boolean {
   if (/subprocess killed/i.test(msg)) return true;
   if (/\b(ECONNRESET|EPIPE|ETIMEDOUT|ECONNREFUSED)\b/.test(msg)) return true;
   if (/SIGTERM|SIGKILL|signal\s+\d+/i.test(msg)) return true;
+  // A logged-out binary stays logged out until the user acts.
+  if (/\bnot\s+logged\s+in\b/i.test(msg)) return false;
   return defaultIsRetryable(err);
 }
 

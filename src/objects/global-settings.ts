@@ -263,6 +263,12 @@ export class GlobalSettings extends Abject {
    * a string is the resolved binary path (or just the binary name).
    */
   private cliDetected: Partial<Record<LLMProviderName, string | null>> = {};
+  /**
+   * Login-probe result for CLI providers that declare `cli.authArgs`.
+   * `false` means the auth check exited 1 (not logged in). Absent means it
+   * was not run, or it timed out or exited with some other code.
+   */
+  private cliAuthOk: Partial<Record<LLMProviderName, boolean>> = {};
 
   /** Detection-status label widget for the AI tab (visible only for CLI providers). */
   private cliStatusLabelId?: AbjectId;
@@ -3477,7 +3483,7 @@ The settings themselves live in SettingsManager, which this window loads from an
 
   // ── CLI detection helpers ─────────────────────────────────────────
 
-  /** Re-probe whether the CLI binary for `provider` is on PATH and update the status label. */
+  /** Re-probe whether the CLI binary for `provider` is on PATH (and logged in, when checkable) and update the status label. */
   private async refreshCliDetection(provider: LLMProviderName): Promise<void> {
     const desc = this.descById(provider);
     if (!desc?.cli) return;
@@ -3489,7 +3495,14 @@ The settings themselves live in SettingsManager, which this window loads from an
       // fine for a one-shot detection probe.
       path = await this.probeCliPath(bin);
     } catch { path = null; }
+    let authOk: boolean | undefined;
+    if (path !== null && desc.cli.authArgs?.length) {
+      const code = await this.probeCliExit(bin, desc.cli.authArgs);
+      authOk = code === 0 ? true : code === 1 ? false : undefined;
+    }
     this.cliDetected[provider] = path;
+    if (authOk === undefined) delete this.cliAuthOk[provider];
+    else this.cliAuthOk[provider] = authOk;
 
     // Update label only if we're still on this provider in the panel.
     if (this.activeAiProvider === provider && this.cliStatusLabelId) {
@@ -3502,6 +3515,14 @@ The settings themselves live in SettingsManager, which this window loads from an
 
   /** Run `<bin> --version` and return the binary name on success, or null. */
   private async probeCliPath(bin: string): Promise<string | null> {
+    return (await this.probeCliExit(bin, ['--version'])) === 0 ? bin : null;
+  }
+
+  /**
+   * Spawn `<bin> ...args` with a 5s timeout. Resolves the exit code, or null
+   * when the spawn fails or times out.
+   */
+  private async probeCliExit(bin: string, args: string[]): Promise<number | null> {
     let spawn: typeof import('node:child_process').spawn;
     try {
       // Lazily import `node:child_process` so the browser bundle never
@@ -3515,7 +3536,7 @@ The settings themselves live in SettingsManager, which this window loads from an
     }
     return new Promise((resolve) => {
       try {
-        const proc = spawn(bin, ['--version'], { stdio: ['ignore', 'pipe', 'pipe'] });
+        const proc = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
         let resolved = false;
         const timer = setTimeout(() => {
           if (resolved) return;
@@ -3533,7 +3554,7 @@ The settings themselves live in SettingsManager, which this window loads from an
           if (resolved) return;
           resolved = true;
           clearTimeout(timer);
-          resolve(code === 0 ? bin : null);
+          resolve(code);
         });
       } catch {
         resolve(null);
@@ -3550,6 +3571,10 @@ The settings themselves live in SettingsManager, which this window loads from an
       const hint = cli?.installHint ?? '';
       return `\`${bin}\` not found on PATH. ${hint}`;
     }
+    if (this.cliAuthOk[provider] === false) {
+      const check = [bin, ...(cli?.authArgs ?? [])].join(' ');
+      return `Detected \`${bin}\` on PATH, but \`${check}\` exited 1 (not logged in). Log in with the CLI, then Refresh.`;
+    }
     return `Detected \`${bin}\` on PATH. The CLI manages its own auth — run \`${bin} login\` if you haven't already.`;
   }
 
@@ -3557,6 +3582,7 @@ The settings themselves live in SettingsManager, which this window loads from an
     const detected = this.cliDetected[provider];
     if (detected === undefined) return this.theme.textTertiary;
     if (detected === null)      return this.theme.statusErrorBright;
+    if (this.cliAuthOk[provider] === false) return this.theme.statusWarning;
     return this.theme.statusSuccess;
   }
 

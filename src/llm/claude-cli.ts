@@ -447,6 +447,7 @@ export class ClaudeCliProvider extends BaseLLMProvider {
       credentialMode: 'cli',
       cli: {
         binary: 'claude',
+        authArgs: ['auth', 'status'],
         installHint: terminal
           ? 'Reuses one warm `claude` session per model: saves process startup on every '
             + 'request, reports no token usage, and reads replies off the rendered screen. '
@@ -600,10 +601,16 @@ function extractStreamUsage(line: string): LLMCompletionResult['usage'] | undefi
   return undefined;
 }
 
-/** A failure reported as an `error` event on stdout rather than via exit code. */
+/**
+ * A failure reported on stdout: an `error` event, or a terminal `result`
+ * event with `is_error: true`.
+ */
 function extractStreamError(line: string): string | undefined {
   try {
     const obj = JSON.parse(line) as Record<string, unknown>;
+    if (obj.type === 'result' && obj.is_error === true && typeof obj.result === 'string' && obj.result.length > 0) {
+      return obj.result;
+    }
     if (obj.type !== 'error') return undefined;
     const inner = obj.error as { message?: string } | string | undefined;
     if (typeof inner === 'string') return inner;
