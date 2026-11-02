@@ -211,3 +211,24 @@ test('the judge is asked with the deploy\'s own deadline, so an abandoned judgme
     assert.equal(payload.maxMutants, undefined, 'no evidence-strength knob on the deploy path');
   } finally { await f.stop(); }
 });
+
+test('a draft built on a version that is no longer live is answered with the conflict, and the judge is never asked', async () => {
+  const f = await fixture({ recordings: [recording] });
+  try {
+    const asked: string[] = [];
+    const send = f.creator.sendRequest.bind(f.creator);
+    f.creator.sendRequest = (to: AbjectId, method: string, payload: unknown, timeoutMs?: number) => {
+      if (method === 'judge') asked.push(method);
+      return send(to, method, payload, timeoutMs);
+    };
+    // The loop loaded an older source than the one now live.
+    const stale = { kind: 'modify', goal: 'fix listEvents', deps: new Map(), draftSource: HEAL_BROKEN, usedObjects: [],
+      turn: 3, turnLog: [], renderedGuides: new Set(), lastValidation: {}, targetObjectId: f.target.id,
+      targetSource: LIVE.replace('listEvents', 'listEventsOld') };
+    const res = await f.creator.opDeployUpdate(stale, { action: 'deploy_update' });
+    assert.equal(res.ok, false, JSON.stringify(res));
+    assert.match(res.summary, /the object changed underneath this draft/);
+    assert.deepEqual(asked, [], 'a draft that cannot deploy is not judged');
+    assert.equal(await f.client.call(f.target.id, 'getSource'), LIVE, 'the live object is untouched');
+  } finally { await f.stop(); }
+});
