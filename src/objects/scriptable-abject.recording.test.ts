@@ -85,7 +85,7 @@ async function fixture(withRecorder: boolean) {
   const client = await add(new Endpoint('Client'));
   const calendar = await add(new ScriptableAbject(manifest, SOURCE, client.id));
   const settle = () => new Promise(r => setTimeout(r, 30));
-  return { recorder, client, calendar, settle, async stop() { for (const o of objects.reverse()) await o.stop(); } };
+  return { recorder, client, calendar, settle, add, async stop() { for (const o of objects.reverse()) await o.stop(); } };
 }
 
 test('the first request discovers the recorder; from the second on, each request is recorded with its outbound calls', async () => {
@@ -185,5 +185,25 @@ test('with no recorder registered, handlers run exactly as before and nothing is
     assert.equal(await f.client.call(f.calendar.id, 'sync', { n: 1 }), 2);
     // Nothing to assert on a recorder; the point is that the object never
     // stalled on discovery and its replies are unchanged.
+  } finally { await f.stop(); }
+});
+
+test("a source's override of a system verb is not recorded; its own handlers still are", async () => {
+  const f = await fixture(true);
+  try {
+    const m: AbjectManifest = { name: 'Notes', version: '1', description: 'user object',
+      interface: { id: 'user:notes', name: 'Notes', description: 'user object', methods: [
+        { name: 'count', description: '', parameters: [] },
+      ] } };
+    const notes = await f.add(new ScriptableAbject(m, `({
+      count(msg) { return 3; },
+      getUndoState(msg) { return { canUndo: false, own: true }; },
+    })`, f.client.id));
+    await f.client.call(notes.id, 'count', {}); // discovery
+    await f.settle();
+    assert.deepEqual(await f.client.call(notes.id, 'getUndoState', {}), { canUndo: false, own: true });
+    assert.equal(await f.client.call(notes.id, 'count', {}), 3);
+    await f.settle();
+    assert.deepEqual(f.recorder!.received.filter(e => e.caller === notes.id).map(e => e.method), ['count']);
   } finally { await f.stop(); }
 });
