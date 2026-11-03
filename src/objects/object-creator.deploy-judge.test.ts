@@ -232,3 +232,45 @@ test('a draft built on a version that is no longer live is answered with the con
     assert.equal(await f.client.call(f.target.id, 'getSource'), LIVE, 'the live object is untouched');
   } finally { await f.stop(); }
 });
+
+test('a change made to the live object while the draft was judged gets the conflict, and nothing is swapped', async () => {
+  const f = await fixture({ recordings: [recording] });
+  try {
+    // Another writer (AbjectEditor, a restore) changes the source while the judge runs; it does not take the deploy lock.
+    const send = f.creator.sendRequest.bind(f.creator);
+    const EDITED = LIVE.replace('map(e => e.name)', 'map(e => e.name.trim())');
+    f.creator.sendRequest = async (to: AbjectId, method: string, payload: unknown, timeoutMs?: number) => {
+      const reply = await send(to, method, payload, timeoutMs);
+      if (method === 'judge') await f.client.call(f.target.id, 'updateSource', { source: EDITED });
+      return reply;
+    };
+    const modify = { kind: 'modify', goal: 'fix listEvents', deps: new Map(), draftSource: HEAL_OK, usedObjects: [],
+      turn: 3, turnLog: [], renderedGuides: new Set(), lastValidation: {}, targetObjectId: f.target.id, targetSource: LIVE };
+    const res = await f.creator.opDeployUpdate(modify, { action: 'deploy_update' });
+    assert.equal(res.ok, false, JSON.stringify(res));
+    assert.match(res.summary, /the object changed underneath this draft/);
+    assert.match(res.error!, /load_target/);
+    assert.equal(await f.client.call(f.target.id, 'getSource'), EDITED, 'the other writer\'s change survives');
+    assert.equal(f.store.saved.length, 0);
+  } finally { await f.stop(); }
+});
+
+test('a deploy whose caller has stopped waiting, or whose task has ended, does not swap late', async () => {
+  const f = await fixture({ recordings: [recording] });
+  try {
+    const modify = () => ({ kind: 'modify', goal: 'fix listEvents', deps: new Map(), draftSource: HEAL_OK, usedObjects: [],
+      turn: 3, turnLog: [], renderedGuides: new Set(), lastValidation: {}, targetObjectId: f.target.id, targetSource: LIVE });
+    const late = await f.creator.opDeployUpdate(modify(), { action: 'deploy_update' }, { deadline: Date.now() - 1, live: () => true });
+    assert.equal(late.ok, false, JSON.stringify(late));
+    assert.match(late.summary, /timed out before the swap/);
+    const ended = await f.creator.opDeployUpdate(modify(), { action: 'deploy_update' }, { deadline: Date.now() + 60000, live: () => false });
+    assert.equal(ended.ok, false, JSON.stringify(ended));
+    assert.match(ended.summary, /task ended while the draft was being judged/);
+    assert.equal(await f.client.call(f.target.id, 'getSource'), LIVE, 'the live object is untouched');
+    assert.equal(f.store.saved.length, 0);
+    // With time left and the task live, the same deploy goes through.
+    const ok = await f.creator.opDeployUpdate(modify(), { action: 'deploy_update' }, { deadline: Date.now() + 60000, live: () => true });
+    assert.equal(ok.ok, true, JSON.stringify(ok));
+    assert.equal(await f.client.call(f.target.id, 'getSource'), HEAL_OK);
+  } finally { await f.stop(); }
+});
