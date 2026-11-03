@@ -207,3 +207,16 @@ test("a source's override of a system verb is not recorded; its own handlers sti
     assert.deepEqual(f.recorder!.received.filter(e => e.caller === notes.id).map(e => e.method), ['count']);
   } finally { await f.stop(); }
 });
+
+test('a request the object addresses to itself (as afterRestore does) is not recorded; the same handler called by another object is', async () => {
+  const f = await fixture(true);
+  try {
+    await f.client.call(f.calendar.id, 'sync', { n: 1 }); // discovery
+    await f.settle();
+    const self = f.calendar as unknown as { id: AbjectId; request<T>(m: AbjectMessage, timeoutMs?: number): Promise<T> };
+    assert.equal(await self.request<number>(request(self.id, self.id, 'sync', { n: 10 }), 5000), 11);
+    assert.equal(await f.client.call(f.calendar.id, 'sync', { n: 20 }), 21);
+    await f.settle();
+    assert.deepEqual(f.recorder!.received.filter(e => e.method === 'sync').map(e => e.argsText), ['{"n":20}']);
+  } finally { await f.stop(); }
+});
