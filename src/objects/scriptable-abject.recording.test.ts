@@ -53,6 +53,9 @@ const manifest: AbjectManifest = { name: 'Calendar', version: '1', description: 
     { name: 'boom', description: '', parameters: [] },
     { name: 'secretive', description: '', parameters: [] },
     { name: 'sync', description: '', parameters: [] },
+    { name: 'tail', description: '', parameters: [] },
+    { name: 'arms', description: '', parameters: [] },
+    { name: 'emits', description: '', parameters: [] },
   ] } };
 
 const SOURCE = `({
@@ -71,7 +74,23 @@ const SOURCE = `({
     try { await this.call(await this.dep('Echo'), 'fail', {}); } catch (err) { throw new Error('boom: ' + err.message); }
   },
   async secretive(msg) { return { token: msg.payload.api_key, n: 1 }; },
-  sync(msg) { return msg.payload.n + 1; }
+  sync(msg) { return msg.payload.n + 1; },
+  async tail(msg) {
+    const echo = await this.dep('Echo');
+    const res = await this.call(echo, 'get', { url: 'a' });
+    void this.call(echo, 'step', { tag: 'late', step: 1, delayMs: 30 });
+    return res.ok;
+  },
+  async arms(msg) {
+    setTimeout(() => {}, 5);
+    const res = await this.call(await this.dep('Echo'), 'get', { url: 'b' });
+    return res.ok;
+  },
+  async emits(msg) {
+    const res = await this.call(await this.dep('Echo'), 'get', { url: 'c' });
+    this.emit(this.dep('Echo'), 'noted', { url: 'c' }); // not awaited, and its target still resolving
+    return res.ok;
+  }
 })`;
 
 async function fixture(withRecorder: boolean) {
@@ -237,5 +256,26 @@ test('a request the object addresses to itself (as afterRestore does) is not rec
     assert.equal(await f.client.call(f.calendar.id, 'sync', { n: 20 }), 21);
     await f.settle();
     assert.deepEqual(f.recorder!.received.filter(e => e.method === 'sync').map(e => e.argsText), ['{"n":20}']);
+  } finally { await f.stop(); }
+});
+
+test('a handler that returns with a call still on its way is recorded once it is answered, with that call; one that set a timer is not; a fire-and-forget emit is fine', async () => {
+  const f = await fixture(true);
+  try {
+    await f.client.call(f.calendar.id, 'sync', { n: 1 }); // discovery
+    await f.settle();
+    assert.equal(await f.client.call(f.calendar.id, 'tail', {}), true);
+    await new Promise(r => setTimeout(r, 120));
+    assert.equal(await f.client.call(f.calendar.id, 'arms', {}), true);
+    await new Promise(r => setTimeout(r, 30));
+    assert.equal(await f.client.call(f.calendar.id, 'emits', {}), true);
+    await f.settle();
+    const methods = f.recorder!.received.map(e => e.method);
+    const tail = f.recorder!.received.find(e => e.method === 'tail');
+    assert.ok(tail, 'the recording waited for the un-awaited call instead of storing it without');
+    assert.deepEqual(tail!.calls.map(c => c.method), ['get', 'step']);
+    assert.ok(tail!.calls.every(c => c.replyText !== undefined), 'both calls carry their answers');
+    assert.ok(!methods.includes('arms'), 'a timer runs in the context it was set in');
+    assert.ok(methods.includes('emits'), `an un-awaited emit is not a call, so the recording is kept (${methods})`);
   } finally { await f.stop(); }
 });
