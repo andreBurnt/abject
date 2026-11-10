@@ -120,6 +120,34 @@ test('the worker survives one job and answers the next', async () => {
   assert.equal(await inv(`({ f(msg) { return msg.payload.n * 3; } })`, 'f', { n: 2 }, noCalls), 6);
 });
 
+test('work a handler leaves running after it returns cannot kill the worker or fail the next job', async () => {
+  // The un-awaited call settles after its job is done; its rejection must not take the worker down.
+  const src = `({ async m(msg) { void (async () => { for (let i = 0; i < 50; i++) await null; await this.call('Log', 'info', {}); })(); return 1; } })`;
+  const inv = invoker();
+  const stub: CallStub = () => ({ replyText: 'true' });
+  for (let i = 0; i < 4; i++) assert.equal(await inv(src, 'm', {}, stub), 1, `job ${i}`);
+});
+
+test('call() takes the shapes the live proxy takes: a null payload is {}, the old (to, interfaceId, method, payload) form works, and msg has a header', async () => {
+  const seen: string[] = [];
+  const stub: CallStub = (req) => { seen.push(`${req.target} ${req.method} ${req.payloadText}`); return { replyText: 'true' }; };
+  const src = `({ async m(msg) {
+    await this.call('Svc', 'ping', null);
+    await this.call('Svc', 'ping');
+    await this.call(this.dep('Svc'), 'abjects:svc', 'ping', { a: 1 });
+    return msg.header.type;
+  } })`;
+  assert.equal(await invoker()(src, 'm', {}, stub), 'request');
+  assert.deepEqual(seen, ['Svc ping {}', 'Svc ping {}', 'Svc ping {"a":1}']);
+});
+
+test('a disposed invoker refuses new jobs instead of starting another worker', async () => {
+  const inv = invoker();
+  assert.equal(await inv(`({ f() { return 1; } })`, 'f', {}, noCalls), 1);
+  inv.dispose();
+  await assert.rejects(inv(`({ f() { return 1; } })`, 'f', {}, noCalls), /invoker disposed/);
+});
+
 test('the prompt-taught promise target is awaited: the stub sees the resolved name, not [object Promise]', async () => {
   // ObjectCreator's prompt tells generated code to write
   // `await this.call(this.dep('Name'), method, payload)`; dep() resolves to a

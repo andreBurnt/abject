@@ -217,3 +217,23 @@ test('the budget starts when the judgment does: time queued behind another judgm
     assert.ok(took < 2000, `stopped at the budget, not at the 5 s invocation timeout (took ${took} ms)`);
   } finally { await f.stop(); }
 });
+
+test('a stopped judge stops the judgment in progress instead of running candidate code on', async () => {
+  const f = await fixture();
+  try {
+    f.storage!.values.set(`invocations:${TYPE}`, [recording, { ...recording, at: 2 }, { ...recording, at: 3 }]);
+    const HANG = `({ listEvents() { while (true) {} } })`;
+    const t0 = Date.now();
+    const running = f.judge.judge({ source: HANG, typeId: TYPE });
+    await new Promise(r => setTimeout(r, 300));
+    await f.judge.stop();
+    const v = await running;
+    const took = Date.now() - t0;
+    assert.equal(v.pass, true, v.summary);
+    assert.equal(v.replay.verified, false);
+    assert.match(v.summary, /judgment abandoned: the judge stopped/);
+    assert.ok(took < 3000, `ended at stop(), not after 3 x the 5 s invocation timeout (took ${took} ms)`);
+    const queued = await f.judge.judge({ source: HEAL_OK, typeId: TYPE });
+    assert.match(queued.summary, /the judge has stopped/);
+  } finally { await f.stop(); }
+});
