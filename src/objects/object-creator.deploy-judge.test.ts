@@ -10,7 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Abject } from '../core/abject.js';
-import { request } from '../core/message.js';
+import { request, event } from '../core/message.js';
 import type { AbjectId, AbjectMessage, AbjectManifest, TypeId } from '../core/types.js';
 import { MessageBus } from '../runtime/message-bus.js';
 import { Registry } from './registry.js';
@@ -382,5 +382,30 @@ test('a deploy_spawn retry after the spawn keeps the act\'s intendedChange and i
     assert.equal(ended.success, false, JSON.stringify(ended));
     assert.match(ended.error, /cancelled or finished; the live object is untouched/);
     assert.equal(await f.client.call(f.target.id, 'getSource'), HEAL_BROKEN);
+  } finally { await f.stop(); }
+});
+
+test('a task AgentAbject reports cancelled while its deploy is being judged swaps nothing, though it is still in the task table', async () => {
+  const f = await fixture({ recordings: [recording] });
+  try {
+    f.creator.agentAbjectId = f.client.id;
+    const modify = { kind: 'modify', goal: 'fix listEvents', deps: new Map(), draftSource: HEAL_OK, usedObjects: [],
+      turn: 3, turnLog: [], renderedGuides: new Set(), lastValidation: {}, targetObjectId: f.target.id, targetSource: LIVE };
+    f.creator.tasks.set('c1', { taskId: 'c1', prompt: 'fix listEvents', callerId: f.client.id, state: modify });
+    const send = f.creator.sendRequest.bind(f.creator);
+    f.creator.sendRequest = async (to: AbjectId, method: string, payload: unknown, timeoutMs?: number) => {
+      const reply = await send(to, method, payload, timeoutMs);
+      if (method === 'judge') {
+        // AgentAbject's cancelTask: the event arrives, the task stays in the table until its result.
+        (f.client as any).send(event(f.client.id, f.creator.id, 'taskCancelled', { taskId: 'c1', reason: 'user cancelled' }));
+        await new Promise(r => setTimeout(r, 30));
+      }
+      return reply;
+    };
+    const res = await f.creator.handleAct('c1', { action: 'deploy_update' }, f.client.id);
+    assert.ok(f.creator.tasks.has('c1'), 'the task was not removed, only marked');
+    assert.equal(res.success, false, JSON.stringify(res));
+    assert.match(res.error, /cancelled or finished; the live object is untouched/);
+    assert.equal(await f.client.call(f.target.id, 'getSource'), LIVE);
   } finally { await f.stop(); }
 });

@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Abject } from '../core/abject.js';
-import { request } from '../core/message.js';
+import { request, event } from '../core/message.js';
 import type { AbjectId, AbjectMessage, AbjectManifest, TypeId } from '../core/types.js';
 import { MessageBus } from '../runtime/message-bus.js';
 import { Registry } from './registry.js';
@@ -151,4 +151,33 @@ test('a broken draft of a UI object is refused; a faithful one passes', async ()
     assert.equal(faithful.ok, true, JSON.stringify(faithful));
     assert.equal(faithful.data.fitness, 'fitness: PASS — 3 recordings reproduced');
   } finally { await f.stop(); }
+});
+
+test('a handed id the registry can also name keeps that name, so a call by name replays', async () => {
+  const bus = new MessageBus(), registry = new Registry(), objects: Abject[] = [registry];
+  await registry.init(bus);
+  const add = async <T extends Abject>(o: T, typeId?: TypeId): Promise<T> => {
+    o.setRegistryHint(registry.id); await o.init(bus);
+    registry.registerObject(o.id, o.manifest, undefined, undefined, undefined, undefined, typeId);
+    objects.push(o); return o;
+  };
+  try {
+    const storage = await add(new MemoryStorage());
+    const recorder = await add(new CassetteRecorder({ flushMs: 20 }));
+    const svc = await add(new Endpoint('ScoreBoard'), 'peer1/system/ScoreBoard' as TypeId);
+    const panel = await add(new Endpoint('Panel'), TYPE);
+    // The first reply carries ScoreBoard's own id. The handler still calls it by name.
+    (panel as any).send(event(panel.id, recorder.id, 'invocation', {
+      caller: panel.id, method: 'show', argsText: '{"n":1}', durationMs: 1, at: 1, resultText: '1',
+      calls: [
+        { targetId: svc.id, method: 'getInfo', payloadText: '{}', replyText: JSON.stringify({ id: svc.id }) },
+        { targetId: svc.id, method: 'setScore', payloadText: '{"score":1}', replyText: 'true' },
+      ],
+    }));
+    await new Promise(r => setTimeout(r, 150));
+    const [row] = storage.values.get(`invocations:${TYPE}`) as InvocationCassette[];
+    assert.equal(row.calls[0].target, 'ScoreBoard');
+    assert.equal(row.calls[1].target, svc.id, 'still keyed by the id it could have been handed');
+    assert.equal(row.calls[1].targetName, 'ScoreBoard', 'and by the name the registry knows it by');
+  } finally { for (const o of objects.reverse()) await o.stop(); }
 });
