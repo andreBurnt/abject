@@ -139,6 +139,27 @@ test('a chatty handler cannot evict the only recording of a quiet one', async ()
   } finally { await f.stop(); }
 });
 
+test('invocations replay cannot use (threw, truncated, or a call left unanswered) are not kept, so they cannot evict ones it can', async () => {
+  const f = await fixture();
+  try {
+    const storage = await f.add(new MemoryStorage());
+    const recorder = await f.add(new CassetteRecorder({ flushMs: 20 }));
+    const calendar = await f.add(new Endpoint('Calendar'), USER_TYPE);
+    calendar.emitTo(recorder.id, 'invocation', invocation([], { at: 1 }));
+    for (let i = 0; i < 6; i++) {
+      calendar.emitTo(recorder.id, 'invocation', invocation([], { resultText: undefined, errorText: 'bad input', at: 10 + i }));
+    }
+    calendar.emitTo(recorder.id, 'invocation', invocation([], { truncated: true, at: 20 }));
+    // Returned before an un-awaited outbound call was answered.
+    calendar.emitTo(recorder.id, 'invocation', invocation([{ targetId: calendar.id, method: 'ping', payloadText: '{}' }], { at: 21 }));
+    await settle(150);
+    const stored = storage.values.get(`invocations:${USER_TYPE}`) as InvocationCassette[];
+    assert.equal(stored?.length, 1, JSON.stringify(stored));
+    assert.equal(stored[0].resultText, '[1,2]');
+    assert.equal(stored[0].at, 1);
+  } finally { await f.stop(); }
+});
+
 test('HTTP exchanges still land under cassettes:<typeId>, attributed by the payload caller HttpClient vouches for', async () => {
   const f = await fixture();
   try {
