@@ -112,7 +112,7 @@ test('the first request discovers the recorder; from the second on, each request
   } finally { await f.stop(); }
 });
 
-test('two handlers interleaving across await slices each keep only their own outbound calls', async () => {
+test('two handlers that overlap on one object are not recorded; the same handler alone is', async () => {
   const f = await fixture(true);
   try {
     await f.client.call(f.calendar.id, 'sync', { n: 1 }); // discovery
@@ -124,16 +124,35 @@ test('two handlers interleaving across await slices each keep only their own out
     assert.deepEqual(rA, ['A:1', 'A:2']);
     assert.deepEqual(rB, ['B:1', 'B:2']);
     await f.settle();
-    const evA = f.recorder!.received.find(e => e.method === 'interleave' && e.argsText.includes('"A"'))!;
-    const evB = f.recorder!.received.find(e => e.method === 'interleave' && e.argsText.includes('"B"'))!;
-    assert.deepEqual(evA.calls.map(c => JSON.parse(c.payloadText)), [
-      { tag: 'A', step: 1, delayMs: 25 },
-      { tag: 'A', step: 2, delayMs: 5 },
+    assert.equal(f.recorder!.received.filter(e => e.method === 'interleave').length, 0,
+      'overlapping invocations could have traded calls, so neither is kept');
+    assert.deepEqual(await f.client.call(f.calendar.id, 'interleave', { tag: 'C', d1: 5, d2: 5 }), ['C:1', 'C:2']);
+    await f.settle();
+    const evC = f.recorder!.received.filter(e => e.method === 'interleave');
+    assert.equal(evC.length, 1);
+    assert.deepEqual(evC[0].calls.map(c => JSON.parse(c.payloadText)), [
+      { tag: 'C', step: 1, delayMs: 5 },
+      { tag: 'C', step: 2, delayMs: 5 },
     ]);
-    assert.deepEqual(evB.calls.map(c => JSON.parse(c.payloadText)), [
-      { tag: 'B', step: 1, delayMs: 5 },
-      { tag: 'B', step: 2, delayMs: 25 },
-    ]);
+  } finally { await f.stop(); }
+});
+
+test('an invocation during which the object made a call that is not in its trace is not recorded', async () => {
+  const f = await fixture(true);
+  try {
+    await f.client.call(f.calendar.id, 'sync', { n: 1 }); // discovery
+    await f.settle();
+    // A call made outside any trace (as a timer's or a misattributed one would be) while listEvents runs.
+    const p = f.client.call(f.calendar.id, 'interleave', { tag: 'A', d1: 40, d2: 5 });
+    await new Promise(r => setTimeout(r, 15)); // interleave is now waiting on its first call
+    await (f.calendar as any).tracedRequest(request(f.calendar.id, f.client.id, 'noop', {}), 500).catch(() => {});
+    await p;
+    await f.settle();
+    assert.equal(f.recorder!.received.filter(e => e.method === 'interleave').length, 0);
+    // The same handler with nothing else going on is recorded.
+    await f.client.call(f.calendar.id, 'interleave', { tag: 'B', d1: 5, d2: 5 });
+    await f.settle();
+    assert.equal(f.recorder!.received.filter(e => e.method === 'interleave').length, 1);
   } finally { await f.stop(); }
 });
 
