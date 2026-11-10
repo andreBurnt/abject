@@ -279,3 +279,43 @@ test('a handler that returns with a call still on its way is recorded once it is
     assert.ok(methods.includes('emits'), `an un-awaited emit is not a call, so the recording is kept (${methods})`);
   } finally { await f.stop(); }
 });
+
+test('back-to-back requests are both recorded when the first one\'s leftover helper calls answer in between', async () => {
+  const f = await fixture(true);
+  try {
+    await f.client.call(f.calendar.id, 'sync', { n: 1 }); // discovery
+    await f.settle();
+    // The second request arrives as soon as the first replies, before any timer could look again.
+    assert.equal(await f.client.call(f.calendar.id, 'emits', {}), true);
+    assert.equal(await f.client.call(f.calendar.id, 'emits', {}), true);
+    await f.settle();
+    assert.equal(f.recorder!.received.filter(e => e.method === 'emits').length, 2);
+  } finally { await f.stop(); }
+});
+
+test('a handler that starts while another one\'s leftover call is still on its way is not recorded, and neither is the other', async () => {
+  const f = await fixture(true);
+  try {
+    await f.client.call(f.calendar.id, 'sync', { n: 1 }); // discovery
+    await f.settle();
+    assert.equal(await f.client.call(f.calendar.id, 'tail', {}), true); // leaves a 30 ms call running
+    assert.equal(await f.client.call(f.calendar.id, 'emits', {}), true);
+    await new Promise(r => setTimeout(r, 120));
+    const methods = f.recorder!.received.map(e => e.method);
+    assert.ok(!methods.includes('emits'), `emits ran while tail's call was in flight (${methods})`);
+    assert.ok(!methods.includes('tail'), 'and tail overlapped emits');
+  } finally { await f.stop(); }
+});
+
+test('a source swap while a recording waits for its leftover calls drops that recording', async () => {
+  const f = await fixture(true);
+  try {
+    await f.client.call(f.calendar.id, 'sync', { n: 1 }); // discovery
+    await f.settle();
+    assert.equal(await f.client.call(f.calendar.id, 'tail', {}), true); // leaves a 30 ms call running
+    const swapped = await f.client.call<{ success: boolean }>(f.calendar.id, 'updateSource', { source: SOURCE });
+    assert.equal(swapped.success, true, JSON.stringify(swapped));
+    await new Promise(r => setTimeout(r, 120));
+    assert.ok(!f.recorder!.received.some(e => e.method === 'tail'), 'the trace outlived the sandbox it was taken in');
+  } finally { await f.stop(); }
+});
