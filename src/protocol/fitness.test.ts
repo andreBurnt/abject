@@ -160,6 +160,61 @@ test('the control keeps the deterministic recordings and judges the draft on tho
   assert.match(v.replay.failures[0], /inc\(\{"n":1\}\) returned 0 where the live object returned 2/);
 });
 
+/** An invoker that answers from a script: per source and method, a queue of
+ *  return values (the last one repeats). It counts runs, so a test can see
+ *  which source was run how many times. */
+function scripted(answers: Record<string, Record<string, unknown[]>>) {
+  const runs: string[] = [];
+  const invoke: Invoker = async (source, method) => {
+    runs.push(`${source}:${method}`);
+    const q = answers[source][method];
+    return q.length > 1 ? q.shift() : q[0];
+  };
+  return { invoke, runs };
+}
+
+test('self-replay canary: a recording the live source stops reproducing on a second run does not convict the draft', async () => {
+  // pick() is non-deterministic in a way one control run cannot see: the live
+  // source matched its recording once, then answers differently. The draft
+  // is the same code and landed on the other answer.
+  const pick: InvocationRecording = { method: 'pick', argsText: '{}', calls: [], resultText: '"heads"', at: 2 };
+  const inc: InvocationRecording = { method: 'inc', argsText: '{"n":1}', calls: [], resultText: '2', at: 1 };
+  const { invoke, runs } = scripted({
+    LIVE: { pick: ['heads', 'tails'], inc: [2] },
+    DRAFT: { pick: ['tails'], inc: [2] },
+  });
+  const v = await evaluate({ source: 'DRAFT' }, { invocations: [pick, inc] }, invoke, { liveSource: 'LIVE' });
+  assert.equal(v.pass, true, v.summary);
+  assert.equal(v.replay.verified, true, 'inc was still judged');
+  assert.equal(v.evidence.selfDivergent, 1);
+  assert.match(v.summary, /^fitness: PASS — 1 recording reproduced; 1 set aside: the live source did not reproduce itself on a second run$/);
+  assert.equal(runs.filter(r => r === 'LIVE:pick').length, 2, 'the live source ran pick twice: the control, then the canary');
+  assert.equal(runs.filter(r => r === 'LIVE:inc').length, 1, 'a recording the draft reproduced is not re-run');
+});
+
+test('self-replay canary: a contradiction the live source reproduces again still convicts, and a passing draft costs no extra run', async () => {
+  const inc: InvocationRecording = { method: 'inc', argsText: '{"n":1}', calls: [], resultText: '2', at: 1 };
+  const broken = scripted({ LIVE: { inc: [2] }, DRAFT: { inc: [0] } });
+  const v = await evaluate({ source: 'DRAFT' }, { invocations: [inc] }, broken.invoke, { liveSource: 'LIVE' });
+  assert.equal(v.pass, false, v.summary);
+  assert.equal(v.evidence.selfDivergent, undefined);
+  assert.equal(broken.runs.filter(r => r === 'LIVE:inc').length, 2, 'control, then the canary');
+
+  const faithful = scripted({ LIVE: { inc: [2] }, DRAFT: { inc: [2] } });
+  const ok = await evaluate({ source: 'DRAFT' }, { invocations: [inc] }, faithful.invoke, { liveSource: 'LIVE' });
+  assert.equal(ok.pass, true);
+  assert.deepEqual(faithful.runs, ['LIVE:inc', 'DRAFT:inc']);
+});
+
+test('self-replay canary: when every contradicted recording is unstable, the verdict is unverified, not a pass that judged something', async () => {
+  const pick: InvocationRecording = { method: 'pick', argsText: '{}', calls: [], resultText: '"heads"', at: 1 };
+  const { invoke } = scripted({ LIVE: { pick: ['heads', 'tails'] }, DRAFT: { pick: ['tails'] } });
+  const v = await evaluate({ source: 'DRAFT' }, { invocations: [pick] }, invoke, { liveSource: 'LIVE' });
+  assert.equal(v.pass, true);
+  assert.equal(v.replay.verified, false);
+  assert.match(v.summary, /^fitness: unverified — the live source gave a different answer on a second run for every recording the draft contradicted \(1\) — not deterministic$/);
+});
+
 test('replay() reports counts, not just a boolean', async () => {
   const r = await replay(BROKEN, [recording, { ...recording, at: 2 }], testInvoker);
   assert.equal(r.judged, 2);

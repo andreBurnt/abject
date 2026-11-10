@@ -151,7 +151,7 @@ test('with no judge on the bus the deploy proceeds and says so, rather than bric
   try {
     const res = await f.deployUpdate(HEAL_BROKEN);
     assert.equal(res.ok, true, JSON.stringify(res));
-    assert.match(res.data.fitness, /judge unavailable/);
+    assert.match(res.data.fitness, /judge unavailable — unverified; the gate fails open/);
   } finally { await f.stop(); }
 });
 
@@ -271,6 +271,88 @@ test('a deploy whose caller has stopped waiting, or whose task has ended, does n
     // With time left and the task live, the same deploy goes through.
     const ok = await f.creator.opDeployUpdate(modify(), { action: 'deploy_update' }, { deadline: Date.now() + 60000, live: () => true });
     assert.equal(ok.ok, true, JSON.stringify(ok));
+    assert.equal(await f.client.call(f.target.id, 'getSource'), HEAL_OK);
+  } finally { await f.stop(); }
+});
+
+test('the judgment runs outside the source lock: a second deploy lands while the first is judged, and the first then gets the conflict', async () => {
+  const f = await fixture({ recordings: [recording] });
+  let release!: () => void;
+  const held = new Promise<void>(r => { release = r; });
+  try {
+    // Hold the FIRST judgment at the creator, before it reaches the judge,
+    // so the second deploy's judgment is not queued behind it.
+    const send = f.creator.sendRequest.bind(f.creator);
+    let judgments = 0;
+    let firstJudging!: () => void;
+    const firstIsJudging = new Promise<void>(r => { firstJudging = r; });
+    f.creator.sendRequest = async (to: AbjectId, method: string, payload: unknown, timeoutMs?: number) => {
+      if (method === 'judge' && ++judgments === 1) { firstJudging(); await held; }
+      return send(to, method, payload, timeoutMs);
+    };
+    const modify = (draftSource: string) => ({ kind: 'modify', goal: 'fix listEvents', deps: new Map(), draftSource, usedObjects: [],
+      turn: 3, turnLog: [], renderedGuides: new Set(), lastValidation: {}, targetObjectId: f.target.id, targetSource: LIVE });
+    const FIRST = LIVE.replace('map(e => e.name)', 'map(e => String(e.name))');
+    const first = f.creator.opDeployUpdate(modify(FIRST), { action: 'deploy_update' });
+    await firstIsJudging;
+
+    const second = f.creator.opDeployUpdate(modify(HEAL_OK), { action: 'deploy_update' });
+    const raced = await Promise.race([second, new Promise(r => setTimeout(() => r('blocked'), 5000))]);
+    assert.notEqual(raced, 'blocked', 'the second deploy waited on the first one\'s judgment');
+    assert.equal((raced as { ok: boolean }).ok, true, JSON.stringify(raced));
+    assert.equal(await f.client.call(f.target.id, 'getSource'), HEAL_OK);
+
+    release();
+    const res = await first;
+    assert.equal(res.ok, false, JSON.stringify(res));
+    assert.match(res.summary, /the object changed underneath this draft/);
+    assert.equal(await f.client.call(f.target.id, 'getSource'), HEAL_OK, 'the deploy that landed first survives');
+    assert.equal(f.store.saved.length, 1);
+  } finally { release(); await f.stop(); }
+});
+
+test('a judge that times out or errors fails open: the deploy goes ahead and the result says it went unjudged', async () => {
+  for (const [why, pattern] of [
+    ['Request timed out after 90000ms', /^fitness: judge timed out \(Request timed out after 90000ms\) — unverified; the gate fails open, so this deploy went ahead unjudged$/],
+    ['worker crashed', /^fitness: judge unreachable \(worker crashed\) — unverified; the gate fails open, so this deploy went ahead unjudged$/],
+  ] as const) {
+    const f = await fixture({ recordings: [recording] });
+    try {
+      const send = f.creator.sendRequest.bind(f.creator);
+      f.creator.sendRequest = (to: AbjectId, method: string, payload: unknown, timeoutMs?: number) =>
+        method === 'judge' ? Promise.reject(new Error(why)) : send(to, method, payload, timeoutMs);
+      const res = await f.deployUpdate(HEAL_BROKEN);
+      assert.equal(res.ok, true, JSON.stringify(res));
+      assert.match(res.data.fitness, pattern);
+      assert.equal(await f.client.call(f.target.id, 'getSource'), HEAL_BROKEN);
+    } finally { await f.stop(); }
+  }
+});
+
+test('through agentAct, which carries no deadline: a deploy whose task ends during the judgment does not swap', async () => {
+  const f = await fixture({ recordings: [recording] });
+  try {
+    const modify = { kind: 'modify', goal: 'fix listEvents', deps: new Map(), draftSource: HEAL_OK, usedObjects: [],
+      turn: 3, turnLog: [], renderedGuides: new Set(), lastValidation: {}, targetObjectId: f.target.id, targetSource: LIVE };
+    f.creator.tasks.set('t1', { taskId: 't1', prompt: 'fix listEvents', callerId: f.client.id, state: modify });
+    const send = f.creator.sendRequest.bind(f.creator);
+    f.creator.sendRequest = async (to: AbjectId, method: string, payload: unknown, timeoutMs?: number) => {
+      const reply = await send(to, method, payload, timeoutMs);
+      if (method === 'judge') f.creator.tasks.delete('t1'); // cancelled while judged
+      return reply;
+    };
+    const res = await f.creator.handleAct('t1', { action: 'deploy_update' }, f.client.id);
+    assert.equal(res.success, false, JSON.stringify(res));
+    assert.match(res.error, /cancelled or finished; the live object is untouched/);
+    assert.equal(await f.client.call(f.target.id, 'getSource'), LIVE);
+    assert.equal(f.store.saved.length, 0);
+
+    // The same act with the task still live goes through: the deadline it
+    // counts from its own entry has 595 s left.
+    f.creator.sendRequest = send;
+    f.creator.tasks.set('t2', { taskId: 't2', prompt: 'fix listEvents', callerId: f.client.id, state: { ...modify, turnLog: [] } });
+    const ok = await f.creator.handleAct('t2', { action: 'deploy_update' }, f.client.id);
+    assert.equal(ok.success, true, JSON.stringify(ok));
     assert.equal(await f.client.call(f.target.id, 'getSource'), HEAL_OK);
   } finally { await f.stop(); }
 });
