@@ -192,22 +192,24 @@ test('a Registry lookup that fails is reported as such, not as "no durable typeI
   } finally { await f.stop(); }
 });
 
-test('the judge is asked with the deploy\'s own deadline, so an abandoned judgment stops', async () => {
+test('the judge is asked with a budget that starts when it judges, and stops before the act\'s deadline', async () => {
   const f = await fixture({ recordings: [recording] });
   try {
-    const asked: Array<{ payload: any; timeoutMs?: number }> = [];
+    const asked: Array<{ payload: any; timeoutMs?: number; sentAt: number }> = [];
     const send = f.creator.sendRequest.bind(f.creator);
     f.creator.sendRequest = (to: AbjectId, method: string, payload: unknown, timeoutMs?: number) => {
-      if (method === 'judge') asked.push({ payload, timeoutMs });
+      if (method === 'judge') asked.push({ payload, timeoutMs, sentAt: Date.now() });
       return send(to, method, payload, timeoutMs);
     };
     const before = Date.now();
     await f.deployUpdate(HEAL_OK);
     assert.equal(asked.length, 1);
-    const { payload, timeoutMs } = asked[0];
-    assert.equal(typeof payload.deadline, 'number');
-    assert.ok(payload.deadline >= before + timeoutMs! && payload.deadline <= Date.now() + timeoutMs!,
-      `deadline ${payload.deadline - before} ms out, request timeout ${timeoutMs} ms`);
+    const { payload, timeoutMs, sentAt } = asked[0];
+    assert.equal(payload.budgetMs, 90000, 'the 90 s budget is the judge\'s to start');
+    assert.ok(timeoutMs! > 590000, `the request waits as long as the act may (${timeoutMs} ms)`);
+    // The judge stops 2 s before the deploy stops waiting, so its "unverified" answer arrives.
+    assert.equal(sentAt + timeoutMs! - payload.deadline, 2000);
+    assert.ok(payload.deadline <= before + 600000, 'never past the act\'s own deadline');
     assert.equal(payload.maxMutants, undefined, 'no evidence-strength knob on the deploy path');
   } finally { await f.stop(); }
 });
@@ -354,5 +356,31 @@ test('through agentAct, which carries no deadline: a deploy whose task ends duri
     const ok = await f.creator.handleAct('t2', { action: 'deploy_update' }, f.client.id);
     assert.equal(ok.success, true, JSON.stringify(ok));
     assert.equal(await f.client.call(f.target.id, 'getSource'), HEAL_OK);
+  } finally { await f.stop(); }
+});
+
+test('a deploy_spawn retry after the spawn keeps the act\'s intendedChange and its deadline', async () => {
+  const f = await fixture({ recordings: [recording] });
+  try {
+    const spawned = (draftSource: string) => ({ kind: 'create', goal: 'calendar', deps: new Map(), draftSource, draftManifest: manifest,
+      usedObjects: [], turn: 3, turnLog: [], renderedGuides: new Set(), lastValidation: {}, spawnedObjectId: f.target.id });
+    f.creator.tasks.set('s1', { taskId: 's1', prompt: 'calendar', callerId: f.client.id, state: spawned(HEAL_BROKEN) });
+    const ok = await f.creator.handleAct('s1', { action: 'deploy_spawn', intendedChange: 'ids, as the user asked' }, f.client.id);
+    assert.equal(ok.success, true, JSON.stringify(ok));
+    assert.match(ok.data.fitness, /deployed on stated intent: ids, as the user asked/);
+    assert.equal(await f.client.call(f.target.id, 'getSource'), HEAL_BROKEN);
+
+    const state = spawned(HEAL_OK);
+    f.creator.tasks.set('s2', { taskId: 's2', prompt: 'calendar', callerId: f.client.id, state });
+    const send = f.creator.sendRequest.bind(f.creator);
+    f.creator.sendRequest = async (to: AbjectId, method: string, payload: unknown, timeoutMs?: number) => {
+      const reply = await send(to, method, payload, timeoutMs);
+      if (method === 'judge') f.creator.tasks.delete('s2'); // cancelled while judged
+      return reply;
+    };
+    const ended = await f.creator.handleAct('s2', { action: 'deploy_spawn' }, f.client.id);
+    assert.equal(ended.success, false, JSON.stringify(ended));
+    assert.match(ended.error, /cancelled or finished; the live object is untouched/);
+    assert.equal(await f.client.call(f.target.id, 'getSource'), HEAL_BROKEN);
   } finally { await f.stop(); }
 });
