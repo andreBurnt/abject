@@ -215,6 +215,19 @@ test('self-replay canary: when every contradicted recording is unstable, the ver
   assert.match(v.summary, /^fitness: unverified — the live source gave a different answer on a second run for every recording the draft contradicted \(1\) — not deterministic$/);
 });
 
+test('self-replay canary: a contradiction the live source reproduced once is not re-run to look for another excuse', async () => {
+  // b is unstable on the live source, a is stable. The draft breaks both.
+  const b: InvocationRecording = { method: 'b', argsText: '{}', calls: [], resultText: '1', at: 2 };
+  const a: InvocationRecording = { method: 'a', argsText: '{}', calls: [], resultText: '1', at: 1 };
+  const { invoke, runs } = scripted({ LIVE: { b: [1, 2], a: [1] }, DRAFT: { b: [0], a: [0] } });
+  const v = await evaluate({ source: 'DRAFT' }, { invocations: [b, a] }, invoke, { liveSource: 'LIVE' });
+  assert.equal(v.pass, false, v.summary);
+  assert.equal(v.evidence.selfDivergent, 1);
+  assert.match(v.replay.failures[0], /^a\(\{\}\) returned 0/);
+  assert.equal(runs.filter(r => r === 'LIVE:a').length, 2, 'the control, then one canary run');
+  assert.equal(runs.filter(r => r === 'DRAFT:a').length, 1, 'the draft replays each recording once');
+});
+
 test('replay() reports counts, not just a boolean', async () => {
   const r = await replay(BROKEN, [recording, { ...recording, at: 2 }], testInvoker);
   assert.equal(r.judged, 2);

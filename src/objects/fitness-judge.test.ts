@@ -195,3 +195,25 @@ test('a judgment whose deadline passed while it was queued answers at once', asy
     assert.match(v.summary, /judgment abandoned: the caller's deadline passed while it was queued/);
   } finally { await f.stop(); }
 });
+
+test('the budget starts when the judgment does: time queued behind another judgment is not counted, a hang still stops at it', async () => {
+  const f = await fixture();
+  try {
+    f.storage!.values.set(`invocations:${TYPE}`, [recording]);
+    const SPIN = `({ listEvents() { const s = Date.now(); while (Date.now() - s < 400) {} return []; } })`;
+    const first = f.client.call<Verdict>(f.judge.id, 'judge', { source: SPIN, typeId: TYPE });
+    // Queued ~400 ms behind the first, with a 200 ms budget: it still runs, and is judged.
+    const second = f.client.call<Verdict>(f.judge.id, 'judge', { source: HEAL_BROKEN, typeId: TYPE, deadline: Date.now() + 10000, budgetMs: 200 });
+    const [, v] = await Promise.all([first, second]);
+    assert.equal(v.pass, false, v.summary);
+    assert.equal(v.replay.verified, true);
+
+    const HANG = `({ listEvents() { while (true) {} } })`;
+    const t0 = Date.now();
+    const cut = await f.client.call<Verdict>(f.judge.id, 'judge', { source: HANG, typeId: TYPE, deadline: Date.now() + 10000, budgetMs: 300 });
+    const took = Date.now() - t0;
+    assert.equal(cut.pass, true, 'a hang cut off by the budget is not a contradiction');
+    assert.match(cut.summary, /judgment abandoned: the caller's deadline passed during replay/);
+    assert.ok(took < 2000, `stopped at the budget, not at the 5 s invocation timeout (took ${took} ms)`);
+  } finally { await f.stop(); }
+});
