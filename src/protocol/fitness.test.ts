@@ -115,6 +115,15 @@ test('the same question asked twice is answered in recorded order, so a retry re
   assert.ok(stub(ask) && 'replyText' in stub(ask)!, 'second and later asks get the success');
 });
 
+test('a call recorded by a handed id also matches by the name the registry gave it', () => {
+  const rec: InvocationRecording = { method: 'm', argsText: '{}', resultText: '1', at: 1,
+    calls: [{ target: 'b7e1-uuid', targetName: 'ScoreBoard', method: 'setScore', payloadText: '{"score":1}', replyText: 'true' }] };
+  const stub = stubFor(rec);
+  assert.deepEqual(stub({ target: 'ScoreBoard', method: 'setScore', payloadText: '{"score":1}' }), { replyText: 'true' });
+  assert.deepEqual(stubFor(rec)({ target: 'b7e1-uuid', method: 'setScore', payloadText: '{"score":1}' }), { replyText: 'true' });
+  assert.equal(stubFor(rec)({ target: 'Other', method: 'setScore', payloadText: '{"score":1}' }), undefined);
+});
+
 test('a recorded error is replayed as an error', async () => {
   const errored: InvocationRecording = {
     method: 'listEvents', argsText: '{"q":"all"}',

@@ -141,6 +141,17 @@ test('call() takes the shapes the live proxy takes: a null payload is {}, the ol
   assert.deepEqual(seen, ['Svc ping {}', 'Svc ping {}', 'Svc ping {"a":1}']);
 });
 
+test('a timer set by work that outlived its job never fires during the next job', async () => {
+  const inv = invoker();
+  // After returning, the leftover work arms a timer that would spin the worker for 600 ms.
+  const leaves = `({ async m() { void (async () => { for (let i = 0; i < 50; i++) await null; setTimeout(() => { const s = Date.now(); while (Date.now() - s < 600) {} }, 1); })(); return 1; } })`;
+  assert.equal(await inv(leaves, 'm', {}, noCalls), 1);
+  const t0 = Date.now();
+  assert.equal(await inv(`({ async f() { await new Promise(r => setTimeout(r, 20)); return 2; } })`, 'f', {}, noCalls), 2);
+  const took = Date.now() - t0;
+  assert.ok(took < 400, `the next job ran unblocked (${took} ms)`);
+});
+
 test('a disposed invoker refuses new jobs instead of starting another worker', async () => {
   const inv = invoker();
   assert.equal(await inv(`({ f() { return 1; } })`, 'f', {}, noCalls), 1);
