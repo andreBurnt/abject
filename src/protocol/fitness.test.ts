@@ -91,6 +91,30 @@ test('the stub is exact on payload: a different question gets no recorded answer
     payloadText: '{"headers":{"a":2,"b":1},"url":"https://example.test/events?q=all"}' }));
 });
 
+test('the same question asked twice is answered in recorded order, so a retry replays; past the recording the last answer repeats', async () => {
+  const flaky: InvocationRecording = {
+    method: 'listEvents', argsText: '{"q":"all"}',
+    calls: [
+      { target: 'HttpClient', method: 'get', payloadText: '{"url":"https://example.test/events?q=all"}', errorText: 'HTTP 503' },
+      { target: 'HttpClient', method: 'get', payloadText: '{"url":"https://example.test/events?q=all"}', replyText: JSON.stringify(httpReply) },
+    ],
+    resultText: JSON.stringify(events.map(e => e.name)), at: 1,
+  };
+  const retries = `
+    for (let i = 0; ; i++) {
+      try { const res = await call('HttpClient', 'get', { url: 'https://example.test/events?q=' + args.q }); return JSON.parse(res.body).map(e => e.name); }
+      catch (err) { if (i >= 2) throw err; }
+    }
+  `;
+  const v = await evaluate({ source: retries }, { invocations: [flaky] }, testInvoker, { liveSource: retries });
+  assert.equal(v.pass, true, v.summary);
+  assert.equal(v.replay.verified, true);
+  const stub = stubFor(flaky);
+  const ask = { target: 'HttpClient', method: 'get', payloadText: '{"url":"https://example.test/events?q=all"}' };
+  assert.deepEqual(stub(ask), { errorText: 'HTTP 503' });
+  assert.ok(stub(ask) && 'replyText' in stub(ask)!, 'second and later asks get the success');
+});
+
 test('a recorded error is replayed as an error', async () => {
   const errored: InvocationRecording = {
     method: 'listEvents', argsText: '{"q":"all"}',
