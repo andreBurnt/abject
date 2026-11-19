@@ -37,6 +37,25 @@ class FailingStorage extends Endpoint {
   constructor() { super('Storage'); this.on('get', () => { throw new Error('disk on fire'); }); }
 }
 
+/** Storage that holds its answer to `get` until release(), so a test can act while the judge waits on it. */
+class GatedStorage extends Endpoint {
+  values = new Map<string, unknown>();
+  readonly asked: Promise<void>;
+  private markAsked!: () => void;
+  private open!: () => void;
+  private readonly gate = new Promise<void>(r => { this.open = r; });
+  constructor() {
+    super('Storage');
+    this.asked = new Promise<void>(r => { this.markAsked = r; });
+    this.on('get', async (m: AbjectMessage) => {
+      this.markAsked();
+      await this.gate;
+      return structuredClone(this.values.get((m.payload as { key: string }).key) ?? null);
+    });
+  }
+  release(): void { this.open(); }
+}
+
 async function fixture(withStorage: boolean | 'failing' = true) {
   const bus = new MessageBus(), registry = new Registry(), objects: Abject[] = [registry];
   await registry.init(bus);
@@ -181,6 +200,33 @@ test('a judgment its caller stopped waiting for stops, answers unverified, and f
     assert.match(v.summary, /judgment abandoned: the caller's deadline passed during replay/);
     assert.ok(took < 2000, `stopped at the deadline, not at the 5 s invocation timeout (took ${took} ms)`);
   } finally { await f.stop(); }
+});
+
+test('a judge stopped while Storage is still answering builds no worker and answers unverified', async () => {
+  const bus = new MessageBus(), registry = new Registry(), objects: Abject[] = [registry];
+  await registry.init(bus);
+  const add = async <T extends Abject>(o: T): Promise<T> => {
+    o.setRegistryHint(registry.id); await o.init(bus); registry.registerObject(o.id, o.manifest); objects.push(o); return o;
+  };
+  const storage = await add(new GatedStorage());
+  storage.values.set(`invocations:${TYPE}`, [recording]);
+  const judge = await add(new FitnessJudge());
+  try {
+    // A draft that never returns: if a worker ran it, only the 5 s invocation timeout would end the judgment.
+    const HANG = `({ listEvents() { while (true) {} } })`;
+    const pending = judge.judge({ source: HANG, typeId: TYPE });
+    await storage.asked;
+    await (judge as any).onStop();   // the stop lands while the recordings are being read
+    const t0 = Date.now();
+    storage.release();
+    const v = await pending;
+    const took = Date.now() - t0;
+    assert.ok(took < 1000, `answered without running the draft on a worker (took ${took} ms)`);
+    assert.equal(v.pass, true, v.summary);
+    assert.equal(v.replay.verified, false);
+    assert.match(v.summary, /judgment abandoned: the judge stopped/);
+    assert.equal((judge as any).running, undefined, 'no worker was built after the stop');
+  } finally { for (const o of objects.reverse()) await o.stop(); }
 });
 
 test('a judgment whose deadline passed while it was queued answers at once', async () => {

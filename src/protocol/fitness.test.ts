@@ -301,6 +301,24 @@ test('replay stops early once maxFailures contradictions are found', async () =>
   assert.equal(r.failures.length, 3, 'collected exactly the reportable number');
   assert.equal(r.judged, 3, 'stopped after the third, did not replay all eight');
   assert.equal(r.pass, false);
+  assert.equal(r.detail, '3 contradicted in the first 3 recordings replayed, where replay stopped; 5 more were not replayed');
+});
+
+test('a verdict that stopped at the third contradiction says how much it replayed', async () => {
+  const many = Array.from({ length: 8 }, (_, i) => ({ ...recording, at: i }));
+  const v = await evaluate({ source: BROKEN }, { invocations: many }, testInvoker);
+  assert.equal(v.pass, false);
+  assert.equal(v.replay.judged, 3);
+  assert.equal(v.replay.detail, '3 contradicted in the first 3 recordings replayed, where replay stopped; 5 more were not replayed');
+  assert.equal(v.evidence.detail, '3 of 8 recordings replayed');
+  assert.match(v.summary, /^fitness: FAIL — 3 contradicted in the first 3 recordings replayed, where replay stopped; 5 more were not replayed: listEvents/);
+});
+
+test('a verdict that replayed every recording carries no stop note', async () => {
+  const two = [recording, { ...recording, at: 2 }];
+  const v = await evaluate({ source: BROKEN }, { invocations: two }, testInvoker);
+  assert.equal(v.replay.detail, '2 of 2 recordings contradicted');
+  assert.equal(v.evidence.detail, '2 recordings replayed');
 });
 
 test('the summary line is built from the flags, not the wording', () => {

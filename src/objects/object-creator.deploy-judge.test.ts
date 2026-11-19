@@ -132,7 +132,7 @@ test('a deliberate behaviour change is not a wall: stating the intent deploys an
   try {
     const res = await f.deployUpdate(HEAL_BROKEN, { intendedChange: 'the user asked for ids, not names' });
     assert.equal(res.ok, true, JSON.stringify(res));
-    assert.match(res.data.fitness, /contradicted 1 of 1 recording.*deployed on stated intent: the user asked for ids, not names/);
+    assert.match(res.data.fitness, /^fitness: Calendar: 1 of 1 recording contradicted; deployed on stated intent: the user asked for ids, not names$/);
     assert.equal(await f.client.call(f.target.id, 'getSource'), HEAL_BROKEN);
   } finally { await f.stop(); }
 });
@@ -382,6 +382,33 @@ test('a deploy_spawn retry after the spawn keeps the act\'s intendedChange and i
     assert.equal(ended.success, false, JSON.stringify(ended));
     assert.match(ended.error, /cancelled or finished; the live object is untouched/);
     assert.equal(await f.client.call(f.target.id, 'getSource'), HEAL_BROKEN);
+  } finally { await f.stop(); }
+});
+
+test('a repeat deploy_spawn that contradicts a recording is refused as deploy_spawn, and told to repeat that verb', async () => {
+  const f = await fixture({ recordings: [recording] });
+  try {
+    const state = { kind: 'create', goal: 'calendar', deps: new Map(), draftSource: HEAL_BROKEN, draftManifest: manifest,
+      usedObjects: [], turn: 3, turnLog: [] as Array<{ action: string; summary: string }>, renderedGuides: new Set(), lastValidation: {}, spawnedObjectId: f.target.id };
+    f.creator.tasks.set('r1', { taskId: 'r1', prompt: 'calendar', callerId: f.client.id, state });
+    const res = await f.creator.handleAct('r1', { action: 'deploy_spawn' }, f.client.id);
+    assert.equal(res.success, false, JSON.stringify(res));
+    assert.match(state.turnLog.at(-1)!.summary, /^deploy_spawn: refused/, 'the turn log names the verb the agent used');
+    assert.match(res.error, /repeat this deploy_spawn with \{"intendedChange"/);
+    assert.equal(await f.client.call(f.target.id, 'getSource'), LIVE, 'the live object is untouched');
+  } finally { await f.stop(); }
+});
+
+test('a repeat deploy_spawn of source that does not parse is refused as deploy_spawn', async () => {
+  const f = await fixture({ recordings: [recording] });
+  try {
+    const state = { kind: 'create', goal: 'calendar', deps: new Map(), draftSource: '({ listEvents( { ', draftManifest: manifest,
+      usedObjects: [], turn: 3, turnLog: [] as Array<{ action: string; summary: string }>, renderedGuides: new Set(), lastValidation: {}, spawnedObjectId: f.target.id };
+    f.creator.tasks.set('p1', { taskId: 'p1', prompt: 'calendar', callerId: f.client.id, state });
+    const res = await f.creator.handleAct('p1', { action: 'deploy_spawn' }, f.client.id);
+    assert.equal(res.success, false, JSON.stringify(res));
+    assert.match(state.turnLog.at(-1)!.summary, /^deploy_spawn: refused — staged source does not parse/);
+    assert.equal(await f.client.call(f.target.id, 'getSource'), LIVE);
   } finally { await f.stop(); }
 });
 
